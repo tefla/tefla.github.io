@@ -625,7 +625,9 @@ Resources:`;for(let t of c){if(!t||typeof t!=`string`)throw Error(`@supabase/aut
   };
 
   // ---------- image import ----------
-  function loadFile(file) {
+  // onload (optional) fires after the image is in and the pattern pipeline
+  // has run — the cloud load path (issue 07) restores saved settings then
+  function loadFile(file, onload) {
     if (!file || file.type.indexOf('image/') !== 0) return;
     var reader = new FileReader();
     reader.onload = function (e) {
@@ -641,6 +643,7 @@ Resources:`;for(let t of c){if(!t||typeof t!=`string`)throw Error(`@supabase/aut
         initCropCanvas();
         autoPickK();
         process();
+        if (onload) onload();
       };
       img.src = e.target.result;
     };
@@ -1870,6 +1873,7 @@ Resources:`;for(let t of c){if(!t||typeof t!=`string`)throw Error(`@supabase/aut
     serialize: serializeSettings,
     restore: restoreSettings,
     hasImage: function () { return !!state.img; },
+    getImage: function () { return state.img; },
     loadFile: loadFile
   };
 })();
@@ -1905,6 +1909,70 @@ Resources:`;for(let t of c){if(!t||typeof t!=`string`)throw Error(`@supabase/aut
     msg('Sign in first — use the Sign in button at the top of the page.', true);
     return null;
   }
+
+  // ---------- source-image storage (issue 07) ----------
+  var IMAGE_MAX_SIDE = 2048; // downscale bound for uploads
+
+  function downscaleToBlob(img, maxSide) {
+    var w = img.naturalWidth, h = img.naturalHeight;
+    var scale = Math.min(1, maxSide / Math.max(w, h));
+    var c = document.createElement('canvas');
+    c.width = Math.max(1, Math.round(w * scale));
+    c.height = Math.max(1, Math.round(h * scale));
+    var ctx = c.getContext('2d');
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';
+    ctx.drawImage(img, 0, 0, c.width, c.height);
+    return new Promise(function (resolve, reject) {
+      c.toBlob(function (b) {
+        if (b) resolve(b); else reject(new Error('image encode failed'));
+      }, 'image/png');
+    });
+  }
+
+  // upload (or clear) the project's source image and point the row at it
+  function saveImageFor(id) {
+    if (!window.tuftState.hasImage()) {
+      return window.tuftCloud.deleteProjectImage(id).then(function () {
+        return client.from('projects').update({ image_path: null }).eq('id', id)
+          .then(function (r) { if (r.error) throw r.error; });
+      });
+    }
+    return downscaleToBlob(window.tuftState.getImage(), IMAGE_MAX_SIDE).then(function (blob) {
+      var path = window.tuftCloud.user.id + '/' + id + '.png';
+      return client.storage.from('tuft-images')
+        .upload(path, blob, { upsert: true, contentType: 'image/png' })
+        .then(function (r) {
+          if (r.error) throw r.error;
+          return client.from('projects').update({ image_path: path }).eq('id', id)
+            .then(function (u) { if (u.error) throw u.error; });
+        });
+    });
+  }
+
+  // fetch a stored image and push it through the app's normal image-load
+  // path (FileReader -> Image -> process), resolving once the chart has
+  // regenerated — the caller then restores the saved settings on top
+  window.tuftCloud.loadImageFromStorage = function (path) {
+    return client.storage.from('tuft-images').download(path).then(function (res) {
+      if (res.error) throw res.error;
+      var file = new File([res.data], 'project-image.png', { type: res.data.type || 'image/png' });
+      return new Promise(function (resolve) {
+        window.tuftState.loadFile(file, resolve);
+      });
+    });
+  };
+
+  // remove a project's storage object (no orphans on delete/overwrite)
+  window.tuftCloud.deleteProjectImage = function (projectId) {
+    return client.from('projects').select('image_path').eq('id', projectId).single()
+      .then(function (res) {
+        if (res.error) throw res.error;
+        if (!res.data.image_path) return;
+        return client.storage.from('tuft-images').remove([res.data.image_path])
+          .then(function (r) { if (r.error) throw r.error; });
+      });
+  };
 
   function renderList(rows) {
     if (!rows.length) { guestRow('No saved projects yet'); return; }
@@ -1951,6 +2019,9 @@ Resources:`;for(let t of c){if(!t||typeof t!=`string`)throw Error(`@supabase/aut
           .insert({ app: 'tuft', name: name, data: data })
           .select('id')
           .then(function (r) { if (r.error) throw r.error; return r.data[0].id; });
+      })
+      .then(function (id) {
+        return saveImageFor(id).then(function () { return id; });
       })
       .then(function (id) {
         projSaveBtn.disabled = false;
