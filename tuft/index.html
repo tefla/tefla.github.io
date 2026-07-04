@@ -116,6 +116,14 @@
   .authbar .authmsg { font-size: 12px; color: var(--ink-soft); }
   .authbar .authmsg.err { color: var(--warn); }
   .authbar .useremail { font-family: 'JBM', ui-monospace, monospace; font-size: 12.5px; color: var(--ink-soft); }
+  .projbar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 14px; }
+  .projbar input[type="text"] {
+    font-family: 'JBM', ui-monospace, monospace; font-size: 13px;
+    padding: 5px 9px; border-radius: 5px; border: 1px solid var(--line);
+    background: var(--bg); color: var(--ink); width: 240px;
+  }
+  .projbar .authmsg { font-size: 12px; color: var(--ink-soft); }
+  .projbar .authmsg.err { color: var(--warn); }
   h1 {
     font-family: 'JBM', ui-monospace, monospace;
     font-weight: 700;
@@ -463,7 +471,27 @@
     <textarea class="shoptext" id="shopText" readonly onclick="this.select()"></textarea>
   </section>
 
-  <footer class="foot">Everything runs locally in this page — nothing is uploaded anywhere.</footer>
+  <section class="panel">
+    <h2>5 — Cloud projects</h2>
+    <div class="projbar">
+      <input type="text" id="projName" placeholder="Project name" maxlength="120" />
+      <button class="autobtn" id="projSaveBtn" type="button">Save</button>
+      <button class="autobtn" id="projRefreshBtn" type="button">Refresh</button>
+      <span class="authmsg hidden" id="projMsg"></span>
+    </div>
+    <div style="overflow-x:auto">
+      <table class="shop">
+        <thead>
+          <tr><th>Project</th><th>Updated</th><th></th><th></th></tr>
+        </thead>
+        <tbody id="projList">
+          <tr><td colspan="4" style="color:var(--ink-soft)">Sign in to save and load projects</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <footer class="foot">Everything runs locally in this page — nothing leaves your browser unless you sign in and save a project to your account.</footer>
 </div>
 
 <!-- pinned @supabase/supabase-js UMD build, vendored + embedded by build.py
@@ -492,7 +520,7 @@ Resources:`;for(let t of c){if(!t||typeof t!=`string`)throw Error(`@supabase/aut
   // Cloud auth (magic link). Guests see no behaviour change — nothing here
   // touches the pattern pipeline. window.tuftCloud is the seam the
   // save/load features (issues 06/07) build on.
-  var client = supabase.createClient('https://nrfeojccyejcflfjuyqv.supabase.co', 'sb_publishable_YmGsIGakesw-Xb_rnN_ouQ_jdjBVg');
+  var client = supabase.createClient('https://nrfeojccyejcflfjuyqv.supabase.co', 'sb_publishable_YmGsIGakesw-Xb_rnN_ouQ_jdjBVgfc');
   window.tuftCloud = { client: client, user: null };
 
   var $ = function (id) { return document.getElementById(id); };
@@ -1767,6 +1795,221 @@ Resources:`;for(let t of c){if(!t||typeof t!=`string`)throw Error(`@supabase/aut
     if (!state.img) return;
     autoPickK();
     process();
+  });
+
+  // ---------- cloud project state (save/load seam) ----------
+  // serializeSettings captures EVERY knob/selection; restoreSettings applies
+  // one back and re-runs the pipeline. serialize(restore(s)) === s exactly —
+  // proven by tests/save_load_test.py.
+  function serializeSettings() {
+    return {
+      v: 1,
+      detailSize: parseInt(els.detailSize.value, 10),
+      kColors: parseInt(els.kColors.value, 10),
+      matW: parseFloat(els.matW.value),
+      matH: parseFloat(els.matH.value),
+      density: parseFloat(els.density.value),
+      strands: parseInt(els.strands.value, 10),
+      buffer: parseFloat(els.buffer.value),
+      cropRect: { x: state.cropRect.x, y: state.cropRect.y, w: state.cropRect.w, h: state.cropRect.h },
+      advanced: state.advanced,
+      weights: state.weights ? Array.prototype.slice.call(state.weights) : null,
+      yarnOverrides: JSON.parse(JSON.stringify(state.yarnOverrides || {})),
+      yarnBrand: els.yarnBrand.value,
+      yarnPreview: els.yarnPreviewChk.checked
+    };
+  }
+
+  function restoreSettings(s) {
+    els.detailSize.value = s.detailSize;
+    els.kColors.value = s.kColors;
+    els.kVal.textContent = s.kColors;
+    els.matW.value = s.matW; els.matH.value = s.matH;
+    els.density.value = s.density; els.strands.value = s.strands; els.buffer.value = s.buffer;
+    state.cropRect = s.cropRect ? { x: s.cropRect.x, y: s.cropRect.y, w: s.cropRect.w, h: s.cropRect.h } : FULL_CROP;
+    state.advanced = !!s.advanced;
+    els.advToggle.textContent = state.advanced ? 'Hide' : 'Show';
+    els.advToggle.setAttribute('aria-expanded', state.advanced ? 'true' : 'false');
+    els.advBody.classList.toggle('hidden', !state.advanced);
+    els.yarnBrand.value = s.yarnBrand || '';
+    setActiveLine(els.yarnBrand.value);
+    els.yarnBrandHint.textContent = activeLine
+      ? activeLine.fiber + ' · ' + (activeLine.coneGrams ? activeLine.coneGrams + 'g ' + activeLine.unit + 's' : 'unit weight unknown') + ' · ' + activeLine.url
+      : 'Pick a supplier to match every pattern colour to the nearest yarn they sell';
+
+    if (state.img) {
+      drawCropOverlay();
+      updateCropDimsLabel();
+      computeCentroids();
+      resetAdvanced();
+      if (s.weights && s.weights.length === state.trained.k) {
+        state.weights = new Float32Array(s.weights);
+      } else if (s.weights) {
+        throw new Error('saved weights length ' + s.weights.length + ' does not match k=' + state.trained.k);
+      }
+      state.yarnOverrides = s.yarnOverrides ? JSON.parse(JSON.stringify(s.yarnOverrides)) : {};
+      els.yarnPreviewChk.checked = false; // never inherit a stale preview state
+      buildAdvancedRows();
+      relabelAndRender();
+      if (s.yarnPreview && state.advanced && activeLine) {
+        els.yarnPreviewChk.checked = true;
+        renderColour(state.gridCols, state.gridRows, state.grid, state.palette, state.smoothedBlobs, computeYarnDisplayHexes());
+      }
+    } else {
+      // no image yet: park the values so they apply when one is loaded
+      els.detailVal.textContent = s.detailSize + ' px';
+      els.matWVal.textContent = s.matW; els.matHVal.textContent = s.matH;
+      els.densityVal.textContent = s.density; els.strandsVal.textContent = s.strands;
+      els.bufferVal.textContent = s.buffer;
+      state.weights = s.weights ? new Float32Array(s.weights) : null;
+      state.yarnOverrides = s.yarnOverrides ? JSON.parse(JSON.stringify(s.yarnOverrides)) : {};
+    }
+  }
+
+  window.tuftState = {
+    serialize: serializeSettings,
+    restore: restoreSettings,
+    hasImage: function () { return !!state.img; },
+    loadFile: loadFile
+  };
+})();
+</script>
+
+<script>
+(function () {
+  'use strict';
+  // Cloud projects panel (issue 06): named save/load/delete of the full
+  // settings state against the Supabase `projects` table (app = 'tuft').
+  // Guests see the panel; using it prompts sign-in.
+  var client = window.tuftCloud.client;
+  var $ = function (id) { return document.getElementById(id); };
+  var projName = $('projName'), projSaveBtn = $('projSaveBtn'),
+      projRefreshBtn = $('projRefreshBtn'), projMsg = $('projMsg'), projList = $('projList');
+
+  function msg(text, isError) {
+    projMsg.textContent = text;
+    projMsg.classList.toggle('err', !!isError);
+    projMsg.classList.toggle('hidden', !text);
+  }
+
+  function esc(s) {
+    return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  }
+
+  function guestRow(text) {
+    projList.innerHTML = '<tr><td colspan="4" style="color:var(--ink-soft)">' + esc(text) + '</td></tr>';
+  }
+
+  function requireUser() {
+    if (window.tuftCloud.user) return window.tuftCloud.user;
+    msg('Sign in first — use the Sign in button at the top of the page.', true);
+    return null;
+  }
+
+  function renderList(rows) {
+    if (!rows.length) { guestRow('No saved projects yet'); return; }
+    projList.innerHTML = rows.map(function (r) {
+      var when = r.updated_at ? new Date(r.updated_at).toLocaleString() : '';
+      return '<tr data-id="' + esc(r.id) + '">' +
+        '<td>' + esc(r.name) + '</td>' +
+        '<td class="hex">' + esc(when) + '</td>' +
+        '<td><button class="autobtn projLoad" type="button">Load</button></td>' +
+        '<td><button class="autobtn projDelete" type="button">Delete</button></td>' +
+        '</tr>';
+    }).join('');
+  }
+
+  function refreshList() {
+    if (!window.tuftCloud.user) { guestRow('Sign in to save and load projects'); return Promise.resolve(); }
+    return client.from('projects')
+      .select('id,name,updated_at')
+      .eq('app', 'tuft')
+      .order('updated_at', { ascending: false })
+      .then(function (res) {
+        if (res.error) { msg('Could not list projects: ' + res.error.message, true); return; }
+        renderList(res.data);
+      });
+  }
+
+  projSaveBtn.addEventListener('click', function () {
+    if (!requireUser()) return;
+    var name = projName.value.trim();
+    if (!name) { msg('Give the project a name first.', true); projName.focus(); return; }
+    var data = window.tuftState.serialize();
+    projSaveBtn.disabled = true;
+    msg('Saving…');
+    client.from('projects').select('id').eq('app', 'tuft').eq('name', name)
+      .then(function (res) {
+        if (res.error) throw res.error;
+        if (res.data.length) {
+          return client.from('projects')
+            .update({ data: data, updated_at: new Date().toISOString() })
+            .eq('id', res.data[0].id)
+            .then(function (r) { if (r.error) throw r.error; return res.data[0].id; });
+        }
+        return client.from('projects')
+          .insert({ app: 'tuft', name: name, data: data })
+          .select('id')
+          .then(function (r) { if (r.error) throw r.error; return r.data[0].id; });
+      })
+      .then(function (id) {
+        projSaveBtn.disabled = false;
+        msg('Saved “' + name + '”.');
+        window.tuftCloud.onSaved && window.tuftCloud.onSaved(id, name);
+        return refreshList();
+      })
+      .catch(function (err) {
+        projSaveBtn.disabled = false;
+        msg('Save failed: ' + err.message, true);
+      });
+  });
+
+  projRefreshBtn.addEventListener('click', function () {
+    if (!requireUser()) return;
+    refreshList();
+  });
+
+  projList.addEventListener('click', function (e) {
+    var btn = e.target;
+    if (!btn.classList || (!btn.classList.contains('projLoad') && !btn.classList.contains('projDelete'))) return;
+    if (!requireUser()) return;
+    var row = btn.closest('tr');
+    var id = row.getAttribute('data-id');
+    if (btn.classList.contains('projLoad')) {
+      msg('Loading…');
+      client.from('projects').select('id,name,data,image_path').eq('id', id).single()
+        .then(function (res) {
+          if (res.error) throw res.error;
+          var finish = function () {
+            window.tuftState.restore(res.data.data);
+            projName.value = res.data.name;
+            msg('Loaded “' + res.data.name + '”.');
+          };
+          if (res.data.image_path && window.tuftCloud.loadImageFromStorage) {
+            return window.tuftCloud.loadImageFromStorage(res.data.image_path).then(finish);
+          }
+          finish();
+        })
+        .catch(function (err) { msg('Load failed: ' + err.message, true); });
+    } else {
+      msg('Deleting…');
+      var chain = window.tuftCloud.deleteProjectImage
+        ? window.tuftCloud.deleteProjectImage(id)
+        : Promise.resolve();
+      chain
+        .then(function () { return client.from('projects').delete().eq('id', id); })
+        .then(function (res) {
+          if (res.error) throw res.error;
+          msg('Deleted.');
+          return refreshList();
+        })
+        .catch(function (err) { msg('Delete failed: ' + err.message, true); });
+    }
+  });
+
+  client.auth.onAuthStateChange(function () {
+    msg('');
+    refreshList();
   });
 })();
 </script>
