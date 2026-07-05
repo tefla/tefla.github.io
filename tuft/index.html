@@ -535,6 +535,16 @@ Resources:`;for(let t of c){if(!t||typeof t!=`string`)throw Error(`@supabase/aut
     authMsg.classList.toggle('hidden', !text);
   }
 
+  // Redirect target for auth flows: this page, without hash/query. The
+  // trailing slash is stripped (except at the site root) because Supabase's
+  // redirect allowlist glob `*` does not match across `/` — `/tuft` passes
+  // where `/tuft/` collapses to the Site URL. GitHub Pages 301s `/tuft`
+  // back to `/tuft/` and browsers carry the token fragment across the hop.
+  function pageUrl() {
+    return location.origin +
+      (location.pathname === '/' ? '/' : location.pathname.replace(/\/$/, ''));
+  }
+
   function render(session) {
     var user = session ? session.user : null;
     window.tuftCloud.user = user;
@@ -568,7 +578,7 @@ Resources:`;for(let t of c){if(!t||typeof t!=`string`)throw Error(`@supabase/aut
     showMsg('Sending…');
     client.auth.signInWithOtp({
       email: email,
-      options: { emailRedirectTo: location.href.split('#')[0].split('?')[0] }
+      options: { emailRedirectTo: pageUrl() }
     }).then(function (res) {
       sendLinkBtn.disabled = false;
       if (res.error) {
@@ -579,6 +589,31 @@ Resources:`;for(let t of c){if(!t||typeof t!=`string`)throw Error(`@supabase/aut
     }, function (err) {
       sendLinkBtn.disabled = false;
       showMsg('Could not send the link: ' + err.message, true);
+    });
+  });
+
+  // Google OAuth (issue 08). The button stays hidden unless the project
+  // actually has the provider enabled, so an unconfigured deploy shows no
+  // dead button. /auth/v1/settings is a public, key-scoped endpoint.
+  var googleBtn = $('googleBtn');
+  fetch('https://nrfeojccyejcflfjuyqv.supabase.co/auth/v1/settings', {
+    headers: { apikey: 'sb_publishable_YmGsIGakesw-Xb_rnN_ouQ_jdjBVgfc' }
+  }).then(function (r) { return r.json(); }).then(function (s) {
+    if (s && s.external && s.external.google) googleBtn.classList.remove('hidden');
+  }).catch(function () { /* settings unreachable — leave the button hidden */ });
+
+  googleBtn.addEventListener('click', function () {
+    googleBtn.disabled = true;
+    showMsg('Redirecting to Google…');
+    client.auth.signInWithOAuth({
+      provider: 'google',
+      options: { redirectTo: pageUrl() }
+    }).then(function (res) {
+      if (res.error) {
+        googleBtn.disabled = false;
+        showMsg('Google sign-in failed: ' + res.error.message, true);
+      }
+      // on success the browser navigates away; nothing to do here
     });
   });
 
