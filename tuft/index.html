@@ -276,8 +276,8 @@
   .swatch { width: 22px; height: 22px; border-radius: 4px; border: 1px solid rgba(0,0,0,0.15); flex-shrink: 0; }
   .letter {
     font-family: 'JBM', ui-monospace, monospace; font-weight: 700; font-size: 13px;
-    width: 20px; height: 20px; border-radius: 4px; background: var(--surface-2);
-    display: flex; align-items: center; justify-content: center; flex-shrink: 0;
+    min-width: 20px; height: 20px; padding: 0 3px; border-radius: 4px; background: var(--surface-2);
+    display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; box-sizing: border-box;
   }
   .hex { font-family: 'JBM', ui-monospace, monospace; color: var(--ink-soft); }
   tfoot td { font-weight: 700; border-top: 1.5px solid var(--ink); border-bottom: none; padding-top: 12px; }
@@ -339,6 +339,16 @@
     <div class="cropWrap hidden" id="cropWrap">
       <div class="cropHead">
         <span class="hint">Drag to select the region to use — drag inside the box to move it, corners to resize</span>
+        <select id="cropAspect" class="yarnPick" style="width:auto">
+          <option value="free">Free</option>
+          <option value="mat">Match mat W:H</option>
+          <option value="1.5">3:2</option>
+          <option value="0.6667">2:3</option>
+          <option value="1.3333">4:3</option>
+          <option value="0.75">3:4</option>
+          <option value="1.7778">16:9</option>
+          <option value="0.5625">9:16</option>
+        </select>
         <button class="autobtn" id="resetCropBtn" type="button">Use full image</button>
       </div>
       <div class="cropCanvasFrame">
@@ -359,7 +369,7 @@
       <div class="field">
         <label for="kColors">Colours <span class="val" id="kVal">3</span></label>
         <div class="row">
-          <input type="range" id="kColors" min="2" max="8" value="3" />
+          <input type="range" id="kColors" min="2" max="12" value="3" />
           <button class="autobtn" id="autoBtn" type="button">Auto</button>
         </div>
         <span class="hint">Detected automatically when you load an image — drag to override, Auto to re-detect</span>
@@ -386,6 +396,20 @@
         <label for="buffer">Waste buffer <span class="val"><span id="bufferVal">15</span>%</span></label>
         <div class="row"><input type="range" id="buffer" min="0" max="40" step="5" value="15" /></div>
         <span class="hint">Covers trim waste, mistakes, and colour changes — real usage is never perfectly efficient</span>
+      </div>
+      <div class="field">
+        <label for="roundPct">Corner radius <span class="val"><span id="roundVal">0</span>%</span></label>
+        <div class="row"><input type="range" id="roundPct" min="0" max="50" value="0" /></div>
+        <span class="hint" id="roundHint">% of the shorter side</span>
+      </div>
+      <div class="field">
+        <label for="borderPct">Border <span class="val"><span id="borderVal">0</span>%</span></label>
+        <div class="row"><input type="range" id="borderPct" min="0" max="25" value="0" /></div>
+        <span class="hint" id="borderHint">% of the shorter side</span>
+      </div>
+      <div class="field" id="borderColorField">
+        <label for="borderColor">Border colour</label>
+        <div class="row"><input type="color" id="borderColor" value="#222222" /></div>
       </div>
       <div class="field" style="grid-column: 1 / -1;" id="advField">
         <label>Advanced
@@ -641,9 +665,10 @@ Resources:`;for(let t of c){if(!t||typeof t!=`string`)throw Error(`@supabase/aut
   ['dropzone','fileInput','thumb','dzTitle','dzSub',
    'detailSize','detailVal','kColors','kVal',
    'autoBtn','matW','matH','matWVal','matHVal','density','densityVal','strands','strandsVal','buffer','bufferVal',
+   'roundPct','roundVal','roundHint','borderPct','borderVal','borderHint','borderColor','borderColorField',
    'colourCanvas','colourFrame','colourPlaceholder','bwCanvas','bwFrame','bwPlaceholder',
    'dlColourPng','dlColourSvg','dlBwPng','shopMeta','shopBody','shopTotal',
-   'cropWrap','cropCanvas','cropDims','resetCropBtn',
+   'cropWrap','cropCanvas','cropDims','resetCropBtn','cropAspect',
    'shopHead','shopTotalLabel','yarnBrand','yarnBrandHint',
    'copyBtn','copyStatus','shopText',
    'advField','advToggle','advBody','advBoundaries','advResetBtn',
@@ -656,7 +681,8 @@ Resources:`;for(let t of c){if(!t||typeof t!=`string`)throw Error(`@supabase/aut
 
   var state = {
     img: null, gridCols: 8, gridRows: 8, palette: null, grid: null, smoothedBlobs: null, counts: null, totalCells: 0, cropRect: FULL_CROP,
-    advanced: false, weights: null, yarnOverrides: {}, advRowsK: 0
+    advanced: false, weights: null, yarnOverrides: {}, advRowsK: 0,
+    roundPct: 0, borderPct: 0, borderHex: '#222222', border: null
   };
 
   // ---------- image import ----------
@@ -704,6 +730,68 @@ Resources:`;for(let t of c){if(!t||typeof t!=`string`)throw Error(`@supabase/aut
   // ---------- crop ----------
   var cropDrag = null;
   var CROP_HANDLE_PX = 10;
+
+  // null = free; otherwise a numeric width/height ratio. The crop canvas is
+  // scaled uniformly from the image (one `scale` for both axes in
+  // initCropCanvas), so display-px ratio == image-px ratio — no conversion needed.
+  function cropAspectRatio() {
+    var v = els.cropAspect.value;
+    if (v === 'free') return null;
+    if (v === 'mat') return (parseFloat(els.matW.value) || 1) / (parseFloat(els.matH.value) || 1);
+    return parseFloat(v);
+  }
+
+  // shared drag geometry for both 'draw' (origin = drag start) and 'resize'
+  // (origin = the fixed opposite corner): grows the rect from origin toward
+  // pos, forcing w/h to AR when locked, and clamps within [0,w]x[0,h] by
+  // capping by the room actually available in the drag direction — pos is
+  // already clamped to the canvas by cropPointerPos, so this never overshoots.
+  function rectFromDragOrigin(originX, originY, pos, w, h, AR) {
+    var dx = pos.x - originX, dy = pos.y - originY;
+    var dirX = dx < 0 ? -1 : 1, dirY = dy < 0 ? -1 : 1;
+    var rawW = Math.abs(dx), rawH = Math.abs(dy);
+    var maxW = dirX < 0 ? originX : (w - originX);
+    var maxH = dirY < 0 ? originY : (h - originY);
+    var rw, rh;
+    if (AR == null) {
+      rw = rawW; rh = rawH;
+    } else {
+      var dw = rawW, dh = rawH;
+      if (dh === 0 || dw / dh > AR) dh = dw / AR; else dw = dh * AR;
+      rw = Math.min(dw, maxW, maxH * AR);
+      rh = rw / AR;
+    }
+    return { x: dirX < 0 ? originX - rw : originX, y: dirY < 0 ? originY - rh : originY, w: rw, h: rh };
+  }
+
+  // largest rect of ratio AR, centred at (cx,cy), that fits within
+  // [0,boundW]x[0,boundH] and does not exceed maxW/maxH (defaults to the
+  // bounds themselves) — the one routine behind cropAspect change, mat
+  // relock, and "Use full image" under a lock.
+  function largestRectOfRatio(cx, cy, boundW, boundH, AR, maxW, maxH) {
+    if (maxW == null) maxW = boundW;
+    if (maxH == null) maxH = boundH;
+    var w = Math.min(maxW, boundW), h = w / AR;
+    if (h > Math.min(maxH, boundH)) { h = Math.min(maxH, boundH); w = h * AR; }
+    var x = Math.max(0, Math.min(boundW - w, cx - w / 2));
+    var y = Math.max(0, Math.min(boundH - h, cy - h / 2));
+    return { x: x, y: y, w: w, h: h };
+  }
+
+  // re-fit the CURRENT crop to the active lock ratio, keeping its centre and
+  // capping the new rect to the old crop's own footprint (never grows past
+  // what was already selected just because the ratio changed)
+  function refitCropToAspect() {
+    var AR = cropAspectRatio();
+    if (AR == null || !state.img) return;
+    var w = els.cropCanvas.width, h = els.cropCanvas.height;
+    var rect = cropRectDisplayPx();
+    var fit = largestRectOfRatio(rect.x + rect.w / 2, rect.y + rect.h / 2, w, h, AR, rect.w, rect.h);
+    state.cropRect = { x: fit.x / w, y: fit.y / h, w: fit.w / w, h: fit.h / h };
+    drawCropOverlay();
+    updateCropDimsLabel();
+    process();
+  }
 
   function initCropCanvas() {
     var maxSide = 480;
@@ -802,11 +890,11 @@ Resources:`;for(let t of c){if(!t||typeof t!=`string`)throw Error(`@supabase/aut
     var pos = cropPointerPos(e);
     var w = els.cropCanvas.width, h = els.cropCanvas.height, rect;
     if (cropDrag.mode === 'draw') {
-      rect = { x: Math.min(cropDrag.startX, pos.x), y: Math.min(cropDrag.startY, pos.y), w: Math.abs(pos.x - cropDrag.startX), h: Math.abs(pos.y - cropDrag.startY) };
+      rect = rectFromDragOrigin(cropDrag.startX, cropDrag.startY, pos, w, h, cropAspectRatio());
     } else if (cropDrag.mode === 'move') {
       rect = { x: Math.max(0, Math.min(w - cropDrag.w, pos.x - cropDrag.offsetX)), y: Math.max(0, Math.min(h - cropDrag.h, pos.y - cropDrag.offsetY)), w: cropDrag.w, h: cropDrag.h };
     } else {
-      rect = { x: Math.min(cropDrag.anchor.x, pos.x), y: Math.min(cropDrag.anchor.y, pos.y), w: Math.abs(pos.x - cropDrag.anchor.x), h: Math.abs(pos.y - cropDrag.anchor.y) };
+      rect = rectFromDragOrigin(cropDrag.anchor.x, cropDrag.anchor.y, pos, w, h, cropAspectRatio());
     }
     state.cropRect = { x: rect.x / w, y: rect.y / h, w: rect.w / w, h: rect.h / h };
     drawCropOverlay();
@@ -824,9 +912,18 @@ Resources:`;for(let t of c){if(!t||typeof t!=`string`)throw Error(`@supabase/aut
   els.cropCanvas.addEventListener('pointercancel', endCropDrag);
 
   els.resetCropBtn.addEventListener('click', function () {
-    state.cropRect = FULL_CROP;
+    var AR = cropAspectRatio();
+    if (AR != null && state.img) {
+      var w = els.cropCanvas.width, h = els.cropCanvas.height;
+      var fit = largestRectOfRatio(w / 2, h / 2, w, h, AR);
+      state.cropRect = { x: fit.x / w, y: fit.y / h, w: fit.w / w, h: fit.h / h };
+    } else {
+      state.cropRect = FULL_CROP;
+    }
     if (state.img) { drawCropOverlay(); updateCropDimsLabel(); process(); }
   });
+
+  els.cropAspect.addEventListener('change', refitCropToAspect);
 
   // ---------- colour math ----------
   function luminance(c) { return 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2]; }
@@ -1078,6 +1175,49 @@ Resources:`;for(let t of c){if(!t||typeof t!=`string`)throw Error(`@supabase/aut
     return Math.max(2, OUTPUT_LONG_SIDE / Math.max(cols, rows));
   }
 
+  // ---- finishing geometry (corner rounding + border) — cell units ----
+  // signed-distance rounded-rect inside test: a point is inside if it clears
+  // the straight edges and, within `rr` of a corner, falls inside the corner's
+  // quarter-circle
+  function insideRoundRect(x, y, x0, y0, x1, y1, rr) {
+    if (x < x0 || x > x1 || y < y0 || y > y1) return false;
+    var qx = Math.max(x0 + rr - x, 0, x - (x1 - rr));
+    var qy = Math.max(y0 + rr - y, 0, y - (y1 - rr));
+    return qx * qx + qy * qy <= rr * rr;
+  }
+
+  // R = outer corner radius, B = border width, Ri = inner corner radius —
+  // all in cell units, all capped so an aggressive slider can't invert the
+  // shape (radius/border can never exceed half the shorter side)
+  function finishingGeometry(cols, rows) {
+    var shorter = Math.min(cols, rows);
+    var R = Math.min(shorter / 2, state.roundPct / 100 * shorter);
+    var B = Math.min(shorter / 2, state.borderPct / 100 * shorter);
+    return { R: R, B: B, Ri: Math.max(0, R - B), active: state.roundPct > 0 || state.borderPct > 0 };
+  }
+
+  // rounded-rect path via arcTo (safe cross-browser, no ctx.roundRect dependency)
+  function roundRectPath(ctx, x, y, w, h, rr) {
+    rr = Math.max(0, Math.min(rr, w / 2, h / 2));
+    ctx.beginPath();
+    ctx.moveTo(x + rr, y);
+    ctx.arcTo(x + w, y, x + w, y + h, rr);
+    ctx.arcTo(x + w, y + h, x, y + h, rr);
+    ctx.arcTo(x, y + h, x, y, rr);
+    ctx.arcTo(x, y, x + w, y, rr);
+    ctx.closePath();
+  }
+
+  // same shape as an SVG path `d` string, for the vector export
+  function roundRectPathD(x, y, w, h, rr) {
+    rr = Math.max(0, Math.min(rr, w / 2, h / 2));
+    return 'M' + (x + rr) + ' ' + y +
+      'L' + (x + w - rr) + ' ' + y + 'A' + rr + ' ' + rr + ' 0 0 1 ' + (x + w) + ' ' + (y + rr) +
+      'L' + (x + w) + ' ' + (y + h - rr) + 'A' + rr + ' ' + rr + ' 0 0 1 ' + (x + w - rr) + ' ' + (y + h) +
+      'L' + (x + rr) + ' ' + (y + h) + 'A' + rr + ' ' + rr + ' 0 0 1 ' + x + ' ' + (y + h - rr) +
+      'L' + x + ' ' + (y + rr) + 'A' + rr + ' ' + rr + ' 0 0 1 ' + (x + rr) + ' ' + y + 'Z';
+  }
+
   // ---- freeform boundary vectorising ----
   // traceBlobLoops walks ONE colour region's cell edges into ordered closed
   // loops (outer boundary + any hole boundaries), in grid-corner coordinates.
@@ -1223,14 +1363,41 @@ Resources:`;for(let t of c){if(!t||typeof t!=`string`)throw Error(`@supabase/aut
     var w = Math.round(cols * cellPx), h = Math.round(rows * cellPx);
     var canvas = els.colourCanvas;
     canvas.width = w; canvas.height = h;
+    els.colourFrame.style.aspectRatio = cols + ' / ' + rows;
     var vctx = canvas.getContext('2d');
-    vctx.fillStyle = displayHexes ? displayHexes[0] : 'rgb(' + palette[0].rgb.join(',') + ')';
-    vctx.fillRect(0, 0, w, h); // fallback base so any seam shows a plausible colour, not a gap
+    var geom = finishingGeometry(cols, rows);
+    if (!geom.active) {
+      vctx.fillStyle = displayHexes ? displayHexes[0] : 'rgb(' + palette[0].rgb.join(',') + ')';
+      vctx.fillRect(0, 0, w, h); // fallback base so any seam shows a plausible colour, not a gap
+      smoothedBlobs.forEach(function (b) {
+        vctx.fillStyle = displayHexes ? displayHexes[b.idx] : 'rgb(' + palette[b.idx].rgb.join(',') + ')';
+        strokeSmoothedLoops(vctx, [b], cellPx);
+        vctx.fill('evenodd'); // evenodd so a blob with a hole in it renders correctly
+      });
+      return;
+    }
+    // finishing active: transparent outside the rug, a rounded border ring
+    // (if any) painted first, an inner rounded base, then blobs clipped to
+    // the interior so corner-cut/border overspill never shows through
+    vctx.clearRect(0, 0, w, h);
+    var Bpx = geom.B * cellPx, Rpx = geom.R * cellPx, RiPx = geom.Ri * cellPx;
+    var baseHex = displayHexes ? displayHexes[0] : palette[0].hex;
+    var borderHex = geom.B > 0 ? (displayHexes ? matchYarn(hexToRgb(state.borderHex)).yarn.hex : state.borderHex) : baseHex;
+    vctx.fillStyle = borderHex;
+    roundRectPath(vctx, 0, 0, w, h, Rpx);
+    vctx.fill();
+    vctx.fillStyle = baseHex;
+    roundRectPath(vctx, Bpx, Bpx, w - 2 * Bpx, h - 2 * Bpx, RiPx);
+    vctx.fill();
+    vctx.save();
+    roundRectPath(vctx, Bpx, Bpx, w - 2 * Bpx, h - 2 * Bpx, RiPx);
+    vctx.clip();
     smoothedBlobs.forEach(function (b) {
-      vctx.fillStyle = displayHexes ? displayHexes[b.idx] : 'rgb(' + palette[b.idx].rgb.join(',') + ')';
+      vctx.fillStyle = displayHexes ? displayHexes[b.idx] : palette[b.idx].hex;
       strokeSmoothedLoops(vctx, [b], cellPx);
-      vctx.fill('evenodd'); // evenodd so a blob with a hole in it renders correctly
+      vctx.fill('evenodd');
     });
+    vctx.restore();
   }
 
   // group same-colour cells into contiguous blobs (4-connectivity) so the
@@ -1286,6 +1453,7 @@ Resources:`;for(let t of c){if(!t||typeof t!=`string`)throw Error(`@supabase/aut
     var w = Math.round(cols * cellPx), h = Math.round(rows * cellPx);
     var canvas = els.bwCanvas;
     canvas.width = w; canvas.height = h;
+    els.bwFrame.style.aspectRatio = cols + ' / ' + rows;
     var fctx = canvas.getContext('2d');
     fctx.fillStyle = '#ffffff';
     fctx.fillRect(0, 0, w, h);
@@ -1296,17 +1464,38 @@ Resources:`;for(let t of c){if(!t||typeof t!=`string`)throw Error(`@supabase/aut
     strokeSmoothedLoops(fctx, smoothedBlobs, cellPx);
     fctx.stroke();
 
+    var geom = finishingGeometry(cols, rows);
+    var Bpx = geom.B * cellPx;
+    if (geom.active) {
+      roundRectPath(fctx, 0, 0, w, h, geom.R * cellPx); // rug cut line
+      fctx.stroke();
+      if (geom.B > 0) {
+        roundRectPath(fctx, Bpx, Bpx, w - 2 * Bpx, h - 2 * Bpx, geom.Ri * cellPx); // border seam
+        fctx.stroke();
+      }
+    }
+
     var fontPx = Math.max(14, Math.max(w, h) / 45);
     fctx.font = '700 ' + Math.round(fontPx) + 'px JBM, ui-monospace, monospace';
     fctx.textAlign = 'center';
     fctx.textBaseline = 'middle';
     fctx.fillStyle = '#000000';
+    var innerX0 = geom.B, innerY0 = geom.B, innerX1 = cols - geom.B, innerY1 = rows - geom.B;
     smoothedBlobs.forEach(function (blob) {
       var info = blobLabelInfo(blob.cells, cols);
-      if (info.wCells * cellPx < fontPx * 1.4 || info.hCells * cellPx < fontPx * 1.4) return;
+      var label = palette[blob.idx].label;
+      // two-digit labels (10+, once k > 9) need roughly double the width of
+      // one digit — widen the fit test per extra digit so "10"-"16" skip
+      // blobs too small to hold them instead of clipping
+      var wThresh = fontPx * (1.4 + 0.8 * (label.length - 1));
+      if (info.wCells * cellPx < wThresh || info.hCells * cellPx < fontPx * 1.4) return;
+      if (geom.active && !insideRoundRect(info.c + 0.5, info.r + 0.5, innerX0, innerY0, innerX1, innerY1, geom.Ri)) return;
       var x = info.c * cellPx + cellPx / 2, y = info.r * cellPx + cellPx / 2;
-      fctx.fillText(palette[blob.idx].label, x, y + 1);
+      fctx.fillText(label, x, y + 1);
     });
+    if (geom.active && geom.B > 0) {
+      fctx.fillText(String(palette.length + 1), cols * cellPx / 2, Bpx / 2 + 1);
+    }
   }
 
   // ---------- main pipeline ----------
@@ -1406,6 +1595,32 @@ Resources:`;for(let t of c){if(!t||typeof t!=`string`)throw Error(`@supabase/aut
     }
   }
 
+  // recompute palette counts + border cell count from state.grid against the
+  // current finishing geometry — the cheap step re-run by a rounding/border
+  // slider drag (no retraining, no re-tracing) and also by a full relabel.
+  // With finishing off this reproduces the old plain tally exactly: every
+  // cell is interior, no border, totalCells === n.
+  function recomputeCounts() {
+    var cols = state.gridCols, rows = state.gridRows, grid = state.grid, palette = state.palette;
+    for (var p = 0; p < palette.length; p++) palette[p].count = 0;
+    var geom = finishingGeometry(cols, rows);
+    var innerX0 = geom.B, innerY0 = geom.B, innerX1 = cols - geom.B, innerY1 = rows - geom.B;
+    var borderCells = 0, interiorCells = 0;
+    for (var r = 0; r < rows; r++) {
+      for (var c = 0; c < cols; c++) {
+        var i = r * cols + c;
+        if (geom.active) {
+          var cx = c + 0.5, cy = r + 0.5;
+          if (!insideRoundRect(cx, cy, 0, 0, cols, rows, geom.R)) continue; // corner cut off — excluded entirely
+          if (geom.B > 0 && !insideRoundRect(cx, cy, innerX0, innerY0, innerX1, innerY1, geom.Ri)) { borderCells++; continue; }
+        }
+        palette[grid[i]].count++; interiorCells++;
+      }
+    }
+    state.border = (geom.active && geom.B > 0) ? { hex: state.borderHex, cells: borderCells } : null;
+    state.totalCells = interiorCells + borderCells;
+  }
+
   // relabelAndRender reads state.sampled/state.trained (set by computeCentroids)
   // and re-derives everything downstream of labelling — this is what a boundary
   // weight slider re-runs, without retraining k-means
@@ -1440,9 +1655,11 @@ Resources:`;for(let t of c){if(!t||typeof t!=`string`)throw Error(`@supabase/aut
       return { rgb: rgb, hex: rgbToHex(rgb), label: String(newIdx + 1), count: 0 };
     });
     var grid = new Uint8Array(n);
-    for (var i = 0; i < n; i++) { grid[i] = state.remap[labels[i]]; palette[grid[i]].count++; }
+    for (var i = 0; i < n; i++) { grid[i] = state.remap[labels[i]]; }
 
-    state.palette = palette; state.grid = grid; state.totalCells = n;
+    state.palette = palette; state.grid = grid;
+    state.roundPct = +els.roundPct.value; state.borderPct = +els.borderPct.value; state.borderHex = els.borderColor.value;
+    recomputeCounts();
 
     els.colourPlaceholder.style.display = 'none';
     els.bwPlaceholder.style.display = 'none';
@@ -1468,6 +1685,22 @@ Resources:`;for(let t of c){if(!t||typeof t!=`string`)throw Error(`@supabase/aut
     computeCentroids();
     resetAdvanced();
     relabelAndRender();
+  }
+
+  // light re-finish path for the rounding/border controls: no retraining, no
+  // re-tracing — just re-classify cells against the new geometry, repaint,
+  // and refresh the shopping list. Cheap enough to run straight off a debounce.
+  function applyFinishing() {
+    if (!state.grid) return;
+    state.roundPct = +els.roundPct.value;
+    state.borderPct = +els.borderPct.value;
+    state.borderHex = els.borderColor.value;
+    recomputeCounts();
+    refreshAdvancedSwatches();
+    updateShoppingList();
+    renderColour(state.gridCols, state.gridRows, state.grid, state.palette, state.smoothedBlobs,
+      els.yarnPreviewChk.checked ? computeYarnDisplayHexes() : null);
+    renderBW(state.gridCols, state.gridRows, state.grid, state.palette, state.smoothedBlobs);
   }
 
   function rgbToHex(rgb) {
@@ -1607,6 +1840,22 @@ Resources:`;for(let t of c){if(!t||typeof t!=`string`)throw Error(`@supabase/aut
     else if (wasPreviewing && state.grid) renderColour(state.gridCols, state.gridRows, state.grid, state.palette, state.smoothedBlobs, null);
   });
 
+  // ---------- finishing hints (cm-equivalent of the %-of-shorter-side sliders) ----------
+  function shorterMatCm() {
+    return Math.min(parseFloat(els.matW.value) || 0, parseFloat(els.matH.value) || 0);
+  }
+  function updateRoundHint() {
+    var pct = +els.roundPct.value;
+    els.roundVal.textContent = pct;
+    els.roundHint.textContent = pct + '% of the shorter side (~' + (pct / 100 * shorterMatCm()).toFixed(1) + ' cm radius)';
+  }
+  function updateBorderHint() {
+    var pct = +els.borderPct.value;
+    els.borderVal.textContent = pct;
+    els.borderHint.textContent = pct + '% of the shorter side (~' + (pct / 100 * shorterMatCm()).toFixed(1) + ' cm wide)';
+    els.borderColorField.style.opacity = pct > 0 ? '1' : '0.5';
+  }
+
   // ---------- shopping list ----------
   function updateShoppingList() {
     if (!state.palette) return;
@@ -1626,6 +1875,7 @@ Resources:`;for(let t of c){if(!t||typeof t!=`string`)throw Error(`@supabase/aut
     var totalG = areaM2 * effectiveDensity * (1 + bufferPct / 100);
 
     els.matWVal.textContent = matW; els.matHVal.textContent = matH; els.densityVal.textContent = density; els.strandsVal.textContent = strands; els.bufferVal.textContent = bufferPct;
+    updateRoundHint(); updateBorderHint();
 
     els.shopMeta.innerHTML = 'Grid <b>' + state.gridCols + ' × ' + state.gridRows + '</b> (' + state.totalCells + ' cells) &nbsp;·&nbsp; Mat <b>' +
       matW + ' × ' + matH + ' cm</b> (' + areaM2.toFixed(2) + ' m²) &nbsp;·&nbsp; Density <b>' + density + ' g/m²</b> × <b>' + strands + '</b> strand' + (strands === 1 ? '' : 's') +
@@ -1641,7 +1891,7 @@ Resources:`;for(let t of c){if(!t||typeof t!=`string`)throw Error(`@supabase/aut
     // first pass: match each palette colour to a yarn and pool grams per yarn —
     // two pattern colours can map to the same cone, and cones must be counted
     // on the pooled total, not per row
-    var matches = null, buy = null;
+    var matches = null, buy = null, borderMatch = null;
     if (activeLine) {
       // cleanup can empty a palette entry entirely — skip those everywhere
       matches = state.palette.map(function (p, i) { return p.count ? matchYarn(p.rgb, i) : null; });
@@ -1654,6 +1904,16 @@ Resources:`;for(let t of c){if(!t||typeof t!=`string`)throw Error(`@supabase/aut
         buy[name].grams += grams;
         if (matches[i].manual) buy[name].manual = true;
       });
+      // the border is its own colour row but pools into an existing yarn's
+      // buy line if the nearest match happens to coincide with a pattern
+      // colour's — matched auto-only, no per-row override (deliberate scope limit)
+      if (state.border) {
+        borderMatch = matchYarn(hexToRgb(state.border.hex));
+        var bName = borderMatch.yarn.name;
+        var bGrams = totalG * (state.border.cells / state.totalCells);
+        if (!buy[bName]) buy[bName] = { yarn: borderMatch.yarn, grams: 0, manual: false };
+        buy[bName].grams += bGrams;
+      }
       Object.keys(buy).forEach(function (name) {
         buy[name].cones = activeLine.coneGrams ? Math.max(1, Math.ceil(buy[name].grams / activeLine.coneGrams)) : null;
         buy[name].price = buy[name].yarn.price;
@@ -1694,6 +1954,29 @@ Resources:`;for(let t of c){if(!t||typeof t!=`string`)throw Error(`@supabase/aut
         '</tr>';
       textLines.push(p.label + '  ' + p.hex + '   ' + p.count + ' cells   ' + pct.toFixed(1) + '%   ~' + grams + 'g' + buyText);
     });
+
+    if (state.border) {
+      var bPct = (state.border.cells / state.totalCells) * 100;
+      var bGrams = Math.round(totalG * (bPct / 100));
+      var bBuyCell = '', bBuyText = '';
+      if (activeLine && borderMatch) {
+        var bRough = borderMatch.deltaE > 22;
+        var bWarnSpan = bRough ? ' <span style="color:var(--warn)" title="No close match in this range — nearest is noticeably different">≉</span>' : '';
+        bBuyCell = '<td><div class="swatchcell"><span class="swatch" style="background:' + borderMatch.yarn.hex + '"></span><span>' +
+          escapeHtml(borderMatch.yarn.name) + (borderMatch.yarn.code ? ' <span class="hex">' + escapeHtml(borderMatch.yarn.code) + '</span>' : '') +
+          bWarnSpan + '</span></div></td>';
+        bBuyText = '   -> ' + borderMatch.yarn.name + (bRough ? ' (poor match)' : '');
+      }
+      rows += '<tr>' +
+        '<td><span class="letter">' + (state.palette.length + 1) + '</span></td>' +
+        '<td><div class="swatchcell"><span class="swatch" style="background:' + state.border.hex + '"></span><span class="hex">Border · ' + state.border.hex + '</span></div></td>' +
+        '<td class="num">' + state.border.cells + '</td>' +
+        '<td class="num">' + bPct.toFixed(1) + '%</td>' +
+        '<td class="num">~' + bGrams + 'g</td>' +
+        bBuyCell +
+        '</tr>';
+      textLines.push('Border  ' + state.border.hex + '   ' + state.border.cells + ' cells   ' + bPct.toFixed(1) + '%   ~' + bGrams + 'g' + bBuyText);
+    }
     els.shopBody.innerHTML = rows;
 
     var totalLabel = '~' + Math.round(totalG) + 'g';
@@ -1730,6 +2013,8 @@ Resources:`;for(let t of c){if(!t||typeof t!=`string`)throw Error(`@supabase/aut
   }
 
   populateBrandSelect();
+  updateRoundHint();
+  updateBorderHint();
 
   // ---------- downloads ----------
   function downloadCanvas(canvas, filename) {
@@ -1742,11 +2027,26 @@ Resources:`;for(let t of c){if(!t||typeof t!=`string`)throw Error(`@supabase/aut
   function downloadSVG() {
     if (!state.smoothedBlobs) return;
     var cols = state.gridCols, rows = state.gridRows, unit = 10;
-    var parts = ['<svg xmlns="http://www.w3.org/2000/svg" width="' + cols * unit + '" height="' + rows * unit +
-      '" viewBox="0 0 ' + cols * unit + ' ' + rows * unit + '">'];
+    var W = cols * unit, H = rows * unit;
+    var parts = ['<svg xmlns="http://www.w3.org/2000/svg" width="' + W + '" height="' + H +
+      '" viewBox="0 0 ' + W + ' ' + H + '">'];
     // same painter's algorithm as the canvas render: base fill in the first
     // palette colour, then each blob as an evenodd path (holes stay holes)
-    parts.push('<rect width="' + cols * unit + '" height="' + rows * unit + '" fill="' + state.palette[0].hex + '"/>');
+    var geom = finishingGeometry(cols, rows);
+    if (geom.active) {
+      var Bpx = geom.B * unit, Rpx = geom.R * unit, RiPx = geom.Ri * unit;
+      if (geom.B > 0) {
+        parts.push('<path d="' + roundRectPathD(0, 0, W, H, Rpx) + '" fill="' + state.borderHex + '"/>');
+        parts.push('<path d="' + roundRectPathD(Bpx, Bpx, W - 2 * Bpx, H - 2 * Bpx, RiPx) + '" fill="' + state.palette[0].hex + '"/>');
+        parts.push('<clipPath id="rug"><path d="' + roundRectPathD(Bpx, Bpx, W - 2 * Bpx, H - 2 * Bpx, RiPx) + '"/></clipPath>');
+      } else {
+        parts.push('<path d="' + roundRectPathD(0, 0, W, H, Rpx) + '" fill="' + state.palette[0].hex + '"/>');
+        parts.push('<clipPath id="rug"><path d="' + roundRectPathD(0, 0, W, H, Rpx) + '"/></clipPath>');
+      }
+      parts.push('<g clip-path="url(#rug)">');
+    } else {
+      parts.push('<rect width="' + W + '" height="' + H + '" fill="' + state.palette[0].hex + '"/>');
+    }
     state.smoothedBlobs.forEach(function (b) {
       var d = b.loops.map(function (loop) {
         return 'M' + loop.map(function (p) {
@@ -1755,6 +2055,7 @@ Resources:`;for(let t of c){if(!t||typeof t!=`string`)throw Error(`@supabase/aut
       }).join('');
       parts.push('<path d="' + d + '" fill="' + state.palette[b.idx].hex + '" fill-rule="evenodd"/>');
     });
+    if (geom.active) parts.push('</g>');
     parts.push('</svg>');
     var blob = new Blob([parts.join('\n')], { type: 'image/svg+xml' });
     var a = document.createElement('a');
@@ -1794,14 +2095,22 @@ Resources:`;for(let t of c){if(!t||typeof t!=`string`)throw Error(`@supabase/aut
   }
   var debouncedProcess = debounce(process, 150);
   var debouncedRelabel = debounce(relabelAndRender, 150);
+  var debouncedFinish = debounce(applyFinishing, 120);
 
   els.detailSize.addEventListener('input', function () { if (state.img) debouncedProcess(); else els.detailVal.textContent = els.detailSize.value + ' px'; });
   els.kColors.addEventListener('input', function () { els.kVal.textContent = els.kColors.value; if (state.img) debouncedProcess(); });
-  els.matW.addEventListener('input', updateShoppingList);
-  els.matH.addEventListener('input', updateShoppingList);
+  function onMatInput() {
+    updateShoppingList();
+    if (els.cropAspect.value === 'mat' && state.img) refitCropToAspect();
+  }
+  els.matW.addEventListener('input', onMatInput);
+  els.matH.addEventListener('input', onMatInput);
   els.density.addEventListener('input', updateShoppingList);
   els.strands.addEventListener('input', updateShoppingList);
   els.buffer.addEventListener('input', updateShoppingList);
+  els.roundPct.addEventListener('input', function () { updateRoundHint(); if (state.grid) debouncedFinish(); });
+  els.borderPct.addEventListener('input', function () { updateBorderHint(); if (state.grid) debouncedFinish(); });
+  els.borderColor.addEventListener('input', function () { if (state.grid) debouncedFinish(); });
 
   els.advToggle.addEventListener('click', function () {
     state.advanced = !state.advanced;
@@ -1824,7 +2133,7 @@ Resources:`;for(let t of c){if(!t||typeof t!=`string`)throw Error(`@supabase/aut
   function autoPickK() {
     var dims = computeGridDims(state.img, 220);
     var data = sampleImage(state.img, dims.cols, dims.rows);
-    var k = autoDetectK(data, dims.cols * dims.rows, 8);
+    var k = autoDetectK(data, dims.cols * dims.rows, 12);
     els.kColors.value = k;
     els.kVal.textContent = k;
   }
