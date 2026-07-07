@@ -7,6 +7,7 @@ import { computeLineArt } from './lineart.js';
 import { renderColour, renderBW, downloadCanvas, downloadSVG } from './render.js';
 import { setActiveLine, activeLine, updateShoppingList, repaintColourIfPreviewing, computeYarnDisplayHexes, populateBrandSelect, populateMsRegion, populateMsSuppliers, applyRegionFilter, syncMsAllowedFromCheckboxes, setMsCheckboxesFromKeys, MS_SEP } from './yarns.js';
 import { initCloud } from './cloud.js';
+import { initPrefs } from './prefs.js';
 
 // ---------- image import ----------
 // `onload` (optional) fires after the chart has regenerated — the cloud
@@ -364,6 +365,7 @@ function relabelAndRender() {
 
 function process() {
   if (!state.img) return;
+  applyMatLock('w'); // crop may have changed the image aspect
   computeCentroids();
   resetAdvanced();
   relabelAndRender();
@@ -433,6 +435,7 @@ function serializeSettings() {
     lineThickness: parseInt(els.lineThickness.value, 10),
     matW: parseFloat(els.matW.value),
     matH: parseFloat(els.matH.value),
+    matLock: els.matLock.checked,
     density: parseFloat(els.density.value),
     strands: parseInt(els.strands.value, 10),
     buffer: parseFloat(els.buffer.value),
@@ -466,6 +469,7 @@ function restoreSettings(s) {
   els.lineThickVal.textContent = lineThickness > 0 ? lineThickness : 'off';
   state.lineArt = null; // relabelAndRender recomputes it when thickness > 0
   els.matW.value = s.matW; els.matH.value = s.matH;
+  els.matLock.checked = !!s.matLock;
   els.density.value = s.density; els.strands.value = s.strands; els.buffer.value = s.buffer;
   state.cropRect = s.cropRect ? { x: s.cropRect.x, y: s.cropRect.y, w: s.cropRect.w, h: s.cropRect.h } : FULL_CROP;
   state.advanced = !!s.advanced;
@@ -497,6 +501,7 @@ function restoreSettings(s) {
   state.msRegion = els.msRegion.value;
   setMsCheckboxesFromKeys(s.allowedSuppliers || []);
   state.msOverrides = s.msOverrides ? JSON.parse(JSON.stringify(s.msOverrides)) : {};
+  applyMatLock('w'); // refresh the lock hint against the restored crop
 
   if (state.img) {
     drawCropOverlay();
@@ -544,6 +549,31 @@ var debouncedFinish = debounce(applyFinishing, 120);
 function onMatInput() {
   updateShoppingList();
   if (els.cropAspect.value === 'mat' && state.img) refitCropToAspect();
+}
+
+// ---------- mat ratio lock ----------
+// the tufted region's aspect = the crop rect applied to the image
+function imageAspect() {
+  if (!state.img) return null;
+  var w = state.cropRect.w * state.img.naturalWidth;
+  var h = state.cropRect.h * state.img.naturalHeight;
+  return h > 0 ? w / h : null;
+}
+
+// keep the other mat dimension in sync while locked; `changed` is the side
+// the user edited ('w'|'h') — crop/image-driven refreshes recompute height
+function applyMatLock(changed) {
+  var AR = els.matLock.checked ? imageAspect() : null;
+  els.matLockHint.classList.toggle('hidden', !AR);
+  if (!AR) return;
+  if (changed === 'h') {
+    els.matW.value = Math.max(1, Math.round((parseFloat(els.matH.value) || 0) * AR));
+    els.matWVal.textContent = els.matW.value;
+  } else {
+    els.matH.value = Math.max(1, Math.round((parseFloat(els.matW.value) || 0) / AR));
+    els.matHVal.textContent = els.matH.value;
+  }
+  els.matLockHint.textContent = 'Following the image: ' + els.matW.value + ' × ' + els.matH.value + ' cm (ratio ' + AR.toFixed(2) + ')';
 }
 
 // runs on every image load too — a coarse 220px sample is plenty for
@@ -734,8 +764,9 @@ function init() {
   els.detailSize.addEventListener('input', function () { if (state.img) debouncedProcess(); else els.detailVal.textContent = els.detailSize.value + ' px'; });
   els.kColors.addEventListener('input', function () { els.kVal.textContent = els.kColors.value; if (state.img) debouncedProcess(); });
   els.lineThickness.addEventListener('input', onLineThickness);
-  els.matW.addEventListener('input', onMatInput);
-  els.matH.addEventListener('input', onMatInput);
+  els.matW.addEventListener('input', function () { applyMatLock('w'); onMatInput(); });
+  els.matH.addEventListener('input', function () { applyMatLock('h'); onMatInput(); });
+  els.matLock.addEventListener('change', function () { applyMatLock('w'); onMatInput(); });
   els.density.addEventListener('input', updateShoppingList);
   els.strands.addEventListener('input', updateShoppingList);
   els.buffer.addEventListener('input', updateShoppingList);
@@ -764,6 +795,8 @@ function init() {
     autoPickK();
     process();
   });
+
+  initPrefs(); // apply device defaults before anything is loaded
 
   initCloud({
     serialize: serializeSettings,

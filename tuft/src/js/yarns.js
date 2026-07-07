@@ -105,6 +105,7 @@ export function setActiveLine(value) {
   var brand = YARN_DATA.brands[+parts[0]], line = brand.lines[+parts[1]];
   activeLine = {
     brand: brand.brand, url: brand.url, currency: brand.currency,
+    searchUrl: brand.searchUrl || null,
     line: line.line, fiber: line.fiber, coneGrams: line.coneGrams,
     unit: line.unit || 'cone',
     colors: line.colors.map(function (c) {
@@ -269,6 +270,34 @@ export function repaintColourIfPreviewing() {
   if (els.yarnPreviewChk.checked && state.grid) {
     renderColour(state.gridCols, state.gridRows, state.grid, state.palette, state.smoothedBlobs, computeYarnDisplayHexes());
   }
+}
+
+// ---------- buy links ----------
+// deep-link a colour into the shop's search where the shop supports it
+// (searchUrl template with {q}); otherwise fall back to the shop front page
+function yarnFindUrl(searchUrl, shopUrl, yarn) {
+  if (!searchUrl) return shopUrl;
+  return searchUrl.replace('{q}', encodeURIComponent(yarn.name + (yarn.code ? ' ' + yarn.code : '')));
+}
+
+// clickable per-supplier buy list under the table; groups = null clears it
+function renderBuyLinks(groups) {
+  if (!groups || !groups.length) { els.buyLinks.innerHTML = ''; return; }
+  els.buyLinks.innerHTML = groups.map(function (g) {
+    var head = '<div class="buy-group-head"><strong>' + escapeHtml(g.brand) + ' — ' + escapeHtml(g.line) + '</strong>' +
+      '<a href="' + escapeHtml(g.url) + '" target="_blank" rel="noopener">Open shop ↗</a></div>';
+    var rows = g.items.map(function (b) {
+      var qty = '~' + Math.round(b.grams) + 'g' +
+        (b.cones ? ' · ' + b.cones + ' × ' + g.coneGrams + 'g ' + g.unit + (b.cones === 1 ? '' : 's') : '');
+      var price = (b.price != null && b.cones) ? ' · ' + formatPrice(b.cones * b.price, g.currency) : '';
+      return '<li><span class="swatch" style="background:' + b.yarn.hex + '"></span>' +
+        '<a href="' + escapeHtml(yarnFindUrl(g.searchUrl, g.url, b.yarn)) + '" target="_blank" rel="noopener">' +
+        escapeHtml(b.yarn.name) + (b.yarn.code ? ' [' + escapeHtml(b.yarn.code) + ']' : '') + ' ↗</a>' +
+        '<span class="buy-qty">' + qty + price + (b.manual ? ' · manual' : '') + '</span></li>';
+    }).join('');
+    var sub = g.subtotal ? '<div class="buy-subtotal">Subtotal ≈ ' + g.subtotal + '</div>' : '';
+    return '<div class="buy-group">' + head + '<ul>' + rows + '</ul>' + sub + '</div>';
+  }).join('');
 }
 
 // ---------- shopping list ----------
@@ -475,6 +504,16 @@ export function updateShoppingList() {
       });
       textLines.push('  Subtotal: ' + (sup.allPriced ? formatPrice(sup.price, sup.currency) : '(incomplete pricing)'));
     });
+    renderBuyLinks(supplierKeys.map(function (key) {
+      var sup = buyMulti[key];
+      var srcBrand = YARN_DATA.brands[+key.split(':')[0]];
+      return {
+        brand: sup.brand, line: sup.line, url: sup.url, searchUrl: srcBrand.searchUrl || null,
+        currency: sup.currency, coneGrams: sup.coneGrams, unit: sup.unit,
+        items: Object.keys(sup.items).map(function (n) { return sup.items[n]; }),
+        subtotal: sup.allPriced ? formatPrice(sup.price, sup.currency) : null
+      };
+    }));
   } else if (activeLine) {
     var totalCones = 0, totalPrice = 0, allPriced = true;
     Object.keys(buy).forEach(function (name) {
@@ -492,6 +531,14 @@ export function updateShoppingList() {
         (b.cones ? '   ' + b.cones + ' x ' + activeLine.coneGrams + 'g ' + activeLine.unit + (b.cones === 1 ? '' : 's') : '') +
         (b.price != null && b.cones ? '   ' + formatPrice(b.cones * b.price, activeLine.currency) : ''));
     });
+    renderBuyLinks([{
+      brand: activeLine.brand, line: activeLine.line, url: activeLine.url, searchUrl: activeLine.searchUrl,
+      currency: activeLine.currency, coneGrams: activeLine.coneGrams, unit: activeLine.unit,
+      items: Object.keys(buy).map(function (n) { return buy[n]; }),
+      subtotal: totalCones && allPriced ? formatPrice(totalPrice, activeLine.currency) : null
+    }]);
+  } else {
+    renderBuyLinks(null);
   }
   els.shopTotal.textContent = totalLabel;
   textLines.push('');

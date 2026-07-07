@@ -366,3 +366,31 @@
       width: 20px; height: 20px;
     }
   }
+
+  /* --- Mat lock + preferences + buy links --- */
+  .chkline {
+    display: flex; align-items: center; gap: 8px; margin-top: 6px;
+    font-size: 13px; font-weight: 400; text-transform: none; letter-spacing: normal; color: var(--ink);
+  }
+  .chkline input { accent-color: var(--accent); }
+
+  .prefsbar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+  .prefsbar .authmsg { font-size: 12px; color: var(--accent); }
+
+  .buy-links { display: flex; flex-direction: column; gap: 12px; margin-top: 14px; }
+  .buy-group {
+    border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px;
+    background: var(--surface-2);
+  }
+  .buy-group-head {
+    display: flex; align-items: baseline; justify-content: space-between; gap: 10px;
+    font-size: 14px; margin-bottom: 8px;
+  }
+  .buy-group ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+  .buy-group li { display: flex; align-items: center; gap: 10px; font-size: 13.5px; flex-wrap: wrap; }
+  .buy-group li a { font-weight: 600; }
+  .buy-qty { color: var(--ink-soft); font-family: 'JBM', ui-monospace, monospace; font-size: 12.5px; }
+  .buy-subtotal {
+    margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--line);
+    font-weight: 700; font-size: 13px;
+  }

@@ -6,6 +6,7 @@
       "url": "https://tuftingshop.com",
       "currency": "EUR",
       "country": "EU",
+      "searchUrl": "https://tuftingshop.com/search?q={q}",
       "lines": [
         {
           "line": "100% Wool (Wools of New Zealand)",
@@ -495,6 +496,7 @@
       "url": "https://tuftingeurope.com",
       "currency": "EUR",
       "country": "EU",
+      "searchUrl": "https://tuftingeurope.com/?s={q}",
       "lines": [
         {
           "line": "Wool Tufting Yarn",
@@ -772,6 +774,7 @@
       "url": "https://tufttheworld.com",
       "currency": "USD",
       "country": "US",
+      "searchUrl": "https://tufttheworld.com/search?q={q}",
       "lines": [
         {
           "line": "Reflect Wool",
@@ -2901,6 +2904,7 @@
       "url": "https://allthingseffy.com",
       "currency": "USD",
       "country": "AU",
+      "searchUrl": "https://allthingseffy.com/search?q={q}",
       "lines": [
         {
           "line": "100% New Zealand Wool",
@@ -3290,6 +3294,7 @@
       "url": "https://rugmakersyarn.com",
       "currency": "USD",
       "country": "US",
+      "searchUrl": "https://rugmakersyarn.com/search?q={q}",
       "lines": [
         {
           "line": "100% Rug Wool",
@@ -3436,6 +3441,7 @@
       "url": "https://scatteredkind.com",
       "currency": "USD",
       "country": "US",
+      "searchUrl": "https://scatteredkind.com/search?q={q}",
       "lines": [
         {
           "line": "100% Acrylic",
@@ -3637,6 +3643,7 @@
       "url": "https://tuftingnation.com",
       "currency": "CAD",
       "country": "CA",
+      "searchUrl": "https://tuftingnation.com/search?q={q}",
       "lines": [
         {
           "line": "100% Wool",
@@ -4078,6 +4085,7 @@
       "url": "https://tuftsupplies.com",
       "currency": "EUR",
       "country": "EU",
+      "searchUrl": "https://tuftsupplies.com/search?q={q}",
       "lines": [
         {
           "line": "100% New Zealand Wool",

@@ -4,7 +4,7 @@ export const els = {};
 
 export const EL_IDS = ['dropzone','fileInput','thumb','dzTitle','dzSub',
  'detailSize','detailVal','kColors','kVal','lineThickness','lineThickVal',
- 'autoBtn','matW','matH','matWVal','matHVal','density','densityVal','strands','strandsVal','buffer','bufferVal',
+ 'autoBtn','matW','matH','matWVal','matHVal','matLock','matLockHint','density','densityVal','strands','strandsVal','buffer','bufferVal',
  'roundPct','roundVal','roundHint','borderPct','borderVal','borderHint','borderColor','borderColorField',
  'colourCanvas','colourFrame','colourPlaceholder','bwCanvas','bwFrame','bwPlaceholder',
  'dlColourPng','dlColourSvg','dlBwPng','shopMeta','shopBody','shopTotal',
@@ -13,7 +13,8 @@ export const EL_IDS = ['dropzone','fileInput','thumb','dzTitle','dzSub',
  'copyBtn','copyStatus','shopText',
  'advField','advToggle','advBody','advBoundaries','advResetBtn',
  'yarnPreviewField','yarnPreviewChk','exportYarnHex',
- 'multiSource','msGroup','msRegion','msSuppliers'];
+ 'multiSource','msGroup','msRegion','msSuppliers',
+ 'buyLinks','prefsSaveBtn','prefsClearBtn','prefsMsg'];
 
 // populate els from the DOM — called once at startup, before init() wires
 // listeners, so every els.X reference downstream is live

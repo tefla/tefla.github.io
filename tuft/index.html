@@ -95,6 +95,8 @@
       <div class="field">
         <label for="matH">Mat height <span class="val"><span id="matHVal">70</span> cm</span></label>
         <input type="number" id="matH" min="10" max="300" value="70" />
+        <label class="chkline"><input type="checkbox" id="matLock" /> 🔒 Lock to image ratio</label>
+        <span class="hint hidden" id="matLockHint"></span>
       </div>
       <div class="field">
         <label for="density">Yarn density <span class="val"><span id="densityVal">900</span> g/m²</span></label>
@@ -135,6 +137,16 @@
           <button class="autobtn" id="advResetBtn" type="button" style="margin-top:10px">Reset all to ×1</button>
         </div>
       </div>
+    </div>
+  </section>
+
+  <section class="panel">
+    <h2>Preferences</h2>
+    <p class="hint">Your workshop defaults, applied every time the app opens: strands, density, buffer, mat size &amp; ratio lock, yarn brand, suppliers &amp; region, export option. Stored on this device.</p>
+    <div class="prefsbar">
+      <button class="autobtn" id="prefsSaveBtn" type="button">Save current as defaults</button>
+      <button class="autobtn" id="prefsClearBtn" type="button">Clear defaults</button>
+      <span class="authmsg hidden" id="prefsMsg"></span>
     </div>
   </section>
   </div><!-- /rail -->
@@ -221,6 +233,7 @@
         </tfoot>
       </table>
     </div>
+    <div class="buy-links" id="buyLinks"></div>
     <div class="copybar">
       <button class="dl ghost" id="copyBtn" disabled>Copy list as text</button>
       <span class="copy-status" id="copyStatus"></span>
