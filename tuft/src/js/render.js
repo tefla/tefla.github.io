@@ -160,14 +160,17 @@ export function downloadCanvas(canvas, filename) {
 }
 
 // displayHexes (optional): palette-indexed override colours — used by the
-// export-in-yarn-colours option to write matched yarn hexes into the SVG
-export function downloadSVG(displayHexes) {
+// export-in-yarn-colours option to write matched yarn hexes into the SVG.
+// mirror (optional): flip the whole drawing horizontally — tufting is worked
+// from the back, so the mirrored export's finished front matches the preview.
+export function downloadSVG(displayHexes, mirror) {
   if (!state.smoothedBlobs) return;
   var hex = function (i) { return displayHexes ? displayHexes[i] : state.palette[i].hex; };
   var cols = state.gridCols, rows = state.gridRows, unit = 10;
   var W = cols * unit, H = rows * unit;
   var parts = ['<svg xmlns="http://www.w3.org/2000/svg" width="' + W + '" height="' + H +
     '" viewBox="0 0 ' + W + ' ' + H + '">'];
+  if (mirror) parts.push('<g transform="translate(' + W + ' 0) scale(-1 1)">');
   // same painter's algorithm as the canvas render: base fill in the first
   // palette colour, then each blob as an evenodd path (holes stay holes)
   var geom = finishingGeometry(cols, rows);
@@ -204,6 +207,7 @@ export function downloadSVG(displayHexes) {
       '" stroke-linecap="round" stroke-linejoin="round"><path d="' + sp + '"/></g>');
   }
   if (geom.active) parts.push('</g>');
+  if (mirror) parts.push('</g>');
   parts.push('</svg>');
   var blob = new Blob([parts.join('\n')], { type: 'image/svg+xml' });
   var a = document.createElement('a');

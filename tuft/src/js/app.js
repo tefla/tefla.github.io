@@ -620,6 +620,7 @@ function serializeSettings() {
     borderHex: els.borderColor.value,
     cropAspect: els.cropAspect.value,
     exportYarnHex: els.exportYarnHex.checked,
+    exportMirror: els.exportMirror.checked,
     // multi-source buying (optional mode)
     multiSource: state.multiSource,
     region: state.msRegion,
@@ -668,6 +669,8 @@ function restoreSettings(s) {
   updateRoundHint();
   updateBorderHint();
   els.exportYarnHex.checked = !!s.exportYarnHex;
+  // saves that predate the option keep the mirrored-by-default behaviour
+  els.exportMirror.checked = s.exportMirror !== undefined ? !!s.exportMirror : true;
 
   // multi-source buying (optional mode)
   state.multiSource = !!s.multiSource;
@@ -972,21 +975,34 @@ function init() {
     return els.exportYarnHex.checked ? computeYarnDisplayHexes() : null;
   }
 
+  // tufting is worked from the BACK of the fabric, so exports default to a
+  // horizontal flip — the finished front then matches the on-screen preview
+  function exportCanvas(canvas) {
+    if (!els.exportMirror.checked) return canvas;
+    var m = document.createElement('canvas');
+    m.width = canvas.width; m.height = canvas.height;
+    var ctx = m.getContext('2d');
+    ctx.translate(m.width, 0);
+    ctx.scale(-1, 1);
+    ctx.drawImage(canvas, 0, 0);
+    return m;
+  }
+
   els.dlColourPng.addEventListener('click', function () {
     var hexes = exportHexes();
     if (hexes && state.grid) {
       // repaint in yarn colours just for the capture, then restore the
       // on-screen state (which may itself be previewing yarn colours)
       renderColour(state.gridCols, state.gridRows, state.grid, state.palette, state.smoothedBlobs, hexes);
-      downloadCanvas(els.colourCanvas, 'tuft-pattern-colour.png');
+      downloadCanvas(exportCanvas(els.colourCanvas), 'tuft-pattern-colour.png');
       renderColour(state.gridCols, state.gridRows, state.grid, state.palette, state.smoothedBlobs,
         els.yarnPreviewChk.checked ? computeYarnDisplayHexes() : null);
     } else {
-      downloadCanvas(els.colourCanvas, 'tuft-pattern-colour.png');
+      downloadCanvas(exportCanvas(els.colourCanvas), 'tuft-pattern-colour.png');
     }
   });
-  els.dlBwPng.addEventListener('click', function () { downloadCanvas(els.bwCanvas, 'tuft-pattern-bw-projector.png'); });
-  els.dlColourSvg.addEventListener('click', function () { downloadSVG(exportHexes()); });
+  els.dlBwPng.addEventListener('click', function () { downloadCanvas(exportCanvas(els.bwCanvas), 'tuft-pattern-bw-projector.png'); });
+  els.dlColourSvg.addEventListener('click', function () { downloadSVG(exportHexes(), els.exportMirror.checked); });
 
   els.copyBtn.addEventListener('click', function () {
     els.shopText.select();

@@ -18,6 +18,7 @@ function collect() {
     matLock: els.matLock.checked,
     yarnBrand: els.yarnBrand.value,
     exportYarnHex: els.exportYarnHex.checked,
+    exportMirror: els.exportMirror.checked,
     multiSource: els.multiSource.checked,
     msRegion: state.msRegion,
     allowedSuppliers: state.msAllowed.slice()
@@ -36,6 +37,8 @@ function apply(p) {
   els.matW.value = p.matW; els.matWVal.textContent = p.matW;
   els.matH.value = p.matH; els.matHVal.textContent = p.matH;
   els.exportYarnHex.checked = !!p.exportYarnHex;
+  // prefs saved before the option existed keep the mirrored default
+  els.exportMirror.checked = p.exportMirror !== undefined ? !!p.exportMirror : true;
 
   els.yarnBrand.value = p.yarnBrand || '';
   fire(els.yarnBrand, 'change');
