@@ -192,6 +192,10 @@
         </div>
       </div>
     </div>
+    <div class="palette-editor">
+      <div class="palette-editor-head">Palette <span class="hint">Pin a colour to lock it: set an exact colour or pick one from the image. Pinned colours stay fixed while the rest re-detect.</span></div>
+      <div class="palette-strip" id="paletteStrip"></div>
+    </div>
   </section>
 
   <details class="panel" data-panel="shop" open>
@@ -210,6 +214,13 @@
           Buy from multiple suppliers
         </label>
         <span class="hint">Match each colour to its nearest yarn across every allowed supplier, grouped by supplier below</span>
+      </div>
+      <div class="field">
+        <label>
+          <input type="checkbox" id="includeMulti" />
+          Include multicolour yarns
+        </label>
+        <span class="hint">Off by default: variegated/multicolour skeins are held out of auto-matching so a print or marl never stands in for a solid colour. You can still pick them by hand.</span>
       </div>
       <div class="field hidden" id="yarnPreviewField">
         <label>
@@ -277,6 +288,17 @@
   <footer class="foot">Everything runs locally in this page — nothing leaves your browser unless you sign in and save a project to your account.</footer>
   </div><!-- /stage -->
   </div><!-- /workspace -->
+</div>
+<div id="yarnPicker" class="picker-backdrop hidden">
+  <div class="picker-sheet" role="dialog" aria-modal="true" aria-labelledby="pickerTitle">
+    <div class="picker-head">
+      <span class="picker-title" id="pickerTitle">Choose yarn</span>
+      <button type="button" class="picker-close" id="pickerClose" aria-label="Close">✕</button>
+    </div>
+    <input type="text" id="pickerFilter" class="picker-filter" placeholder="Filter by name or code…" autocomplete="off" />
+    <div id="pickerGrid" class="picker-grid"></div>
+    <p id="pickerEmpty" class="picker-empty hidden">No matching yarns.</p>
+  </div>
 </div>
 <script src="src/vendor/supabase.js"></script>
 <script type="module" src="src/js/app.js"></script>

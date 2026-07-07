@@ -28,7 +28,10 @@ export function sampleTrainingPixels(data, n, maxSamples) {
 // the peak count fill farthest-point-first from the samples. No Math.random
 // anywhere → same image + settings = same palette every run, which also
 // keeps the Advanced reach-sliders' colour identities stable across drags.
-export function seedCentroids(samples, k, peaks) {
+// pins (optional) is a {rawIdx: [r,g,b]} map of fixed centroids — see kmeansTrain.
+// They're written last so a pinned slot always starts exactly on its colour,
+// regardless of what the peak/farthest seeding would have put there.
+export function seedCentroids(samples, k, peaks, pins) {
   var sn = samples.length / 3;
   var centroids = new Float32Array(k * 3);
   var seeded = Math.min(k, peaks.length);
@@ -49,12 +52,27 @@ export function seedCentroids(samples, k, peaks) {
     }
     centroids[c * 3] = samples[farIdx * 3]; centroids[c * 3 + 1] = samples[farIdx * 3 + 1]; centroids[c * 3 + 2] = samples[farIdx * 3 + 2];
   }
+  applyPins(centroids, k, pins);
   return centroids;
 }
 
-export function kmeansTrain(samples, k, iters, initCentroids) {
+// overwrite pinned raw-index centroids with their fixed rgb (in place)
+function applyPins(centroids, k, pins) {
+  if (!pins) return;
+  Object.keys(pins).forEach(function (idxStr) {
+    var idx = +idxStr, rgb = pins[idxStr];
+    if (idx < k && rgb) { centroids[idx * 3] = rgb[0]; centroids[idx * 3 + 1] = rgb[1]; centroids[idx * 3 + 2] = rgb[2]; }
+  });
+}
+
+// pins (optional {rawIdx: [r,g,b]}) are fixed centroids: pixels still assign to
+// them, but the update step never moves them, so a pinned colour stays exactly
+// where the user placed it while the rest of the palette clusters around it.
+export function kmeansTrain(samples, k, iters, initCentroids, pins) {
   var sn = samples.length / 3;
   var centroids = initCentroids;
+  var pinned = {};
+  if (pins) Object.keys(pins).forEach(function (i) { if (+i < k) pinned[+i] = true; });
   var sums = new Float64Array(k * 4);
   for (var it = 0; it < iters; it++) {
     sums.fill(0);
@@ -69,6 +87,7 @@ export function kmeansTrain(samples, k, iters, initCentroids) {
       sums[best * 4] += r; sums[best * 4 + 1] += g; sums[best * 4 + 2] += b; sums[best * 4 + 3]++;
     }
     for (var c2 = 0; c2 < k; c2++) {
+      if (pinned[c2]) continue;   // fixed centroid — never moved by iteration
       if (sums[c2 * 4 + 3] > 0) {
         centroids[c2 * 3] = sums[c2 * 4] / sums[c2 * 4 + 3];
         centroids[c2 * 3 + 1] = sums[c2 * 4 + 1] / sums[c2 * 4 + 3];

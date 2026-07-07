@@ -5,10 +5,11 @@ import { computeGridDims, sampleImage, finishingGeometry, insideRoundRect } from
 import { computeSmoothedBlobs } from './trace.js';
 import { computeLineArt } from './lineart.js';
 import { renderColour, renderBW, downloadCanvas, downloadSVG } from './render.js';
-import { setActiveLine, activeLine, updateShoppingList, repaintColourIfPreviewing, computeYarnDisplayHexes, populateBrandSelect, populateMsRegion, populateMsSuppliers, applyRegionFilter, syncMsAllowedFromCheckboxes, setMsCheckboxesFromKeys, MS_SEP } from './yarns.js';
+import { setActiveLine, activeLine, updateShoppingList, repaintColourIfPreviewing, computeYarnDisplayHexes, populateBrandSelect, populateMsRegion, populateMsSuppliers, applyRegionFilter, syncMsAllowedFromCheckboxes, setMsCheckboxesFromKeys, MS_SEP, hexToRgb, rgbToLab, deltaE } from './yarns.js';
 import { initCloud } from './cloud.js';
 import { initPrefs } from './prefs.js';
 import { initPanels } from './panels.js';
+import { initPicker, openPicker } from './picker.js';
 
 // ---------- image import ----------
 // `onload` (optional) fires after the chart has regenerated — the cloud
@@ -21,6 +22,11 @@ function loadFile(file, onload) {
     img.onload = function () {
       state.img = img;
       state.cropRect = FULL_CROP;
+      state.pins = {};           // pins/merges are tied to a specific image
+      state.mergeGroups = [];
+      state.mergeSource = null;
+      state.eyedropOrig = null;
+      state.eyedropAdd = false;
       els.thumb.src = e.target.result;
       els.thumb.classList.add('show');
       els.dzTitle.textContent = file.name;
@@ -197,7 +203,18 @@ function computeCentroids() {
   var n = dims.cols * dims.rows;
   var data = sampleImage(state.img, dims.cols, dims.rows);
   var samples = sampleTrainingPixels(data, n, 24000);
-  var trained = kmeansTrain(samples, k, 16, seedCentroids(samples, k, detectColourPeaks(data, n)));
+  // a pin whose raw index no longer exists at this k is dropped (k shrank);
+  // merges are colour-based, so they need no index bookkeeping
+  Object.keys(state.pins).forEach(function (i) { if (+i >= k) delete state.pins[+i]; });
+  // keep boundary weights sized to k so the reprocess paths that skip
+  // resetAdvanced (pin/merge/add-colour) never leave a stale-length array
+  if (!state.weights || state.weights.length !== k) {
+    var nw = new Float32Array(k); nw.fill(1);
+    if (state.weights) for (var wi = 0; wi < Math.min(k, state.weights.length); wi++) nw[wi] = state.weights[wi];
+    state.weights = nw;
+  }
+  var trained = kmeansTrain(samples, k, 16,
+    seedCentroids(samples, k, detectColourPeaks(data, n), state.pins), state.pins);
 
   // order/remap derived from the RAW trained centroids (not the post-cleanup
   // means computed in relabelAndRender) — stable across weight changes, so
@@ -278,6 +295,146 @@ function refreshAdvancedSwatches() {
   }
 }
 
+// ---------- palette editor (pinned colours) ----------
+// one chip per detected colour under the charts: hex + share%, with actions to
+// pin it to an exact colour, eyedrop one from the source image, merge it into
+// another slot, or unpin. A trailing "+ Add colour" chip grows k by one.
+function buildPaletteStrip() {
+  if (!state.palette) { els.paletteStrip.innerHTML = ''; return; }
+  var total = state.totalCells || 1;
+  var merging = state.mergeSource != null;
+  els.paletteStrip.classList.toggle('merging', merging);
+  var chips = state.palette.map(function (p, newIdx) {
+    if (p.count === 0 && !p.pinned) return '';
+    var pct = (p.count / total * 100).toFixed(1);
+    var isSrc = merging && state.mergeSource === newIdx;
+    var isTarget = merging && !isSrc;
+    return '<div class="pal-chip' + (p.pinned ? ' pinned' : '') + (isSrc ? ' merge-src' : '') +
+      (isTarget ? ' merge-target' : '') + '" data-new="' + newIdx + '">' +
+      '<span class="swatch" style="background:' + p.hex + '"></span>' +
+      '<span class="pal-meta"><span class="pal-label">' + (newIdx + 1) +
+        (p.pinned ? ' <span class="pal-pin" title="Pinned">📌</span>' : '') + '</span>' +
+      '<span class="hex">' + p.hex + '</span><span class="pal-share">' + pct + '%</span></span>' +
+      '<span class="pal-acts">' +
+        '<label class="pal-act" title="Set exact colour"><input type="color" class="palColor" data-new="' + newIdx + '" value="' + p.hex + '"><span aria-hidden="true">✎</span></label>' +
+        '<button type="button" class="pal-act palEyedrop" data-new="' + newIdx + '" title="Pick colour from the image">◎</button>' +
+        '<button type="button" class="pal-act palMerge' + (isSrc ? ' active' : '') + '" data-new="' + newIdx + '" title="Merge this colour into another">⤳</button>' +
+        (p.pinned ? '<button type="button" class="pal-act palUnpin" data-new="' + newIdx + '" title="Unpin — back to auto">✕</button>' : '') +
+      '</span></div>';
+  }).join('');
+  var hint = merging ? '<span class="pal-merge-hint">Pick a colour to merge into…</span>' : '';
+  var addChip = '<button type="button" class="pal-add" id="palAddBtn" title="Add a colour and pin it from the image">＋ Add colour</button>';
+  els.paletteStrip.innerHTML = chips + addChip + hint;
+}
+
+// re-quantise with the current pins WITHOUT wiping Advanced weights/overrides
+// (k is unchanged, so both stay valid) — used by pin/unpin/eyedrop
+function reprocessWithPins() {
+  if (!state.img) return;
+  computeCentroids();
+  relabelAndRender();
+}
+
+// merges are COLOUR-based, not index-based: each group is a set of colours the
+// user declared "one". On every relabel we collapse any cluster within MERGE_DE
+// of a group into that group's largest member — so surplus near-identical greys
+// stay merged even after a Detail change reshuffles the raw cluster indices.
+var MERGE_DE = 20;
+
+// raw-index → survivor-raw-index map for this relabel, from the colour groups
+function computeMergeMap(centroidList, counts, k) {
+  var map = new Int32Array(k);
+  for (var i = 0; i < k; i++) map[i] = i;
+  if (!state.mergeGroups || state.mergeGroups.length === 0) return map;
+  var labs = centroidList.map(function (c) { return rgbToLab(c); });
+  state.mergeGroups.forEach(function (group) {
+    var glabs = group.map(function (rgb) { return rgbToLab(rgb); });
+    var members = [];
+    for (var raw = 0; raw < k; raw++) {
+      for (var gi = 0; gi < glabs.length; gi++) {
+        if (deltaE(labs[raw], glabs[gi]) < MERGE_DE) { members.push(raw); break; }
+      }
+    }
+    if (members.length > 1) {
+      // pinned clusters are never merged AWAY (the user explicitly placed
+      // them) — but merging INTO a pin is fine, so a pinned member wins the
+      // survivor slot. With several pinned members, the largest pin survives
+      // and only the UNPINNED members collapse into it.
+      var pinnedMembers = members.filter(function (m) { return !!state.pins[m]; });
+      var candidates = pinnedMembers.length ? pinnedMembers : members;
+      var survivor = candidates[0], best = counts[candidates[0]] || 0;
+      candidates.forEach(function (m) { if ((counts[m] || 0) > best) { best = counts[m]; survivor = m; } });
+      members.forEach(function (m) {
+        if (state.pins[m] && m !== survivor) return; // other pins stay distinct
+        map[m] = survivor;
+      });
+    }
+  });
+  return map;
+}
+
+// merge display slot srcNew into tgtNew: union their colours into one group,
+// then relabel (colour-based, so it survives a later reprocess)
+function mergeInto(srcNew, tgtNew) {
+  state.mergeSource = null;
+  if (srcNew === tgtNew) { buildPaletteStrip(); return; }
+  unionMergeGroup(state.palette[srcNew].rgb, state.palette[tgtNew].rgb);
+  relabelAndRender();
+}
+
+// add colours a,b to a shared group, absorbing any existing groups near either
+function unionMergeGroup(a, b) {
+  var la = rgbToLab(a), lb = rgbToLab(b);
+  var combined = [a.slice(), b.slice()], keep = [];
+  state.mergeGroups.forEach(function (grp) {
+    var near = grp.some(function (c) { var lc = rgbToLab(c); return deltaE(lc, la) < MERGE_DE || deltaE(lc, lb) < MERGE_DE; });
+    if (near) combined = combined.concat(grp); else keep.push(grp);
+  });
+  keep.push(combined);
+  state.mergeGroups = keep;
+}
+
+// "+ Add colour": the next image click adds a pinned slot at k+1 (how a tiny
+// accent with no histogram peak — a pink ear — gets its own colour at low k)
+function armAddColour() {
+  if (parseInt(els.kColors.value, 10) >= parseInt(els.kColors.max, 10)) {
+    els.cropDims.textContent = 'Colour limit reached — merge or raise Colours first';
+    return;
+  }
+  state.mergeSource = null;
+  state.eyedropAdd = true;
+  state.eyedropOrig = null;
+  els.cropCanvas.classList.add('eyedrop');
+  els.cropDims.textContent = 'Click the image to add a new pinned colour (Esc to cancel)';
+  buildPaletteStrip();
+}
+
+// sample the true source-image pixel under a crop-canvas point (the canvas is
+// the image scaled to its own size; a 1×1 draw reads the exact source colour)
+function sampleImagePixel(pos) {
+  var iw = state.img.naturalWidth, ih = state.img.naturalHeight;
+  var sx = Math.max(0, Math.min(iw - 1, Math.round(pos.x / els.cropCanvas.width * iw)));
+  var sy = Math.max(0, Math.min(ih - 1, Math.round(pos.y / els.cropCanvas.height * ih)));
+  var tmp = document.createElement('canvas'); tmp.width = 1; tmp.height = 1;
+  var t = tmp.getContext('2d');
+  t.drawImage(state.img, sx, sy, 1, 1, 0, 0, 1, 1);
+  var d = t.getImageData(0, 0, 1, 1).data;
+  return [d[0], d[1], d[2]];
+}
+
+function armEyedropper(newIdx) {
+  state.eyedropOrig = state.order[newIdx];
+  els.cropCanvas.classList.add('eyedrop');
+  els.cropDims.textContent = 'Eyedropper armed — click the image to pin colour ' + (newIdx + 1) + ' (Esc to cancel)';
+}
+
+function cancelEyedropper() {
+  state.eyedropOrig = null;
+  state.eyedropAdd = false;
+  els.cropCanvas.classList.remove('eyedrop');
+  if (state.img) updateCropDimsLabel();
+}
+
 // recompute palette counts + border cell count from state.grid against the
 // current finishing geometry — the cheap step re-run by a rounding/border
 // slider drag (no retraining, no re-tracing) and also by a full relabel.
@@ -334,11 +491,19 @@ function relabelAndRender() {
   }
 
   var palette = state.order.map(function (origIdx, newIdx) {
-    var rgb = centroidList[origIdx].map(Math.round);
-    return { rgb: rgb, hex: rgbToHex(rgb), label: String(newIdx + 1), count: 0 };
+    // a pinned colour shows EXACTLY what the user set — not the post-cleanup
+    // mean of its pixels — so the chip and chart match the pin
+    var pin = state.pins[origIdx];
+    var rgb = pin ? [pin[0], pin[1], pin[2]] : centroidList[origIdx].map(Math.round);
+    return { rgb: rgb, hex: rgbToHex(rgb), label: String(newIdx + 1), count: 0, pinned: !!pin };
   });
+  // colour-based merges: route each merged cluster's cells to its survivor, so
+  // the merged-away slots end up with zero cells (hidden from the strip)
+  var counts = [];
+  for (var cc = 0; cc < k; cc++) counts.push(colourSums[cc * 4 + 3]);
+  var mergeMap = computeMergeMap(centroidList, counts, k);
   var grid = new Uint8Array(n);
-  for (var i = 0; i < n; i++) { grid[i] = state.remap[labels[i]]; }
+  for (var i = 0; i < n; i++) { grid[i] = state.remap[mergeMap[labels[i]]]; }
 
   state.palette = palette; state.grid = grid;
   state.roundPct = +els.roundPct.value; state.borderPct = +els.borderPct.value; state.borderHex = els.borderColor.value;
@@ -351,6 +516,7 @@ function relabelAndRender() {
   // the canvas paint below must see that final state (painting first left
   // stale yarn colours on the chart after toggling Advanced off)
   refreshAdvancedSwatches();
+  buildPaletteStrip();
   updateShoppingList();
   // trace/simplify/smooth once per render, shared by both outputs and the
   // SVG export, rather than duplicating that work in each consumer
@@ -403,6 +569,7 @@ function applyFinishing() {
   state.borderHex = els.borderColor.value;
   recomputeCounts();
   refreshAdvancedSwatches();
+  buildPaletteStrip();
   updateShoppingList();
   renderColour(state.gridCols, state.gridRows, state.grid, state.palette, state.smoothedBlobs,
     els.yarnPreviewChk.checked ? computeYarnDisplayHexes() : null);
@@ -444,6 +611,8 @@ function serializeSettings() {
     advanced: state.advanced,
     weights: state.weights ? Array.prototype.slice.call(state.weights) : null,
     yarnOverrides: JSON.parse(JSON.stringify(state.yarnOverrides || {})),
+    pins: JSON.parse(JSON.stringify(state.pins || {})),
+    mergeGroups: JSON.parse(JSON.stringify(state.mergeGroups || [])),
     yarnBrand: els.yarnBrand.value,
     yarnPreview: els.yarnPreviewChk.checked,
     roundPct: parseInt(els.roundPct.value, 10),
@@ -455,7 +624,8 @@ function serializeSettings() {
     multiSource: state.multiSource,
     region: state.msRegion,
     allowedSuppliers: state.msAllowed.slice(),
-    msOverrides: JSON.parse(JSON.stringify(state.msOverrides || {}))
+    msOverrides: JSON.parse(JSON.stringify(state.msOverrides || {})),
+    includeMulti: state.includeMulti
   };
 }
 
@@ -474,6 +644,12 @@ function restoreSettings(s) {
   els.density.value = s.density; els.strands.value = s.strands; els.buffer.value = s.buffer;
   state.cropRect = s.cropRect ? { x: s.cropRect.x, y: s.cropRect.y, w: s.cropRect.w, h: s.cropRect.h } : FULL_CROP;
   state.advanced = !!s.advanced;
+  // pins/merges must be in place before the reprocess below re-seeds/relabels
+  state.pins = s.pins ? JSON.parse(JSON.stringify(s.pins)) : {};
+  state.mergeGroups = s.mergeGroups ? JSON.parse(JSON.stringify(s.mergeGroups)) : [];
+  state.eyedropOrig = null;
+  state.eyedropAdd = false;
+  state.mergeSource = null;
   els.advToggle.textContent = state.advanced ? 'Hide' : 'Show';
   els.advToggle.setAttribute('aria-expanded', state.advanced ? 'true' : 'false');
   els.advBody.classList.toggle('hidden', !state.advanced);
@@ -502,6 +678,8 @@ function restoreSettings(s) {
   state.msRegion = els.msRegion.value;
   setMsCheckboxesFromKeys(s.allowedSuppliers || []);
   state.msOverrides = s.msOverrides ? JSON.parse(JSON.stringify(s.msOverrides)) : {};
+  state.includeMulti = !!s.includeMulti;
+  els.includeMulti.checked = state.includeMulti;
   applyMatLock('w'); // refresh the lock hint against the restored crop
 
   if (state.img) {
@@ -612,6 +790,24 @@ function init() {
     if (!state.img) return;
     e.preventDefault();
     var pos = cropPointerPos(e);
+    // "+ Add colour": this click adds a new pinned slot at k+1
+    if (state.eyedropAdd) {
+      var rgb = sampleImagePixel(pos);
+      var k = parseInt(els.kColors.value, 10);
+      els.kColors.value = k + 1; els.kVal.textContent = k + 1;
+      state.pins[k] = rgb;                 // new raw index = k (now k+1 slots)
+      cancelEyedropper();
+      reprocessWithPins();
+      return;
+    }
+    // eyedropper mode: this click samples a source pixel and pins the slot,
+    // instead of starting a crop drag
+    if (state.eyedropOrig != null) {
+      state.pins[state.eyedropOrig] = sampleImagePixel(pos);
+      cancelEyedropper();
+      reprocessWithPins();
+      return;
+    }
     var rect = cropRectDisplayPx();
     var handle = hitTestHandle(pos, rect);
     if (handle) {
@@ -662,6 +858,13 @@ function init() {
 
   els.cropAspect.addEventListener('change', refitCropToAspect);
 
+  // clicking a matched-yarn swatch opens the visual picker for that palette slot
+  els.shopBody.addEventListener('click', function (e) {
+    var btn = e.target.closest('.yarnSwatchBtn');
+    if (!btn) return;
+    openPicker(parseInt(btn.dataset.idx, 10));
+  });
+
   els.shopBody.addEventListener('change', function (e) {
     if (!e.target.classList.contains('yarnPick')) return;
     var idx = e.target.dataset.idx;
@@ -710,6 +913,43 @@ function init() {
     } else {
       updateShoppingList();
     }
+  });
+
+  els.includeMulti.addEventListener('change', function () {
+    state.includeMulti = els.includeMulti.checked;
+    updateShoppingList();
+    repaintColourIfPreviewing();
+  });
+
+  // palette editor: set an exact colour, eyedrop one from the image, or unpin
+  els.paletteStrip.addEventListener('change', function (e) {
+    if (!e.target.classList.contains('palColor')) return;
+    state.pins[state.order[+e.target.dataset.new]] = hexToRgb(e.target.value);
+    reprocessWithPins();
+  });
+  els.paletteStrip.addEventListener('click', function (e) {
+    if (e.target.closest('#palAddBtn')) { armAddColour(); return; }
+    var eye = e.target.closest('.palEyedrop');
+    if (eye) { state.mergeSource = null; armEyedropper(+eye.dataset.new); return; }
+    var unpin = e.target.closest('.palUnpin');
+    if (unpin) { delete state.pins[state.order[+unpin.dataset.new]]; reprocessWithPins(); return; }
+    var merge = e.target.closest('.palMerge');
+    if (merge) {
+      var mi = +merge.dataset.new;
+      state.mergeSource = (state.mergeSource === mi) ? null : mi;   // toggle
+      buildPaletteStrip();
+      return;
+    }
+    // while a merge source is armed, clicking another chip picks the target
+    if (state.mergeSource != null) {
+      var chip = e.target.closest('.pal-chip[data-new]');
+      if (chip && +chip.dataset.new !== state.mergeSource) { mergeInto(state.mergeSource, +chip.dataset.new); }
+    }
+  });
+  document.addEventListener('keydown', function (e) {
+    if (e.key !== 'Escape') return;
+    if (state.eyedropOrig != null || state.eyedropAdd) cancelEyedropper();
+    if (state.mergeSource != null) { state.mergeSource = null; buildPaletteStrip(); }
   });
 
   els.msRegion.addEventListener('change', function () { applyRegionFilter(els.msRegion.value); });
@@ -793,11 +1033,16 @@ function init() {
 
   els.autoBtn.addEventListener('click', function () {
     if (!state.img) return;
+    state.pins = {};           // auto colour detection releases every pin + merge
+    state.mergeGroups = [];
+    state.mergeSource = null;
+    cancelEyedropper();
     autoPickK();
     process();
   });
 
   initPanels(); // restore which panels the user keeps open
+  initPicker(); // wire the visual yarn picker modal
   initPrefs(); // apply device defaults before anything is loaded
 
   initCloud({
@@ -807,6 +1052,10 @@ function init() {
     getImage: function () { return state.img; },
     loadFile: loadFile
   });
+
+  // read-only test seam: the same serialize/restore the cloud panel uses, so
+  // the e2e can round-trip project settings (e.g. pins) without Supabase auth
+  window.__tuftTest = { serialize: serializeSettings, restore: restoreSettings, state: state };
 }
 
 initEls();

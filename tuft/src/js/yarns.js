@@ -34,7 +34,8 @@ export function populateBrandSelect() {
     (brand.lines || []).forEach(function (line, li) {
       var opt = document.createElement('option');
       opt.value = bi + ':' + li;
-      opt.textContent = brand.brand + ' — ' + line.line + ' (' + line.colors.length + ' colours)';
+      opt.textContent = brand.brand + ' — ' + line.line + (brand.retailer ? ' · ' + brand.retailer : '') +
+        ' (' + line.colors.length + ' colours)';
       els.yarnBrand.appendChild(opt);
     });
   });
@@ -48,7 +49,7 @@ function supplierEntries() {
   var list = [];
   (YARN_DATA.brands || []).forEach(function (brand, bi) {
     (brand.lines || []).forEach(function (line, li) {
-      list.push({ key: bi + ':' + li, brand: brand.brand, line: line.line,
+      list.push({ key: bi + ':' + li, brand: brand.brand, retailer: brand.retailer || null, line: line.line,
         country: brand.country || '?', currency: brand.currency, count: line.colors.length });
     });
   });
@@ -67,6 +68,7 @@ export function populateMsSuppliers() {
   els.msSuppliers.innerHTML = supplierEntries().map(function (s) {
     return '<label class="ms-supplier-row"><input type="checkbox" class="msSupplierChk" data-key="' + s.key +
       '" data-country="' + s.country + '" />' + escapeHtml(s.brand) + ' — ' + escapeHtml(s.line) +
+      (s.retailer ? ' · ' + escapeHtml(s.retailer) : '') +
       ' <span class="supplier-tag">[' + s.country + '] · ' + s.count + ' colours</span></label>';
   }).join('');
 }
@@ -104,7 +106,7 @@ export function setActiveLine(value) {
   var parts = value.split(':');
   var brand = YARN_DATA.brands[+parts[0]], line = brand.lines[+parts[1]];
   activeLine = {
-    brand: brand.brand, url: brand.url, currency: brand.currency,
+    brand: brand.brand, retailer: brand.retailer || null, url: brand.url, currency: brand.currency,
     searchUrl: brand.searchUrl || null,
     line: line.line, fiber: line.fiber, coneGrams: line.coneGrams,
     unit: line.unit || 'cone',
@@ -112,18 +114,45 @@ export function setActiveLine(value) {
       // per-colour price wins over the line price — some suppliers charge more
       // for premium/small-batch dyes (or plain white, oddly)
       var price = typeof c.price === 'number' ? c.price : (typeof line.price === 'number' ? line.price : null);
-      return { name: c.name, code: c.code || null, hex: c.hex, source: c.source, price: price, lab: rgbToLab(hexToRgb(c.hex)) };
+      return { name: c.name, code: c.code || null, hex: c.hex, source: c.source, price: price,
+        shadeUrl: c.url || null, img: c.img || c.imgRemote || null, multi: !!c.multi, hexes: c.hexes || null,
+        lab: rgbToLab(hexToRgb(c.hex)) };
     })
   };
 }
 
+// variegated yarns are held out of auto-matching so a multicolour skein never
+// silently stands in for a solid colour (the Waterfall bug). The include-multi
+// checkbox re-admits them; and if a line is ENTIRELY variegated, we fall back
+// to the full set so there's always a nearest match rather than an empty pool.
+function autoCandidates(colors) {
+  if (state.includeMulti) return colors;
+  var solid = colors.filter(function (c) { return !c.multi; });
+  return solid.length ? solid : colors;
+}
+
+// split-swatch CSS: a variegated yarn with 2–3 dominant hexes renders as
+// vertical stripes; everything else is its single hex
+export function swatchBg(c) {
+  if (c && c.multi && c.hexes && c.hexes.length > 1) {
+    var stops = c.hexes.map(function (h, i) {
+      var a = Math.round(i * 100 / c.hexes.length), b = Math.round((i + 1) * 100 / c.hexes.length);
+      return h + ' ' + a + '% ' + b + '%';
+    });
+    return 'linear-gradient(90deg,' + stops.join(',') + ')';
+  }
+  return (c && c.hex) || '#888';
+}
+
 // paletteIdx is optional (existing callers that never override can omit it);
-// when Advanced is on and an override exists for this line + palette index,
-// return that yarn instead of the nearest match (deltaE still computed
-// against it, so the poor-match marker downstream stays honest)
+// when an override exists for this line + palette index, return that yarn
+// instead of the nearest match (deltaE still computed against it, so the
+// poor-match marker downstream stays honest)
 export function matchYarn(rgb, paletteIdx) {
   var lab = rgbToLab(rgb);
-  if (state.advanced && paletteIdx != null) {
+  // overrides apply regardless of Advanced mode — the visual picker (reachable
+  // without Advanced) writes the same yarnOverrides state the reach-slider UI does
+  if (paletteIdx != null) {
     var overrideName = state.yarnOverrides[els.yarnBrand.value + ':' + paletteIdx];
     if (overrideName) {
       for (var i = 0; i < activeLine.colors.length; i++) {
@@ -134,7 +163,7 @@ export function matchYarn(rgb, paletteIdx) {
     }
   }
   var best = null, bestD = Infinity;
-  activeLine.colors.forEach(function (c) {
+  autoCandidates(activeLine.colors).forEach(function (c) {
     var d = deltaE(lab, c.lab);
     if (d < bestD) { bestD = d; best = c; }
   });
@@ -172,9 +201,12 @@ function buildYarnPool(allowedKeys) {
       line.colors.forEach(function (c) {
         var price = typeof c.price === 'number' ? c.price : (typeof line.price === 'number' ? line.price : null);
         pool.push({
-          key: key, brand: brand.brand, line: line.line, url: brand.url, currency: brand.currency,
+          key: key, brand: brand.brand, retailer: brand.retailer || null, line: line.line,
+          url: brand.url, searchUrl: brand.searchUrl || null, currency: brand.currency,
           coneGrams: line.coneGrams, unit: line.unit || 'cone',
-          name: c.name, code: c.code || null, hex: c.hex, price: price, lab: rgbToLab(hexToRgb(c.hex))
+          name: c.name, code: c.code || null, hex: c.hex, price: price,
+          shadeUrl: c.url || null, img: c.img || c.imgRemote || null, multi: !!c.multi, hexes: c.hexes || null,
+          lab: rgbToLab(hexToRgb(c.hex))
         });
       });
     });
@@ -186,7 +218,7 @@ function buildYarnPool(allowedKeys) {
 // supplier line and the colour within it (names collide across suppliers)
 function matchYarnMulti(rgb, paletteIdx, pool) {
   var lab = rgbToLab(rgb);
-  if (state.advanced && paletteIdx != null) {
+  if (paletteIdx != null) {
     var ov = state.msOverrides[paletteIdx];
     if (ov) {
       for (var i = 0; i < pool.length; i++) {
@@ -197,7 +229,7 @@ function matchYarnMulti(rgb, paletteIdx, pool) {
     }
   }
   var best = null, bestD = Infinity;
-  pool.forEach(function (c) {
+  autoCandidates(pool).forEach(function (c) {
     var d = deltaE(lab, c.lab);
     if (d < bestD) { bestD = d; best = c; }
   });
@@ -231,7 +263,7 @@ function buildYarnPickSelectMulti(p, paletteIdx, pool) {
 function addToMultiBuy(buyMulti, match, grams) {
   var key = match.yarn.key;
   if (!buyMulti[key]) {
-    buyMulti[key] = { brand: match.yarn.brand, line: match.yarn.line, url: match.yarn.url,
+    buyMulti[key] = { brand: match.yarn.brand, retailer: match.yarn.retailer || null, line: match.yarn.line, url: match.yarn.url,
       currency: match.yarn.currency, coneGrams: match.yarn.coneGrams, unit: match.yarn.unit, items: {} };
   }
   var items = buyMulti[key].items;
@@ -272,10 +304,76 @@ export function repaintColourIfPreviewing() {
   }
 }
 
+// ---------- visual yarn picker ----------
+// candidate yarns for one palette slot, nearest-ΔE first, variegated yarns
+// sorted last and (unless include-multicolour is on) hidden entirely. Works in
+// both single-brand and multi-source modes; returns null when no yarn source is
+// selected. Each candidate carries a stable `ref` the picker echoes back to
+// applyPickerChoice, plus `selected` for the current override.
+export function pickerCandidates(paletteIdx) {
+  if (!state.palette || !state.palette[paletteIdx]) return null;
+  var rgb = state.palette[paletteIdx].rgb;
+  var lab = rgbToLab(rgb);
+  var multiMode = state.multiSource && state.msAllowed && state.msAllowed.length > 0;
+  var source, currentRef;
+  if (multiMode) {
+    source = buildYarnPool(state.msAllowed);
+    var ov = state.msOverrides[paletteIdx];
+    currentRef = ov ? ov.key + MS_SEP + ov.name : null;
+  } else if (activeLine) {
+    source = activeLine.colors;
+    currentRef = state.yarnOverrides[els.yarnBrand.value + ':' + paletteIdx] || null;
+  } else {
+    return null;
+  }
+  var list = source.map(function (c) {
+    var ref = multiMode ? c.key + MS_SEP + c.name : c.name;
+    return {
+      ref: ref, name: c.name, code: c.code || null, hex: c.hex,
+      img: c.img || null, multi: !!c.multi, hexes: c.hexes || null,
+      price: (typeof c.price === 'number' ? c.price : null),
+      currency: multiMode ? c.currency : (activeLine ? activeLine.currency : null),
+      brand: multiMode ? c.brand : (activeLine ? activeLine.brand : null),
+      deltaE: deltaE(lab, c.lab), selected: ref === currentRef
+    };
+  });
+  if (!state.includeMulti) list = list.filter(function (c) { return !c.multi; });
+  // solids nearest-first, then variegated nearest-first at the end
+  list.sort(function (a, b) {
+    if (a.multi !== b.multi) return a.multi ? 1 : -1;
+    return a.deltaE - b.deltaE;
+  });
+  return { multiMode: multiMode, currency: multiMode ? null : (activeLine && activeLine.currency), list: list };
+}
+
+// write a picker choice into the existing override state (ref === null clears
+// the override back to auto), then refresh the shopping list + any preview
+export function applyPickerChoice(paletteIdx, ref) {
+  var multiMode = state.multiSource && state.msAllowed && state.msAllowed.length > 0;
+  if (multiMode) {
+    if (ref) {
+      var parts = ref.split(MS_SEP);
+      state.msOverrides[paletteIdx] = { key: parts[0], name: parts[1] };
+    } else {
+      delete state.msOverrides[paletteIdx];
+    }
+  } else {
+    var key = els.yarnBrand.value + ':' + paletteIdx;
+    if (ref) state.yarnOverrides[key] = ref; else delete state.yarnOverrides[key];
+  }
+  updateShoppingList();
+  repaintColourIfPreviewing();
+}
+
 // ---------- buy links ----------
 // deep-link a colour into the shop's search where the shop supports it
 // (searchUrl template with {q}); otherwise fall back to the shop front page
 function yarnFindUrl(searchUrl, shopUrl, yarn) {
+  // schema v2: a direct per-shade product page (Wool Warehouse) beats a search
+  // template. Only `shadeUrl` counts as direct — pooled multi-source entries
+  // ALSO carry a `url` field, but that one is the SHOP front page, and treating
+  // it as direct silently killed the search deep-links in multi-source mode.
+  if (yarn.shadeUrl) return yarn.shadeUrl;
   if (!searchUrl) return shopUrl;
   return searchUrl.replace('{q}', encodeURIComponent(yarn.name + (yarn.code ? ' ' + yarn.code : '')));
 }
@@ -284,13 +382,14 @@ function yarnFindUrl(searchUrl, shopUrl, yarn) {
 function renderBuyLinks(groups) {
   if (!groups || !groups.length) { els.buyLinks.innerHTML = ''; return; }
   els.buyLinks.innerHTML = groups.map(function (g) {
-    var head = '<div class="buy-group-head"><strong>' + escapeHtml(g.brand) + ' — ' + escapeHtml(g.line) + '</strong>' +
+    var head = '<div class="buy-group-head"><strong>' + escapeHtml(g.brand) + ' — ' + escapeHtml(g.line) +
+      (g.retailer ? ' · ' + escapeHtml(g.retailer) : '') + '</strong>' +
       '<a href="' + escapeHtml(g.url) + '" target="_blank" rel="noopener">Open shop ↗</a></div>';
     var rows = g.items.map(function (b) {
       var qty = '~' + Math.round(b.grams) + 'g' +
         (b.cones ? ' · ' + b.cones + ' × ' + g.coneGrams + 'g ' + g.unit + (b.cones === 1 ? '' : 's') : '');
       var price = (b.price != null && b.cones) ? ' · ' + formatPrice(b.cones * b.price, g.currency) : '';
-      return '<li><span class="swatch" style="background:' + b.yarn.hex + '"></span>' +
+      return '<li><span class="swatch" style="background:' + swatchBg(b.yarn) + '"></span>' +
         '<a href="' + escapeHtml(yarnFindUrl(g.searchUrl, g.url, b.yarn)) + '" target="_blank" rel="noopener">' +
         escapeHtml(b.yarn.name) + (b.yarn.code ? ' [' + escapeHtml(b.yarn.code) + ']' : '') + ' ↗</a>' +
         '<span class="buy-qty">' + qty + price + (b.manual ? ' · manual' : '') + '</span></li>';
@@ -399,10 +498,10 @@ export function updateShoppingList() {
       var mwarnSpan = mrough ? ' <span style="color:var(--warn)" title="No close match in this range — nearest is noticeably different">≉</span>' : '';
       supplierCell = '<td><span class="supplier-tag">' + escapeHtml(mm.yarn.brand) + '</span></td>';
       if (state.advanced) {
-        buyCell = '<td><div class="swatchcell"><span class="swatch" style="background:' + mm.yarn.hex + '"></span>' +
+        buyCell = '<td><div class="swatchcell"><button type="button" class="swatch yarnSwatchBtn" data-idx="' + i + '" title="Change yarn" style="background:' + swatchBg(mm.yarn) + '"></button>' +
           buildYarnPickSelectMulti(p, i, pool) + mwarnSpan + '</div></td>';
       } else {
-        buyCell = '<td><div class="swatchcell"><span class="swatch" style="background:' + mm.yarn.hex + '"></span><span>' +
+        buyCell = '<td><div class="swatchcell"><button type="button" class="swatch yarnSwatchBtn" data-idx="' + i + '" title="Change yarn" style="background:' + swatchBg(mm.yarn) + '"></button><span>' +
           escapeHtml(mm.yarn.name) + (mm.yarn.code ? ' <span class="hex">' + escapeHtml(mm.yarn.code) + '</span>' : '') +
           mwarnSpan + '</span></div></td>';
       }
@@ -412,10 +511,10 @@ export function updateShoppingList() {
       var rough = m.deltaE > 22; // beyond ~22 ΔE the substitute visibly shifts the design
       var warnSpan = rough ? ' <span style="color:var(--warn)" title="No close match in this range — nearest is noticeably different">≉</span>' : '';
       if (state.advanced) {
-        buyCell = '<td><div class="swatchcell"><span class="swatch" style="background:' + m.yarn.hex + '"></span>' +
+        buyCell = '<td><div class="swatchcell"><button type="button" class="swatch yarnSwatchBtn" data-idx="' + i + '" title="Change yarn" style="background:' + swatchBg(m.yarn) + '"></button>' +
           buildYarnPickSelect(p, i) + warnSpan + '</div></td>';
       } else {
-        buyCell = '<td><div class="swatchcell"><span class="swatch" style="background:' + m.yarn.hex + '"></span><span>' +
+        buyCell = '<td><div class="swatchcell"><button type="button" class="swatch yarnSwatchBtn" data-idx="' + i + '" title="Change yarn" style="background:' + swatchBg(m.yarn) + '"></button><span>' +
           escapeHtml(m.yarn.name) + (m.yarn.code ? ' <span class="hex">' + escapeHtml(m.yarn.code) + '</span>' : '') +
           warnSpan + '</span></div></td>';
       }
@@ -441,14 +540,14 @@ export function updateShoppingList() {
       var mbRough = borderMatch.deltaE > 22;
       var mbWarnSpan = mbRough ? ' <span style="color:var(--warn)" title="No close match in this range — nearest is noticeably different">≉</span>' : '';
       bSupplierCell = '<td><span class="supplier-tag">' + escapeHtml(borderMatch.yarn.brand) + '</span></td>';
-      bBuyCell = '<td><div class="swatchcell"><span class="swatch" style="background:' + borderMatch.yarn.hex + '"></span><span>' +
+      bBuyCell = '<td><div class="swatchcell"><span class="swatch" style="background:' + swatchBg(borderMatch.yarn) + '"></span><span>' +
         escapeHtml(borderMatch.yarn.name) + (borderMatch.yarn.code ? ' <span class="hex">' + escapeHtml(borderMatch.yarn.code) + '</span>' : '') +
         mbWarnSpan + '</span></div></td>';
       bBuyText = '   -> ' + borderMatch.yarn.brand + ' / ' + borderMatch.yarn.name + (mbRough ? ' (poor match)' : '');
     } else if (activeLine && borderMatch) {
       var bRough = borderMatch.deltaE > 22;
       var bWarnSpan = bRough ? ' <span style="color:var(--warn)" title="No close match in this range — nearest is noticeably different">≉</span>' : '';
-      bBuyCell = '<td><div class="swatchcell"><span class="swatch" style="background:' + borderMatch.yarn.hex + '"></span><span>' +
+      bBuyCell = '<td><div class="swatchcell"><span class="swatch" style="background:' + swatchBg(borderMatch.yarn) + '"></span><span>' +
         escapeHtml(borderMatch.yarn.name) + (borderMatch.yarn.code ? ' <span class="hex">' + escapeHtml(borderMatch.yarn.code) + '</span>' : '') +
         bWarnSpan + '</span></div></td>';
       bBuyText = '   -> ' + borderMatch.yarn.name + (bRough ? ' (poor match)' : '');
@@ -508,7 +607,7 @@ export function updateShoppingList() {
       var sup = buyMulti[key];
       var srcBrand = YARN_DATA.brands[+key.split(':')[0]];
       return {
-        brand: sup.brand, line: sup.line, url: sup.url, searchUrl: srcBrand.searchUrl || null,
+        brand: sup.brand, retailer: sup.retailer || null, line: sup.line, url: sup.url, searchUrl: srcBrand.searchUrl || null,
         currency: sup.currency, coneGrams: sup.coneGrams, unit: sup.unit,
         items: Object.keys(sup.items).map(function (n) { return sup.items[n]; }),
         subtotal: sup.allPriced ? formatPrice(sup.price, sup.currency) : null
@@ -532,7 +631,7 @@ export function updateShoppingList() {
         (b.price != null && b.cones ? '   ' + formatPrice(b.cones * b.price, activeLine.currency) : ''));
     });
     renderBuyLinks([{
-      brand: activeLine.brand, line: activeLine.line, url: activeLine.url, searchUrl: activeLine.searchUrl,
+      brand: activeLine.brand, retailer: activeLine.retailer, line: activeLine.line, url: activeLine.url, searchUrl: activeLine.searchUrl,
       currency: activeLine.currency, coneGrams: activeLine.coneGrams, unit: activeLine.unit,
       items: Object.keys(buy).map(function (n) { return buy[n]; }),
       subtotal: totalCones && allPriced ? formatPrice(totalPrice, activeLine.currency) : null
