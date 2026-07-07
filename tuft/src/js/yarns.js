@@ -115,10 +115,19 @@ export function setActiveLine(value) {
       // for premium/small-batch dyes (or plain white, oddly)
       var price = typeof c.price === 'number' ? c.price : (typeof line.price === 'number' ? line.price : null);
       return { name: c.name, code: c.code || null, hex: c.hex, source: c.source, price: price,
-        shadeUrl: c.url || null, img: c.img || c.imgRemote || null, multi: !!c.multi, hexes: c.hexes || null,
+        shadeUrl: c.url || null, img: resolveImg(c), multi: !!c.multi, hexes: c.hexes || null,
         lab: rgbToLab(hexToRgb(c.hex)) };
     })
   };
+}
+
+// catalog img paths are stored relative to src/ ("swatches/x.webp") so the
+// data stays location-agnostic; the app page lives one level up, so local
+// paths resolve through src/. Remote fallbacks (imgRemote) pass through.
+function resolveImg(c) {
+  var v = c.img || c.imgRemote || null;
+  if (v && !/^https?:\/\//.test(v)) return 'src/' + v;
+  return v;
 }
 
 // variegated yarns are held out of auto-matching so a multicolour skein never
@@ -205,7 +214,7 @@ function buildYarnPool(allowedKeys) {
           url: brand.url, searchUrl: brand.searchUrl || null, currency: brand.currency,
           coneGrams: line.coneGrams, unit: line.unit || 'cone',
           name: c.name, code: c.code || null, hex: c.hex, price: price,
-          shadeUrl: c.url || null, img: c.img || c.imgRemote || null, multi: !!c.multi, hexes: c.hexes || null,
+          shadeUrl: c.url || null, img: resolveImg(c), multi: !!c.multi, hexes: c.hexes || null,
           lab: rgbToLab(hexToRgb(c.hex))
         });
       });
