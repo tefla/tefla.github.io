@@ -6,9 +6,12 @@ import { computeSmoothedBlobs } from './trace.js';
 import { computeLineArt } from './lineart.js';
 import { renderColour, renderBW, downloadCanvas, downloadSVG } from './render.js';
 import { setActiveLine, activeLine, updateShoppingList, repaintColourIfPreviewing, computeYarnDisplayHexes, populateBrandSelect } from './yarns.js';
+import { initCloud } from './cloud.js';
 
 // ---------- image import ----------
-function loadFile(file) {
+// `onload` (optional) fires after the chart has regenerated — the cloud
+// project loader restores saved settings on top of the freshly loaded image
+function loadFile(file, onload) {
   if (!file || file.type.indexOf('image/') !== 0) return;
   var reader = new FileReader();
   reader.onload = function (e) {
@@ -24,6 +27,7 @@ function loadFile(file) {
       initCropCanvas();
       autoPickK();
       process();
+      if (onload) onload();
     };
     img.src = e.target.result;
   };
@@ -418,6 +422,94 @@ export function updateBorderHint() {
   els.borderColorField.style.opacity = pct > 0 ? '1' : '0.5';
 }
 
+// ---------- cloud project state (serialize/restore the full settings UI) ----------
+// Ported from the pre-rewrite build; multi-source buying fields dropped with
+// the feature. Old saves carrying them restore fine (extra fields ignored).
+function serializeSettings() {
+  return {
+    v: 1,
+    detailSize: parseInt(els.detailSize.value, 10),
+    kColors: parseInt(els.kColors.value, 10),
+    lineThickness: parseInt(els.lineThickness.value, 10),
+    matW: parseFloat(els.matW.value),
+    matH: parseFloat(els.matH.value),
+    density: parseFloat(els.density.value),
+    strands: parseInt(els.strands.value, 10),
+    buffer: parseFloat(els.buffer.value),
+    cropRect: { x: state.cropRect.x, y: state.cropRect.y, w: state.cropRect.w, h: state.cropRect.h },
+    advanced: state.advanced,
+    weights: state.weights ? Array.prototype.slice.call(state.weights) : null,
+    yarnOverrides: JSON.parse(JSON.stringify(state.yarnOverrides || {})),
+    yarnBrand: els.yarnBrand.value,
+    yarnPreview: els.yarnPreviewChk.checked,
+    roundPct: parseInt(els.roundPct.value, 10),
+    borderPct: parseInt(els.borderPct.value, 10),
+    borderHex: els.borderColor.value,
+    cropAspect: els.cropAspect.value
+  };
+}
+
+function restoreSettings(s) {
+  els.detailSize.value = s.detailSize;
+  els.kColors.value = s.kColors;
+  els.kVal.textContent = s.kColors;
+  // saves from before the modular rewrite predate the line-thickness slider
+  var lineThickness = s.lineThickness != null ? s.lineThickness : 0;
+  els.lineThickness.value = lineThickness;
+  state.lineThickness = lineThickness;
+  els.lineThickVal.textContent = lineThickness > 0 ? lineThickness : 'off';
+  state.lineArt = null; // relabelAndRender recomputes it when thickness > 0
+  els.matW.value = s.matW; els.matH.value = s.matH;
+  els.density.value = s.density; els.strands.value = s.strands; els.buffer.value = s.buffer;
+  state.cropRect = s.cropRect ? { x: s.cropRect.x, y: s.cropRect.y, w: s.cropRect.w, h: s.cropRect.h } : FULL_CROP;
+  state.advanced = !!s.advanced;
+  els.advToggle.textContent = state.advanced ? 'Hide' : 'Show';
+  els.advToggle.setAttribute('aria-expanded', state.advanced ? 'true' : 'false');
+  els.advBody.classList.toggle('hidden', !state.advanced);
+  els.yarnBrand.value = s.yarnBrand || '';
+  setActiveLine(els.yarnBrand.value);
+  els.yarnBrandHint.textContent = activeLine
+    ? activeLine.fiber + ' · ' + (activeLine.coneGrams ? activeLine.coneGrams + 'g ' + activeLine.unit + 's' : 'unit weight unknown') + ' · ' + activeLine.url
+    : 'Pick a supplier to match every pattern colour to the nearest yarn they sell';
+
+  // finishing/crop — older saved settings predate these fields, so fall
+  // back to the same defaults the controls ship with
+  els.roundPct.value = s.roundPct != null ? s.roundPct : 0;
+  els.borderPct.value = s.borderPct != null ? s.borderPct : 0;
+  els.borderColor.value = s.borderHex || '#222222';
+  els.cropAspect.value = s.cropAspect || 'free';
+  updateRoundHint();
+  updateBorderHint();
+
+  if (state.img) {
+    drawCropOverlay();
+    updateCropDimsLabel();
+    computeCentroids();
+    resetAdvanced();
+    if (s.weights && s.weights.length === state.trained.k) {
+      state.weights = new Float32Array(s.weights);
+    } else if (s.weights) {
+      throw new Error('saved weights length ' + s.weights.length + ' does not match k=' + state.trained.k);
+    }
+    state.yarnOverrides = s.yarnOverrides ? JSON.parse(JSON.stringify(s.yarnOverrides)) : {};
+    els.yarnPreviewChk.checked = false; // never inherit a stale preview state
+    buildAdvancedRows();
+    relabelAndRender();
+    if (s.yarnPreview && state.advanced && activeLine) {
+      els.yarnPreviewChk.checked = true;
+      renderColour(state.gridCols, state.gridRows, state.grid, state.palette, state.smoothedBlobs, computeYarnDisplayHexes());
+    }
+  } else {
+    // no image yet: park the values so they apply when one is loaded
+    els.detailVal.textContent = s.detailSize + ' px';
+    els.matWVal.textContent = s.matW; els.matHVal.textContent = s.matH;
+    els.densityVal.textContent = s.density; els.strandsVal.textContent = s.strands;
+    els.bufferVal.textContent = s.buffer;
+    state.weights = s.weights ? new Float32Array(s.weights) : null;
+    state.yarnOverrides = s.yarnOverrides ? JSON.parse(JSON.stringify(s.yarnOverrides)) : {};
+  }
+}
+
 // ---------- control wiring ----------
 // the trace/simplify/smooth passes make a full recompute heavy — debounce so
 // dragging a slider doesn't queue up dozens of recomputes
@@ -604,6 +696,14 @@ function init() {
     if (!state.img) return;
     autoPickK();
     process();
+  });
+
+  initCloud({
+    serialize: serializeSettings,
+    restore: restoreSettings,
+    hasImage: function () { return !!state.img; },
+    getImage: function () { return state.img; },
+    loadFile: loadFile
   });
 }
 

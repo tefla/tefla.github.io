@@ -9,7 +9,26 @@
 <body>
 <div class="wrap">
   <header class="top">
-    <h1>Tuft Pattern Maker</h1>
+    <div class="titlerow">
+      <h1>Tuft Pattern Maker</h1>
+      <div class="authbar" id="authBar">
+        <button class="autobtn" id="loginBtn" type="button">Sign in</button>
+        <form id="loginForm" class="hidden">
+          <span style="display:flex; align-items:center; gap:8px; flex-wrap:wrap">
+            <input type="email" id="loginEmail" placeholder="you@example.com" autocomplete="email" required />
+            <button class="autobtn" id="sendLinkBtn" type="submit">Send magic link</button>
+            <!-- shown once the Google provider is configured on the Supabase project -->
+            <button class="autobtn hidden" id="googleBtn" type="button">Sign in with Google</button>
+            <button class="autobtn" id="cancelLoginBtn" type="button">Cancel</button>
+          </span>
+        </form>
+        <span id="authedBox" class="hidden" style="display:flex; align-items:center; gap:8px">
+          <span class="useremail" id="userEmail"></span>
+          <button class="autobtn" id="logoutBtn" type="button">Sign out</button>
+        </span>
+        <span class="authmsg hidden" id="authMsg"></span>
+      </div>
+    </div>
     <p class="tag">Turn a reference image into a flat colour tufting chart: pick a colour count, export a colour PNG/SVG for the gun and a black &amp; white outline chart for the projector, and get a yarn shopping list with gram estimates.</p>
   </header>
 
@@ -188,8 +207,29 @@
     <textarea class="shoptext" id="shopText" readonly onclick="this.select()"></textarea>
   </section>
 
-  <footer class="foot">Everything runs locally in this page — nothing is uploaded anywhere.</footer>
+  <section class="panel">
+    <h2>5 — Cloud projects</h2>
+    <div class="projbar">
+      <input type="text" id="projName" placeholder="Project name" maxlength="120" />
+      <button class="autobtn" id="projSaveBtn" type="button">Save</button>
+      <button class="autobtn" id="projRefreshBtn" type="button">Refresh</button>
+      <span class="authmsg hidden" id="projMsg"></span>
+    </div>
+    <div style="overflow-x:auto">
+      <table class="shop">
+        <thead>
+          <tr><th>Project</th><th>Updated</th><th></th><th></th></tr>
+        </thead>
+        <tbody id="projList">
+          <tr><td colspan="4" style="color:var(--ink-soft)">Sign in to save and load projects</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <footer class="foot">Everything runs locally in this page — nothing leaves your browser unless you sign in and save a project to your account.</footer>
 </div>
+<script src="src/vendor/supabase.js"></script>
 <script type="module" src="src/js/app.js"></script>
 </body>
 </html>
