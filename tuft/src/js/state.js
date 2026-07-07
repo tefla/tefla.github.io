@@ -9,10 +9,11 @@ export const EL_IDS = ['dropzone','fileInput','thumb','dzTitle','dzSub',
  'colourCanvas','colourFrame','colourPlaceholder','bwCanvas','bwFrame','bwPlaceholder',
  'dlColourPng','dlColourSvg','dlBwPng','shopMeta','shopBody','shopTotal',
  'cropWrap','cropCanvas','cropDims','resetCropBtn','cropAspect',
- 'shopHead','shopTotalLabel','yarnBrand','yarnBrandHint',
+ 'shopHead','shopTotalLabel','yarnBrand','yarnBrandHint','yarnBrandField',
  'copyBtn','copyStatus','shopText',
  'advField','advToggle','advBody','advBoundaries','advResetBtn',
- 'yarnPreviewField','yarnPreviewChk'];
+ 'yarnPreviewField','yarnPreviewChk','exportYarnHex',
+ 'multiSource','msGroup','msRegion','msSuppliers'];
 
 // populate els from the DOM — called once at startup, before init() wires
 // listeners, so every els.X reference downstream is live
@@ -26,5 +27,7 @@ export const state = {
   img: null, gridCols: 8, gridRows: 8, palette: null, grid: null, smoothedBlobs: null, counts: null, totalCells: 0, cropRect: FULL_CROP,
   advanced: false, weights: null, yarnOverrides: {}, advRowsK: 0,
   roundPct: 0, borderPct: 0, borderHex: '#222222', border: null,
-  lineThickness: 0, lineArt: null
+  lineThickness: 0, lineArt: null,
+  // multi-source buying: optional mode, off by default — see setActiveLine/matchYarn
+  multiSource: false, msRegion: 'All', msAllowed: [], msOverrides: {}
 };

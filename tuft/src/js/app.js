@@ -5,7 +5,7 @@ import { computeGridDims, sampleImage, finishingGeometry, insideRoundRect } from
 import { computeSmoothedBlobs } from './trace.js';
 import { computeLineArt } from './lineart.js';
 import { renderColour, renderBW, downloadCanvas, downloadSVG } from './render.js';
-import { setActiveLine, activeLine, updateShoppingList, repaintColourIfPreviewing, computeYarnDisplayHexes, populateBrandSelect } from './yarns.js';
+import { setActiveLine, activeLine, updateShoppingList, repaintColourIfPreviewing, computeYarnDisplayHexes, populateBrandSelect, populateMsRegion, populateMsSuppliers, applyRegionFilter, syncMsAllowedFromCheckboxes, setMsCheckboxesFromKeys, MS_SEP } from './yarns.js';
 import { initCloud } from './cloud.js';
 
 // ---------- image import ----------
@@ -445,7 +445,13 @@ function serializeSettings() {
     roundPct: parseInt(els.roundPct.value, 10),
     borderPct: parseInt(els.borderPct.value, 10),
     borderHex: els.borderColor.value,
-    cropAspect: els.cropAspect.value
+    cropAspect: els.cropAspect.value,
+    exportYarnHex: els.exportYarnHex.checked,
+    // multi-source buying (optional mode)
+    multiSource: state.multiSource,
+    region: state.msRegion,
+    allowedSuppliers: state.msAllowed.slice(),
+    msOverrides: JSON.parse(JSON.stringify(state.msOverrides || {}))
   };
 }
 
@@ -480,6 +486,17 @@ function restoreSettings(s) {
   els.cropAspect.value = s.cropAspect || 'free';
   updateRoundHint();
   updateBorderHint();
+  els.exportYarnHex.checked = !!s.exportYarnHex;
+
+  // multi-source buying (optional mode)
+  state.multiSource = !!s.multiSource;
+  els.multiSource.checked = state.multiSource;
+  els.msGroup.classList.toggle('hidden', !state.multiSource);
+  els.yarnBrandField.classList.toggle('hidden', state.multiSource);
+  els.msRegion.value = s.region || 'All';
+  state.msRegion = els.msRegion.value;
+  setMsCheckboxesFromKeys(s.allowedSuppliers || []);
+  state.msOverrides = s.msOverrides ? JSON.parse(JSON.stringify(s.msOverrides)) : {};
 
   if (state.img) {
     drawCropOverlay();
@@ -616,8 +633,18 @@ function init() {
 
   els.shopBody.addEventListener('change', function (e) {
     if (!e.target.classList.contains('yarnPick')) return;
-    var key = els.yarnBrand.value + ':' + e.target.dataset.idx;
-    if (e.target.value) state.yarnOverrides[key] = e.target.value; else delete state.yarnOverrides[key];
+    var idx = e.target.dataset.idx;
+    if (e.target.classList.contains('msYarnPick')) {
+      if (e.target.value) {
+        var parts = e.target.value.split(MS_SEP);
+        state.msOverrides[idx] = { key: parts[0], name: parts[1] };
+      } else {
+        delete state.msOverrides[idx];
+      }
+    } else {
+      var key = els.yarnBrand.value + ':' + idx;
+      if (e.target.value) state.yarnOverrides[key] = e.target.value; else delete state.yarnOverrides[key];
+    }
     updateShoppingList();
     repaintColourIfPreviewing();
   });
@@ -642,13 +669,53 @@ function init() {
     else if (wasPreviewing && state.grid) renderColour(state.gridCols, state.gridRows, state.grid, state.palette, state.smoothedBlobs, null);
   });
 
+  els.multiSource.addEventListener('change', function () {
+    state.multiSource = els.multiSource.checked;
+    els.msGroup.classList.toggle('hidden', !state.multiSource);
+    els.yarnBrandField.classList.toggle('hidden', state.multiSource);
+    if (state.multiSource) {
+      els.msRegion.value = 'All';
+      applyRegionFilter('All'); // also runs updateShoppingList
+    } else {
+      updateShoppingList();
+    }
+  });
+
+  els.msRegion.addEventListener('change', function () { applyRegionFilter(els.msRegion.value); });
+
+  els.msSuppliers.addEventListener('change', function (e) {
+    if (!e.target.classList.contains('msSupplierChk')) return;
+    syncMsAllowedFromCheckboxes();
+  });
+
   populateBrandSelect();
+  populateMsRegion();
+  populateMsSuppliers();
   updateRoundHint();
   updateBorderHint();
 
-  els.dlColourPng.addEventListener('click', function () { downloadCanvas(els.colourCanvas, 'tuft-pattern-colour.png'); });
+  // matched-yarn hexes for the colour exports when the checkbox is on and a
+  // yarn source (brand or multi-supplier selection) exists — else null, and
+  // exports use the palette colours exactly as before
+  function exportHexes() {
+    return els.exportYarnHex.checked ? computeYarnDisplayHexes() : null;
+  }
+
+  els.dlColourPng.addEventListener('click', function () {
+    var hexes = exportHexes();
+    if (hexes && state.grid) {
+      // repaint in yarn colours just for the capture, then restore the
+      // on-screen state (which may itself be previewing yarn colours)
+      renderColour(state.gridCols, state.gridRows, state.grid, state.palette, state.smoothedBlobs, hexes);
+      downloadCanvas(els.colourCanvas, 'tuft-pattern-colour.png');
+      renderColour(state.gridCols, state.gridRows, state.grid, state.palette, state.smoothedBlobs,
+        els.yarnPreviewChk.checked ? computeYarnDisplayHexes() : null);
+    } else {
+      downloadCanvas(els.colourCanvas, 'tuft-pattern-colour.png');
+    }
+  });
   els.dlBwPng.addEventListener('click', function () { downloadCanvas(els.bwCanvas, 'tuft-pattern-bw-projector.png'); });
-  els.dlColourSvg.addEventListener('click', downloadSVG);
+  els.dlColourSvg.addEventListener('click', function () { downloadSVG(exportHexes()); });
 
   els.copyBtn.addEventListener('click', function () {
     els.shopText.select();

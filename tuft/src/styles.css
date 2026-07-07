@@ -290,3 +290,20 @@
   }
   .projbar .authmsg { font-size: 12px; color: var(--ink-soft); }
   .projbar .authmsg.err { color: var(--warn); }
+
+  /* --- Multi-source suppliers --- */
+  .ms-suppliers { display: flex; flex-direction: column; gap: 4px; margin-top: 4px; }
+  .ms-supplier-row {
+    display: flex; align-items: baseline; gap: 8px; font-size: 13px; font-weight: 400;
+    text-transform: none; letter-spacing: normal; color: var(--ink);
+  }
+  .ms-supplier-row input { accent-color: var(--accent); }
+  .supplier-tag { color: var(--ink-soft); font-size: 12px; }
+
+  /* --- Export-in-yarn-colours checkbox --- */
+  .export-yarnhex {
+    display: flex; align-items: baseline; gap: 8px; margin-top: 8px;
+    font-size: 13px; color: var(--ink); flex-wrap: wrap;
+  }
+  .export-yarnhex input { accent-color: var(--accent); }
+  .export-yarnhex .hint { flex-basis: 100%; }

@@ -149,6 +149,11 @@
           <button class="dl" id="dlColourPng" disabled>Download PNG</button>
           <button class="dl ghost" id="dlColourSvg" disabled>Download SVG</button>
         </div>
+        <label class="export-yarnhex">
+          <input type="checkbox" id="exportYarnHex" />
+          Export PNG/SVG in matched yarn colours
+          <span class="hint">Uses the hex values of the yarns matched in section 4 — needs a yarn brand or multi-supplier selection</span>
+        </label>
       </div>
       <div class="output-card">
         <h3>Projector chart (B/W)</h3>
@@ -166,18 +171,30 @@
   <section class="panel">
     <h2>4 — Yarn shopping list</h2>
     <div class="controls" style="margin-bottom:16px">
-      <div class="field">
+      <div class="field" id="yarnBrandField">
         <label for="yarnBrand">Yarn brand</label>
         <select id="yarnBrand">
           <option value="">Generic — hex colours only</option>
         </select>
         <span class="hint" id="yarnBrandHint">Pick a supplier to match every pattern colour to the nearest yarn they sell</span>
       </div>
+      <div class="field">
+        <label>
+          <input type="checkbox" id="multiSource" />
+          Buy from multiple suppliers
+        </label>
+        <span class="hint">Match each colour to its nearest yarn across every allowed supplier, grouped by supplier below</span>
+      </div>
       <div class="field hidden" id="yarnPreviewField">
         <label>
           <input type="checkbox" id="yarnPreviewChk" />
           Preview chart in yarn colours
         </label>
+      </div>
+      <div class="field hidden" id="msGroup" style="grid-column: 1 / -1;">
+        <label for="msRegion">Region</label>
+        <select id="msRegion"></select>
+        <div class="ms-suppliers" id="msSuppliers"></div>
       </div>
     </div>
     <div class="shop-meta" id="shopMeta">Import an image to see quantities</div>

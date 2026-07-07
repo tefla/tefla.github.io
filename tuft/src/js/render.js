@@ -1,7 +1,7 @@
 // ---------- render + export (colour canvas, B/W projector chart, PNG/SVG) ----------
 import { els, state } from './state.js';
 import { finishingGeometry, cellPxFor, roundRectPath, roundRectPathD, insideRoundRect } from './geometry.js';
-import { matchYarn, hexToRgb } from './yarns.js';
+import { matchAnyYarnHex, hexToRgb } from './yarns.js';
 
 export function strokeSmoothedLoops(ctx, smoothedBlobs, cellPx) {
   ctx.beginPath();
@@ -32,9 +32,9 @@ function strokeLineArt(ctx, cols, rows, cellPx) {
 }
 
 // displayHexes (optional, palette-indexed) overrides the fill colour per
-// blob — used by the yarn-colour preview checkbox. BW chart and SVG export
-// are unaffected and keep painting the palette means; changing those too
-// is a follow-up, not part of this feature.
+// blob — used by the yarn-colour preview checkbox and the export-in-yarn-
+// colours option (which passes the same hexes to downloadSVG). The BW
+// projector chart keeps painting outlines only and is unaffected.
 export function renderColour(cols, rows, grid, palette, smoothedBlobs, displayHexes) {
   var cellPx = cellPxFor(cols, rows);
   var w = Math.round(cols * cellPx), h = Math.round(rows * cellPx);
@@ -62,7 +62,7 @@ export function renderColour(cols, rows, grid, palette, smoothedBlobs, displayHe
   vctx.clearRect(0, 0, w, h);
   var Bpx = geom.B * cellPx, Rpx = geom.R * cellPx, RiPx = geom.Ri * cellPx;
   var baseHex = displayHexes ? displayHexes[0] : palette[0].hex;
-  var borderHex = geom.B > 0 ? (displayHexes ? matchYarn(hexToRgb(state.borderHex)).yarn.hex : state.borderHex) : baseHex;
+  var borderHex = geom.B > 0 ? (displayHexes ? (matchAnyYarnHex(hexToRgb(state.borderHex)) || state.borderHex) : state.borderHex) : baseHex;
   vctx.fillStyle = borderHex;
   roundRectPath(vctx, 0, 0, w, h, Rpx);
   vctx.fill();
@@ -159,8 +159,11 @@ export function downloadCanvas(canvas, filename) {
   document.body.appendChild(a); a.click(); document.body.removeChild(a);
 }
 
-export function downloadSVG() {
+// displayHexes (optional): palette-indexed override colours — used by the
+// export-in-yarn-colours option to write matched yarn hexes into the SVG
+export function downloadSVG(displayHexes) {
   if (!state.smoothedBlobs) return;
+  var hex = function (i) { return displayHexes ? displayHexes[i] : state.palette[i].hex; };
   var cols = state.gridCols, rows = state.gridRows, unit = 10;
   var W = cols * unit, H = rows * unit;
   var parts = ['<svg xmlns="http://www.w3.org/2000/svg" width="' + W + '" height="' + H +
@@ -171,16 +174,17 @@ export function downloadSVG() {
   if (geom.active) {
     var Bpx = geom.B * unit, Rpx = geom.R * unit, RiPx = geom.Ri * unit;
     if (geom.B > 0) {
-      parts.push('<path d="' + roundRectPathD(0, 0, W, H, Rpx) + '" fill="' + state.borderHex + '"/>');
-      parts.push('<path d="' + roundRectPathD(Bpx, Bpx, W - 2 * Bpx, H - 2 * Bpx, RiPx) + '" fill="' + state.palette[0].hex + '"/>');
+      var svgBorderHex = displayHexes ? (matchAnyYarnHex(hexToRgb(state.borderHex)) || state.borderHex) : state.borderHex;
+      parts.push('<path d="' + roundRectPathD(0, 0, W, H, Rpx) + '" fill="' + svgBorderHex + '"/>');
+      parts.push('<path d="' + roundRectPathD(Bpx, Bpx, W - 2 * Bpx, H - 2 * Bpx, RiPx) + '" fill="' + hex(0) + '"/>');
       parts.push('<clipPath id="rug"><path d="' + roundRectPathD(Bpx, Bpx, W - 2 * Bpx, H - 2 * Bpx, RiPx) + '"/></clipPath>');
     } else {
-      parts.push('<path d="' + roundRectPathD(0, 0, W, H, Rpx) + '" fill="' + state.palette[0].hex + '"/>');
+      parts.push('<path d="' + roundRectPathD(0, 0, W, H, Rpx) + '" fill="' + hex(0) + '"/>');
       parts.push('<clipPath id="rug"><path d="' + roundRectPathD(0, 0, W, H, Rpx) + '"/></clipPath>');
     }
     parts.push('<g clip-path="url(#rug)">');
   } else {
-    parts.push('<rect width="' + W + '" height="' + H + '" fill="' + state.palette[0].hex + '"/>');
+    parts.push('<rect width="' + W + '" height="' + H + '" fill="' + hex(0) + '"/>');
   }
   var blobs = state.lineArt ? state.lineArt.fillBlobs : state.smoothedBlobs;
   blobs.forEach(function (b) {
@@ -189,7 +193,7 @@ export function downloadSVG() {
         return (p[0] * unit).toFixed(2) + ' ' + (p[1] * unit).toFixed(2);
       }).join('L') + 'Z';
     }).join('');
-    parts.push('<path d="' + d + '" fill="' + state.palette[b.idx].hex + '" fill-rule="evenodd"/>');
+    parts.push('<path d="' + d + '" fill="' + hex(b.idx) + '" fill-rule="evenodd"/>');
   });
   if (state.lineArt) {
     var sw = (state.lineThickness * Math.max(cols, rows) / 512 * unit).toFixed(2);
