@@ -143,7 +143,7 @@
     .tag { display: none; }
   }
 
-  section.panel {
+  .panel {
     background: var(--surface);
     border: 1px solid var(--line);
     border-radius: 12px;
@@ -159,7 +159,63 @@
     letter-spacing: 0.08em;
     color: var(--ink-soft);
     margin: 0 0 16px;
+    display: inline; /* sits inside the summary line */
   }
+
+  /* collapsible panels: the h2 lives in the summary; a chevron shows state */
+  details.panel > summary {
+    list-style: none;
+    cursor: pointer;
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 10px;
+    user-select: none;
+  }
+  details.panel > summary::-webkit-details-marker { display: none; }
+  details.panel > summary::after {
+    content: '›';
+    font-family: 'JBM', ui-monospace, monospace;
+    font-size: 16px;
+    color: var(--ink-soft);
+    transform: rotate(90deg);
+    transition: transform 0.15s;
+  }
+  details.panel[open] > summary::after { transform: rotate(-90deg); }
+  details.panel > summary { margin: 0; }
+  details.panel[open] > summary { margin-bottom: 16px; }
+  details.panel:not([open]) { padding-top: 14px; padding-bottom: 14px; }
+
+  /* collapsed sub-groups inside a panel (yarn estimate, finishing, text list) */
+  details.subgroup {
+    grid-column: 1 / -1;
+    border: 1px dashed var(--line);
+    border-radius: 8px;
+    padding: 10px 14px;
+  }
+  details.subgroup > summary {
+    list-style: none;
+    cursor: pointer;
+    user-select: none;
+    font-size: 12px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--ink-soft);
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 10px;
+  }
+  details.subgroup > summary::-webkit-details-marker { display: none; }
+  details.subgroup > summary::after {
+    content: '›';
+    font-family: 'JBM', ui-monospace, monospace;
+    transform: rotate(90deg);
+    transition: transform 0.15s;
+  }
+  details.subgroup[open] > summary::after { transform: rotate(-90deg); }
+  details.subgroup[open] > summary { margin-bottom: 12px; }
 
   /* --- Import --- */
   .dropzone {

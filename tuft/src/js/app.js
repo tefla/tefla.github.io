@@ -8,6 +8,7 @@ import { renderColour, renderBW, downloadCanvas, downloadSVG } from './render.js
 import { setActiveLine, activeLine, updateShoppingList, repaintColourIfPreviewing, computeYarnDisplayHexes, populateBrandSelect, populateMsRegion, populateMsSuppliers, applyRegionFilter, syncMsAllowedFromCheckboxes, setMsCheckboxesFromKeys, MS_SEP } from './yarns.js';
 import { initCloud } from './cloud.js';
 import { initPrefs } from './prefs.js';
+import { initPanels } from './panels.js';
 
 // ---------- image import ----------
 // `onload` (optional) fires after the chart has regenerated — the cloud
@@ -796,6 +797,7 @@ function init() {
     process();
   });
 
+  initPanels(); // restore which panels the user keeps open
   initPrefs(); // apply device defaults before anything is loaded
 
   initCloud({

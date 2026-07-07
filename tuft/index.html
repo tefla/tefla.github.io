@@ -34,8 +34,8 @@
 
   <div class="workspace">
   <div class="rail">
-  <section class="panel">
-    <h2>1 — Import image</h2>
+  <details class="panel" data-panel="import" open>
+    <summary><h2>1 — Import image</h2></summary>
     <label class="dropzone" id="dropzone" tabindex="0" for="fileInput">
       <img class="thumb" id="thumb" alt="" />
       <div class="copy">
@@ -65,10 +65,10 @@
       </div>
       <span class="hint" id="cropDims"></span>
     </div>
-  </section>
+  </details>
 
-  <section class="panel">
-    <h2>2 — Pattern settings</h2>
+  <details class="panel" data-panel="settings" open>
+    <summary><h2>2 — Pattern settings</h2></summary>
     <div class="controls">
       <div class="field">
         <label for="detailSize">Detail <span class="val" id="detailVal">600 px</span></label>
@@ -98,35 +98,45 @@
         <label class="chkline"><input type="checkbox" id="matLock" /> 🔒 Lock to image ratio</label>
         <span class="hint hidden" id="matLockHint"></span>
       </div>
-      <div class="field">
-        <label for="density">Yarn density <span class="val"><span id="densityVal">900</span> g/m²</span></label>
-        <input type="number" id="density" min="200" max="2000" step="50" value="900" />
-        <span class="hint">Rule of thumb for a single strand, cut pile; lower for loop pile or a shorter trim</span>
-      </div>
-      <div class="field">
-        <label for="strands">Strands <span class="val"><span id="strandsVal">1</span> at once</span></label>
-        <input type="number" id="strands" min="1" max="4" step="1" value="1" />
-        <span class="hint">How many threads you feed into the gun together — multiplies yarn used</span>
-      </div>
-      <div class="field">
-        <label for="buffer">Waste buffer <span class="val"><span id="bufferVal">15</span>%</span></label>
-        <div class="row"><input type="range" id="buffer" min="0" max="40" step="5" value="15" /></div>
-        <span class="hint">Covers trim waste, mistakes, and colour changes — real usage is never perfectly efficient</span>
-      </div>
-      <div class="field">
-        <label for="roundPct">Corner radius <span class="val"><span id="roundVal">0</span>%</span></label>
-        <div class="row"><input type="range" id="roundPct" min="0" max="50" value="0" /></div>
-        <span class="hint" id="roundHint">% of the shorter side</span>
-      </div>
-      <div class="field">
-        <label for="borderPct">Border <span class="val"><span id="borderVal">0</span>%</span></label>
-        <div class="row"><input type="range" id="borderPct" min="0" max="25" value="0" /></div>
-        <span class="hint" id="borderHint">% of the shorter side</span>
-      </div>
-      <div class="field" id="borderColorField">
-        <label for="borderColor">Border colour</label>
-        <div class="row"><input type="color" id="borderColor" value="#222222" /></div>
-      </div>
+      <details class="subgroup" data-panel="yarnmath">
+        <summary>Yarn estimate — density · strands · waste</summary>
+        <div class="controls">
+          <div class="field">
+            <label for="density">Yarn density <span class="val"><span id="densityVal">900</span> g/m²</span></label>
+            <input type="number" id="density" min="200" max="2000" step="50" value="900" />
+            <span class="hint">Rule of thumb for a single strand, cut pile; lower for loop pile or a shorter trim</span>
+          </div>
+          <div class="field">
+            <label for="strands">Strands <span class="val"><span id="strandsVal">1</span> at once</span></label>
+            <input type="number" id="strands" min="1" max="4" step="1" value="1" />
+            <span class="hint">How many threads you feed into the gun together — multiplies yarn used</span>
+          </div>
+          <div class="field">
+            <label for="buffer">Waste buffer <span class="val"><span id="bufferVal">15</span>%</span></label>
+            <div class="row"><input type="range" id="buffer" min="0" max="40" step="5" value="15" /></div>
+            <span class="hint">Covers trim waste, mistakes, and colour changes — real usage is never perfectly efficient</span>
+          </div>
+        </div>
+      </details>
+      <details class="subgroup" data-panel="finishing">
+        <summary>Finishing — corners &amp; border</summary>
+        <div class="controls">
+          <div class="field">
+            <label for="roundPct">Corner radius <span class="val"><span id="roundVal">0</span>%</span></label>
+            <div class="row"><input type="range" id="roundPct" min="0" max="50" value="0" /></div>
+            <span class="hint" id="roundHint">% of the shorter side</span>
+          </div>
+          <div class="field">
+            <label for="borderPct">Border <span class="val"><span id="borderVal">0</span>%</span></label>
+            <div class="row"><input type="range" id="borderPct" min="0" max="25" value="0" /></div>
+            <span class="hint" id="borderHint">% of the shorter side</span>
+          </div>
+          <div class="field" id="borderColorField">
+            <label for="borderColor">Border colour</label>
+            <div class="row"><input type="color" id="borderColor" value="#222222" /></div>
+          </div>
+        </div>
+      </details>
       <div class="field" style="grid-column: 1 / -1;" id="advField">
         <label>Advanced
           <button class="autobtn" id="advToggle" type="button" aria-expanded="false">Show</button>
@@ -138,17 +148,17 @@
         </div>
       </div>
     </div>
-  </section>
+  </details>
 
-  <section class="panel">
-    <h2>Preferences</h2>
+  <details class="panel" data-panel="prefs">
+    <summary><h2>Preferences</h2></summary>
     <p class="hint">Your workshop defaults, applied every time the app opens: strands, density, buffer, mat size &amp; ratio lock, yarn brand, suppliers &amp; region, export option. Stored on this device.</p>
     <div class="prefsbar">
       <button class="autobtn" id="prefsSaveBtn" type="button">Save current as defaults</button>
       <button class="autobtn" id="prefsClearBtn" type="button">Clear defaults</button>
       <span class="authmsg hidden" id="prefsMsg"></span>
     </div>
-  </section>
+  </details>
   </div><!-- /rail -->
 
   <div class="stage">
@@ -184,8 +194,8 @@
     </div>
   </section>
 
-  <section class="panel">
-    <h2>4 — Yarn shopping list</h2>
+  <details class="panel" data-panel="shop" open>
+    <summary><h2>4 — Yarn shopping list</h2></summary>
     <div class="controls" style="margin-bottom:16px">
       <div class="field" id="yarnBrandField">
         <label for="yarnBrand">Yarn brand</label>
@@ -238,11 +248,14 @@
       <button class="dl ghost" id="copyBtn" disabled>Copy list as text</button>
       <span class="copy-status" id="copyStatus"></span>
     </div>
-    <textarea class="shoptext" id="shopText" readonly onclick="this.select()"></textarea>
-  </section>
+    <details class="subgroup" data-panel="shoptext">
+      <summary>Plain-text list</summary>
+      <textarea class="shoptext" id="shopText" readonly onclick="this.select()"></textarea>
+    </details>
+  </details>
 
-  <section class="panel">
-    <h2>5 — Cloud projects</h2>
+  <details class="panel" data-panel="cloud">
+    <summary><h2>5 — Cloud projects</h2></summary>
     <div class="projbar">
       <input type="text" id="projName" placeholder="Project name" maxlength="120" />
       <button class="autobtn" id="projSaveBtn" type="button">Save</button>
@@ -259,7 +272,7 @@
         </tbody>
       </table>
     </div>
-  </section>
+  </details>
 
   <footer class="foot">Everything runs locally in this page — nothing leaves your browser unless you sign in and save a project to your account.</footer>
   </div><!-- /stage -->
