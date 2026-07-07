@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <title>Tuft Pattern Maker</title>
-<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
 <link rel="stylesheet" href="src/styles.css" />
 </head>
 <body>
@@ -32,6 +32,8 @@
     <p class="tag">Turn a reference image into a flat colour tufting chart: pick a colour count, export a colour PNG/SVG for the gun and a black &amp; white outline chart for the projector, and get a yarn shopping list with gram estimates.</p>
   </header>
 
+  <div class="workspace">
+  <div class="rail">
   <section class="panel">
     <h2>1 — Import image</h2>
     <label class="dropzone" id="dropzone" tabindex="0" for="fileInput">
@@ -135,7 +137,9 @@
       </div>
     </div>
   </section>
+  </div><!-- /rail -->
 
+  <div class="stage">
   <section class="panel">
     <h2>3 — Pattern output</h2>
     <div class="outputs">
@@ -245,6 +249,8 @@
   </section>
 
   <footer class="foot">Everything runs locally in this page — nothing leaves your browser unless you sign in and save a project to your account.</footer>
+  </div><!-- /stage -->
+  </div><!-- /workspace -->
 </div>
 <script src="src/vendor/supabase.js"></script>
 <script type="module" src="src/js/app.js"></script>

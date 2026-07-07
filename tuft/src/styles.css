@@ -92,29 +92,63 @@
   .wrap {
     max-width: 980px;
     margin: 0 auto;
-    padding: 40px 20px 80px;
+    padding: 20px clamp(14px, 3vw, 28px) 60px;
+    padding-top: max(20px, env(safe-area-inset-top));
+    padding-left: max(clamp(14px, 3vw, 28px), env(safe-area-inset-left));
+    padding-right: max(clamp(14px, 3vw, 28px), env(safe-area-inset-right));
+    padding-bottom: max(60px, env(safe-area-inset-bottom));
     display: flex;
     flex-direction: column;
-    gap: 20px;
+    gap: 16px;
   }
 
-  header.top { display: flex; flex-direction: column; gap: 6px; margin-bottom: 4px; }
+  .rail, .stage { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+
+  /* Desktop / iPad landscape: full-viewport app shell — settings rail on the
+     left, pattern stage on the right, each scrolling independently so the
+     chart stays in view while knobs are adjusted */
+  @media (min-width: 1020px) {
+    .wrap {
+      max-width: none;
+      height: 100dvh;
+      padding-bottom: 0;
+      overflow: hidden;
+    }
+    .workspace {
+      flex: 1;
+      min-height: 0;
+      display: grid;
+      grid-template-columns: clamp(340px, 30vw, 460px) minmax(0, 1fr);
+      gap: 18px;
+    }
+    .rail, .stage {
+      overflow-y: auto;
+      overscroll-behavior: contain;
+      padding: 3px 3px 24px; /* room for focus rings + panel shadows */
+    }
+    .stage { padding-bottom: max(24px, env(safe-area-inset-bottom)); }
+  }
+
+  header.top { display: flex; flex-direction: column; gap: 4px; }
   h1 {
     font-family: 'JBM', ui-monospace, monospace;
     font-weight: 700;
-    font-size: clamp(28px, 4vw, 38px);
+    font-size: clamp(22px, 3vw, 32px);
     letter-spacing: -0.01em;
     margin: 0;
     text-wrap: balance;
   }
-  .tag { color: var(--ink-soft); font-size: 15px; max-width: 62ch; margin: 0; }
+  .tag { color: var(--ink-soft); font-size: 13px; max-width: 88ch; margin: 0; }
+  @media (max-width: 700px), (max-height: 700px) and (min-width: 1020px) {
+    .tag { display: none; }
+  }
 
   section.panel {
     background: var(--surface);
     border: 1px solid var(--line);
-    border-radius: 10px;
+    border-radius: 12px;
     box-shadow: var(--shadow);
-    padding: 22px 24px;
+    padding: clamp(16px, 2.5vw, 24px);
   }
 
   .panel h2 {
@@ -212,8 +246,9 @@
   .hidden { display: none !important; }
 
   /* --- Output --- */
-  .outputs { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
-  @media (max-width: 680px) { .outputs { grid-template-columns: 1fr; } }
+  /* auto-fit tracks size against the CONTAINER (the stage column), not the
+     viewport — side-by-side charts when there's room, stacked when not */
+  .outputs { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(300px, 100%), 1fr)); gap: 20px; }
   .output-card { display: flex; flex-direction: column; gap: 10px; }
   .output-card h3 {
     font-family: 'JBM', ui-monospace, monospace; font-size: 13px; font-weight: 700; margin: 0;
@@ -223,9 +258,16 @@
     border: 1px solid var(--line); border-radius: 8px; overflow: hidden;
     background: var(--surface-2); display: flex; align-items: center; justify-content: center;
     aspect-ratio: 1 / 1;
+    position: relative;
   }
   .output-card canvas { width: 100%; height: 100%; image-rendering: pixelated; display: block; }
-  .placeholder-note { color: var(--ink-soft); font-size: 13px; text-align: center; padding: 0 20px; }
+  /* overlay, not a flex sibling — the 100%-wide canvas would squeeze it into
+     a clipped vertical sliver */
+  .placeholder-note {
+    position: absolute; inset: 0;
+    display: flex; align-items: center; justify-content: center;
+    color: var(--ink-soft); font-size: 13px; text-align: center; padding: 0 20px;
+  }
 
   button.dl {
     font-family: 'JBM', ui-monospace, monospace;
@@ -307,3 +349,20 @@
   }
   .export-yarnhex input { accent-color: var(--accent); }
   .export-yarnhex .hint { flex-basis: 100%; }
+
+  /* --- Touch ergonomics (iPhone/iPad) --- */
+  /* 16px inputs stop iOS Safari's zoom-on-focus; 44px-class targets per HIG */
+  @media (pointer: coarse) {
+    input[type="number"], input[type="email"], select,
+    .projbar input[type="text"], .authbar input[type="email"] { font-size: 16px; }
+    select.yarnPick { font-size: 15px; padding: 8px 10px; max-width: none; }
+    .autobtn { min-height: 40px; padding: 8px 14px; font-size: 13px; }
+    button.dl { min-height: 46px; }
+    input[type="range"] { height: 34px; }
+    .dropzone { padding: 24px 20px; }
+    table.shop td { padding: 12px 10px; }
+    .ms-supplier-row { min-height: 32px; align-items: center; }
+    .export-yarnhex input, #yarnPreviewField input[type="checkbox"], .ms-supplier-row input, #multiSource {
+      width: 20px; height: 20px;
+    }
+  }
