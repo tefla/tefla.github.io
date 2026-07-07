@@ -1001,7 +1001,18 @@ function init() {
       downloadCanvas(exportCanvas(els.colourCanvas), 'tuft-pattern-colour.png');
     }
   });
-  els.dlBwPng.addEventListener('click', function () { downloadCanvas(exportCanvas(els.bwCanvas), 'tuft-pattern-bw-projector.png'); });
+  // B/W is NOT flipped via exportCanvas — that would mirror the digit labels
+  // too. renderBW's mirror mode flips the geometry but keeps numbers upright;
+  // render for the capture, then restore the on-screen orientation.
+  els.dlBwPng.addEventListener('click', function () {
+    if (els.exportMirror.checked && state.grid) {
+      renderBW(state.gridCols, state.gridRows, state.grid, state.palette, state.smoothedBlobs, true);
+      downloadCanvas(els.bwCanvas, 'tuft-pattern-bw-projector.png');
+      renderBW(state.gridCols, state.gridRows, state.grid, state.palette, state.smoothedBlobs);
+    } else {
+      downloadCanvas(els.bwCanvas, 'tuft-pattern-bw-projector.png');
+    }
+  });
   els.dlColourSvg.addEventListener('click', function () { downloadSVG(exportHexes(), els.exportMirror.checked); });
 
   els.copyBtn.addEventListener('click', function () {

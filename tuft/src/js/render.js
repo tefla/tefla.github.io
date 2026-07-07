@@ -101,7 +101,11 @@ export function blobLabelInfo(cells, cols) {
   return { r: bestR, c: bestC, wCells: maxC - minC + 1, hCells: maxR - minR + 1 };
 }
 
-export function renderBW(cols, rows, grid, palette, smoothedBlobs) {
+// mirror (optional): flip the chart GEOMETRY horizontally for the work-from-
+// the-back export, but keep the number labels upright and readable — they're
+// drawn outside the flip transform at mirrored positions. A plain canvas flip
+// (like the colour PNG uses) would mirror the digits too.
+export function renderBW(cols, rows, grid, palette, smoothedBlobs, mirror) {
   var cellPx = cellPxFor(cols, rows);
   var w = Math.round(cols * cellPx), h = Math.round(rows * cellPx);
   var canvas = els.bwCanvas;
@@ -110,6 +114,7 @@ export function renderBW(cols, rows, grid, palette, smoothedBlobs) {
   var fctx = canvas.getContext('2d');
   fctx.fillStyle = '#ffffff';
   fctx.fillRect(0, 0, w, h);
+  if (mirror) { fctx.save(); fctx.translate(w, 0); fctx.scale(-1, 1); }
   fctx.strokeStyle = '#000000';
   fctx.lineJoin = 'round';
   fctx.lineCap = 'round';
@@ -127,6 +132,7 @@ export function renderBW(cols, rows, grid, palette, smoothedBlobs) {
       fctx.stroke();
     }
   }
+  if (mirror) fctx.restore();
 
   var fontPx = Math.max(14, Math.max(w, h) / 45);
   fctx.font = '700 ' + Math.round(fontPx) + 'px JBM, ui-monospace, monospace';
@@ -144,7 +150,7 @@ export function renderBW(cols, rows, grid, palette, smoothedBlobs) {
     if (info.wCells * cellPx < wThresh || info.hCells * cellPx < fontPx * 1.4) return;
     if (geom.active && !insideRoundRect(info.c + 0.5, info.r + 0.5, innerX0, innerY0, innerX1, innerY1, geom.Ri)) return;
     var x = info.c * cellPx + cellPx / 2, y = info.r * cellPx + cellPx / 2;
-    fctx.fillText(label, x, y + 1);
+    fctx.fillText(label, mirror ? w - x : x, y + 1);
   });
   if (geom.active && geom.B > 0) {
     fctx.fillText(String(palette.length + 1), cols * cellPx / 2, Bpx / 2 + 1);
