@@ -556,3 +556,49 @@
   .palette-strip.merging .pal-chip.merge-target { cursor: pointer; outline: 2px dashed var(--accent); outline-offset: 1px; }
   .palette-strip.merging .pal-chip.merge-src { box-shadow: inset 0 0 0 2px var(--accent); }
   .pal-merge-hint { align-self: center; color: var(--accent); font-size: 13px; font-weight: 600; }
+
+  /* ---------- projector mode: full-screen tracing overlay ---------- */
+  /* deliberately theme-independent — the background is part of the projected
+     image (white, or black when inverted), set inline by projector.js */
+  .projector { position: fixed; inset: 0; z-index: 300; background: #fff; }
+  .projector canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+  .projector.idle { cursor: none; }
+  .proj-menu {
+    position: absolute; top: 18px; left: 50%; transform: translateX(-50%);
+    display: flex; align-items: center; gap: 18px; flex-wrap: wrap; justify-content: center;
+    max-width: calc(100% - 32px);
+    background: rgba(15, 19, 15, 0.88); color: #fff;
+    padding: 10px 18px; border-radius: 14px;
+    font-size: 14px;
+    box-shadow: 0 6px 24px rgba(0, 0, 0, 0.35);
+    transition: opacity 0.45s ease;
+  }
+  .projector.idle .proj-menu { opacity: 0; pointer-events: none; }
+  .proj-menu label { display: flex; align-items: center; gap: 6px; white-space: nowrap; cursor: pointer; }
+  .proj-menu input[type="checkbox"] { accent-color: #6fcb9f; }
+  .proj-menu input[type="range"] { width: 90px; accent-color: #6fcb9f; }
+  .proj-menu select {
+    background: #222a22; color: #fff; border: 1px solid rgba(255, 255, 255, 0.3);
+    border-radius: 6px; padding: 2px 4px; font: inherit; font-size: 13px;
+  }
+  .proj-menu button {
+    background: transparent; border: 1px solid rgba(255, 255, 255, 0.4); color: #fff;
+    border-radius: 8px; padding: 4px 12px; cursor: pointer; font: inherit; white-space: nowrap;
+  }
+  .proj-menu button:hover { background: rgba(255, 255, 255, 0.12); }
+
+  /* keystone corner handles — siblings of the warped canvas, so they sit at
+     the true screen positions of the projected chart corners */
+  .proj-handles { position: absolute; inset: 0; pointer-events: none; }
+  .proj-handle {
+    position: absolute; width: 36px; height: 36px; margin: -18px 0 0 -18px;
+    border: 2px solid #ff2d55; border-radius: 50%;
+    background: rgba(255, 45, 85, 0.18);
+    pointer-events: auto; cursor: grab; touch-action: none;
+  }
+  .proj-handle::before, .proj-handle::after {
+    content: ''; position: absolute; background: #ff2d55;
+  }
+  .proj-handle::before { left: 50%; top: 4px; bottom: 4px; width: 1.5px; margin-left: -0.75px; }
+  .proj-handle::after { top: 50%; left: 4px; right: 4px; height: 1.5px; margin-top: -0.75px; }
+  .proj-handle:active { cursor: grabbing; }

@@ -189,6 +189,7 @@
         </div>
         <div class="dl-row">
           <button class="dl" id="dlBwPng" disabled>Download PNG</button>
+          <button class="dl ghost" id="projOpenBtn" disabled>Projector mode</button>
         </div>
       </div>
     </div>
@@ -293,6 +294,28 @@
   <footer class="foot">Everything runs locally in this page — nothing leaves your browser unless you sign in and save a project to your account.</footer>
   </div><!-- /stage -->
   </div><!-- /workspace -->
+</div>
+<div id="projector" class="projector hidden">
+  <canvas id="projCanvas"></canvas>
+  <div class="proj-handles hidden" id="projHandles">
+    <div class="proj-handle"></div><div class="proj-handle"></div>
+    <div class="proj-handle"></div><div class="proj-handle"></div>
+  </div>
+  <div class="proj-menu" id="projMenu">
+    <label><input type="checkbox" id="projFlipH" /> Flip ↔</label>
+    <label><input type="checkbox" id="projFlipV" /> Flip ↕</label>
+    <label><input type="checkbox" id="projRotate" /> Rotate 90°</label>
+    <label><input type="checkbox" id="projNumbers" /> Numbers</label>
+    <label><input type="checkbox" id="projMarks" /> Marks</label>
+    <label><input type="checkbox" id="projGrid" /> Grid</label>
+    <label><input type="checkbox" id="projInvert" /> White on black</label>
+    <label>Colour <select id="projFocus"></select></label>
+    <label>Lines <input type="range" id="projLines" min="5" max="40" value="10" /></label>
+    <label>Bright <input type="range" id="projDim" min="20" max="100" value="100" /></label>
+    <button type="button" id="projCorners">Adjust corners</button>
+    <button type="button" id="projCornersReset" class="hidden">Reset corners</button>
+    <button type="button" id="projClose">✕ Close</button>
+  </div>
 </div>
 <div id="yarnPicker" class="picker-backdrop hidden">
   <div class="picker-sheet" role="dialog" aria-modal="true" aria-labelledby="pickerTitle">

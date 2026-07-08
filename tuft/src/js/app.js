@@ -10,6 +10,7 @@ import { initCloud } from './cloud.js';
 import { initPrefs } from './prefs.js';
 import { initPanels } from './panels.js';
 import { initPicker, openPicker } from './picker.js';
+import { initProjector } from './projector.js';
 
 // ---------- image import ----------
 // `onload` (optional) fires after the chart has regenerated — the cloud
@@ -528,6 +529,7 @@ function relabelAndRender() {
   els.dlColourPng.disabled = false; els.dlBwPng.disabled = false;
   els.copyBtn.disabled = false;
   els.dlColourSvg.disabled = false;
+  els.projOpenBtn.disabled = false;
 }
 
 function process() {
@@ -1070,6 +1072,7 @@ function init() {
 
   initPanels(); // restore which panels the user keeps open
   initPicker(); // wire the visual yarn picker modal
+  initProjector(); // wire the full-screen projector tracing mode
   initPrefs(); // apply device defaults before anything is loaded
 
   initCloud({
