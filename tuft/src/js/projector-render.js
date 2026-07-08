@@ -4,7 +4,6 @@
 // cloth.js) drawn at true physical scale, so the cm grid, witness marks and
 // keystone all mean the same thing in both views.
 import { els } from './state.js';
-import { roundRectPath } from './geometry.js';
 import { popts, view } from './projector-state.js';
 import { getLayout, itemFootprint } from './cloth.js';
 
@@ -37,46 +36,56 @@ export function itemToView(item, cellX, cellY) {
   return mapPt(item.x * view.pxPerCm + cx, item.y * view.pxPerCm + cy);
 }
 
-// apply the item's placement on top of the current (surface) transform;
-// afterwards the ctx is in design CELL space for this item
-function itemTransform(ctx, item) {
-  ctx.translate(item.x * view.pxPerCm, item.y * view.pxPerCm);
-  if (item.rot) { ctx.translate(item.h * view.pxPerCm, 0); ctx.rotate(Math.PI / 2); }
-  ctx.scale(item.w * view.pxPerCm / item.cols, item.h * view.pxPerCm / item.rows);
+// a rounded rect as a point polygon (cell units) — the finishing lines go
+// through itemToView like everything else, so corners stay circular under
+// the item's non-uniform cell scale only to the extent the design itself is
+function roundRectPts(x, y, w, h, rr) {
+  rr = Math.max(0, Math.min(rr, w / 2, h / 2));
+  var pts = [];
+  var SEG = 10;
+  [[x + w - rr, y + rr, -Math.PI / 2], [x + w - rr, y + h - rr, 0],
+   [x + rr, y + h - rr, Math.PI / 2], [x + rr, y + rr, Math.PI]].forEach(function (c) {
+    for (var s = 0; s <= SEG; s++) {
+      var a = c[2] + (Math.PI / 2) * (s / SEG);
+      pts.push([c[0] + rr * Math.cos(a), c[1] + rr * Math.sin(a)]);
+    }
+  });
+  return pts;
 }
 
-// build the item's outline paths under the full transform, then stroke with
-// the transform popped — canvas records path points through the CTM, so the
-// stroke width stays uniform even though items scale non-uniformly.
+function addLoop(ctx, item, pts) {
+  var p = itemToView(item, pts[0][0], pts[0][1]);
+  ctx.moveTo(p[0], p[1]);
+  for (var i = 1; i < pts.length; i++) {
+    p = itemToView(item, pts[i][0], pts[i][1]);
+    ctx.lineTo(p[0], p[1]);
+  }
+  ctx.closePath();
+}
+
+// stroke the item's outlines: every point is mapped to view px in JS
+// (itemToView — same path the labels take), so we never rely on canvas
+// path/CTM baking semantics, which WebKit and Blink implement differently.
 // filter (optional) picks which blobs; withFin adds the rug cut/seam lines.
-function strokeItem(ctx, dpr, item, filter, alpha, withFin) {
+function strokeItem(ctx, item, filter, alpha, withFin) {
   var any = false;
-  ctx.save();
-  itemTransform(ctx, item);
   ctx.beginPath();
   item.blobs.forEach(function (b) {
     if (filter && !filter(b)) return;
     any = true;
-    b.loops.forEach(function (loop) {
-      ctx.moveTo(loop[0][0], loop[0][1]);
-      for (var i = 1; i < loop.length; i++) ctx.lineTo(loop[i][0], loop[i][1]);
-      ctx.closePath();
-    });
+    b.loops.forEach(function (loop) { addLoop(ctx, item, loop); });
   });
   if (withFin && item.fin.active) {
     any = true;
-    roundRectPath(ctx, 0, 0, item.cols, item.rows, item.fin.R);
+    addLoop(ctx, item, roundRectPts(0, 0, item.cols, item.rows, item.fin.R));
     if (item.fin.B > 0) {
-      roundRectPath(ctx, item.fin.B, item.fin.B, item.cols - 2 * item.fin.B, item.rows - 2 * item.fin.B, item.fin.Ri);
+      addLoop(ctx, item, roundRectPts(item.fin.B, item.fin.B, item.cols - 2 * item.fin.B, item.rows - 2 * item.fin.B, item.fin.Ri));
     }
   }
-  ctx.restore();
   if (!any) return;
-  ctx.save();
-  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.globalAlpha = alpha;
   ctx.stroke();
-  ctx.restore();
+  ctx.globalAlpha = 1;
 }
 
 function drawItemLabels(ctx, item) {
@@ -195,25 +204,19 @@ export function renderProjector() {
   ctx.fillRect(0, 0, vw, vh);
 
   var W = surf.w * pxPerCm, H = surf.h * pxPerCm;
-  ctx.save();
-  ctx.translate(rect.x, rect.y);
-  if (popts.rotate) { ctx.translate(rect.w, 0); ctx.rotate(Math.PI / 2); }
-  if (popts.flipH) { ctx.translate(W, 0); ctx.scale(-1, 1); }
-  if (popts.flipV) { ctx.translate(0, H); ctx.scale(1, -1); }
   ctx.strokeStyle = ink();
   ctx.lineJoin = 'round';
   ctx.lineCap = 'round';
   ctx.lineWidth = Math.max(1.25, Math.max(W, H) * 0.0025) * popts.lineScale;
   items.forEach(function (item) {
     if (!view.cloth && view.focus != null) {
-      strokeItem(ctx, dpr, item, function (b) { return b.i !== view.focus; }, DIM_ALPHA, false);
+      strokeItem(ctx, item, function (b) { return b.i !== view.focus; }, DIM_ALPHA, false);
       // finishing outlines stay full strength while a colour is isolated
-      strokeItem(ctx, dpr, item, function (b) { return b.i === view.focus; }, 1, true);
+      strokeItem(ctx, item, function (b) { return b.i === view.focus; }, 1, true);
     } else {
-      strokeItem(ctx, dpr, item, null, 1, true);
+      strokeItem(ctx, item, null, 1, true);
     }
   });
-  ctx.restore();
 
   if (popts.numbers) items.forEach(function (item) { drawItemLabels(ctx, item); });
   if (view.cloth && view.selected) {
