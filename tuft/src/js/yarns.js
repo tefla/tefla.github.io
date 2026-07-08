@@ -84,9 +84,14 @@ export function applyRegionFilter(region) {
 }
 
 export function syncMsAllowedFromCheckboxes() {
+  var wasPreviewing = els.yarnPreviewChk.checked;
   state.msAllowed = Array.prototype.map.call(
     els.msSuppliers.querySelectorAll('.msSupplierChk:checked'), function (chk) { return chk.dataset.key; });
   updateShoppingList();
+  // the supplier pool just changed under the preview — repaint against the
+  // new pool, or clear the stale yarn colours if the pool emptied
+  if (els.yarnPreviewChk.checked) repaintColourIfPreviewing();
+  else if (wasPreviewing && state.grid) renderColour(state.gridCols, state.gridRows, state.grid, state.palette, state.smoothedBlobs, null);
 }
 
 // used by restoreSettings: apply a saved key list directly, bypassing the
@@ -417,12 +422,16 @@ export function updateShoppingList() {
   var multi = state.multiSource && state.msAllowed && state.msAllowed.length > 0;
   var pool = multi ? buildYarnPool(state.msAllowed) : null;
 
-  // yarn-colour preview only makes sense with Advanced on, a line active,
-  // and single-supplier mode — hide and force it off otherwise, so a stale
-  // check can't linger unseen
-  var showPreview = state.advanced && !!activeLine && !state.multiSource;
-  els.yarnPreviewField.classList.toggle('hidden', !showPreview);
-  if (!showPreview) els.yarnPreviewChk.checked = false;
+  // yarn-colour preview: available whenever a yarn source exists (brand or
+  // supplier pool) and ON by default when one first appears — the chart
+  // should show what the tufted mat will actually look like. Unticking is
+  // the session opt-out; losing the source hides and clears it so a stale
+  // check can't linger unseen.
+  var canPreview = multi || !!activeLine;
+  var previewWasHidden = els.yarnPreviewField.classList.contains('hidden');
+  els.yarnPreviewField.classList.toggle('hidden', !canPreview);
+  if (!canPreview) els.yarnPreviewChk.checked = false;
+  else if (previewWasHidden) els.yarnPreviewChk.checked = true;
 
   var matW = parseFloat(els.matW.value) || 0;
   var matH = parseFloat(els.matH.value) || 0;

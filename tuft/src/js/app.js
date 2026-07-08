@@ -512,10 +512,10 @@ function relabelAndRender() {
 
   els.colourPlaceholder.style.display = 'none';
   els.bwPlaceholder.style.display = 'none';
-  // settle the shopping list FIRST — it owns the yarn-preview checkbox and
-  // force-unchecks it when Advanced/brand no longer allow previewing, and
-  // the canvas paint below must see that final state (painting first left
-  // stale yarn colours on the chart after toggling Advanced off)
+  // settle the shopping list FIRST — it owns the yarn-preview checkbox
+  // (defaults it on when a yarn source is active, clears it when none is),
+  // and the canvas paint below must see that final state (painting first
+  // left stale yarn colours on the chart after a brand change)
   refreshAdvancedSwatches();
   buildPaletteStrip();
   updateShoppingList();
@@ -616,7 +616,6 @@ function serializeSettings() {
     pins: JSON.parse(JSON.stringify(state.pins || {})),
     mergeGroups: JSON.parse(JSON.stringify(state.mergeGroups || [])),
     yarnBrand: els.yarnBrand.value,
-    yarnPreview: els.yarnPreviewChk.checked,
     roundPct: parseInt(els.roundPct.value, 10),
     borderPct: parseInt(els.borderPct.value, 10),
     borderHex: els.borderColor.value,
@@ -698,13 +697,11 @@ function restoreSettings(s) {
       throw new Error('saved weights length ' + s.weights.length + ' does not match k=' + state.trained.k);
     }
     state.yarnOverrides = s.yarnOverrides ? JSON.parse(JSON.stringify(s.yarnOverrides)) : {};
-    els.yarnPreviewChk.checked = false; // never inherit a stale preview state
     buildAdvancedRows();
+    // the yarn-colour preview is a session view preference, not project
+    // state — updateShoppingList (inside) defaults it on/off from whatever
+    // yarn source the restored settings activate
     relabelAndRender();
-    if (s.yarnPreview && state.advanced && activeLine) {
-      els.yarnPreviewChk.checked = true;
-      renderColour(state.gridCols, state.gridRows, state.grid, state.palette, state.smoothedBlobs, computeYarnDisplayHexes());
-    }
   } else {
     // no image yet: park the values so they apply when one is loaded
     els.detailVal.textContent = s.detailSize + ' px';
@@ -909,6 +906,7 @@ function init() {
   });
 
   els.multiSource.addEventListener('change', function () {
+    var wasPreviewing = els.yarnPreviewChk.checked;
     state.multiSource = els.multiSource.checked;
     els.msGroup.classList.toggle('hidden', !state.multiSource);
     els.yarnBrandField.classList.toggle('hidden', state.multiSource);
@@ -918,6 +916,10 @@ function init() {
     } else {
       updateShoppingList();
     }
+    // the preview matches against whichever source is now active — repaint,
+    // or clear the stale yarn colours if the toggle killed the preview
+    if (els.yarnPreviewChk.checked) repaintColourIfPreviewing();
+    else if (wasPreviewing && state.grid) renderColour(state.gridCols, state.gridRows, state.grid, state.palette, state.smoothedBlobs, null);
   });
 
   els.includeMulti.addEventListener('change', function () {
