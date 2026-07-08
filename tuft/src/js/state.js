@@ -18,7 +18,8 @@ export const EL_IDS = ['dropzone','fileInput','thumb','dzTitle','dzSub',
  'yarnPicker','pickerTitle','pickerClose','pickerFilter','pickerGrid','pickerEmpty',
  'paletteStrip',
  'projOpenBtn','projector','projCanvas','projMenu','projFlipH','projFlipV','projRotate','projNumbers','projMarks','projGrid','projInvert',
- 'projFocus','projLines','projDim','projCorners','projCornersReset','projClose','projHandles'];
+ 'projFocus','projFocusLabel','projLines','projDim','projCorners','projCornersReset','projClose','projHandles',
+ 'projCloth','projClothLabel','clothW','clothH','clothAddBtn','clothProjectBtn','clothMsg','clothList'];
 
 // populate els from the DOM — called once at startup, before init() wires
 // listeners, so every els.X reference downstream is live

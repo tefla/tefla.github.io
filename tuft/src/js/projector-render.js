@@ -1,56 +1,117 @@
-// ---------- projector mode: chart render (flips, rotation, isolation, marks) ----------
-import { els, state } from './state.js';
-import { finishingGeometry, roundRectPath, insideRoundRect } from './geometry.js';
-import { strokeSmoothedLoops, blobLabelInfo } from './render.js';
+// ---------- projector mode: surface render (single design OR cloth layout) ----------
+// Everything is drawn on a "surface" measured in cm: the mat (one design at
+// 0,0) or the cloth (many placed items). Items are frozen snapshots (see
+// cloth.js) drawn at true physical scale, so the cm grid, witness marks and
+// keystone all mean the same thing in both views.
+import { els } from './state.js';
+import { roundRectPath } from './geometry.js';
 import { popts, view } from './projector-state.js';
+import { getLayout, itemFootprint } from './cloth.js';
 
-var MARGIN = 36;           // css px kept clear around the chart for ruler numbers
+var MARGIN = 36;           // css px kept clear around the surface for ruler numbers
 var MARK = '#ff2d55';      // witness marks/grid — red reads on both backgrounds
+var SELECT = '#2f80ff';    // selected cloth item highlight
 var DIM_ALPHA = 0.15;      // non-isolated colours when one colour is focused
 
 function ink() { return popts.invert ? '#ffffff' : '#000000'; }
 
-// view-space position of a design-space point (design px, origin chart
-// top-left) after flips + rotation — labels use this so text stays upright
-// whatever the orientation. Must match the ctx transform chain in render().
-function mapPt(x, y, w, h, rect) {
-  if (popts.flipH) x = w - x;
-  if (popts.flipV) y = h - y;
-  if (popts.rotate) return [rect.x + rect.w - y, rect.y + x];
-  return [rect.x + x, rect.y + y];
+// view-space position of a surface-space point (surface px, origin top-left)
+// after flips + rotation — labels and hit-testing use this so text stays
+// upright whatever the orientation. Must match the ctx chain in render().
+function mapPt(x, y) {
+  var W = view.surf.w * view.pxPerCm, H = view.surf.h * view.pxPerCm;
+  if (popts.flipH) x = W - x;
+  if (popts.flipV) y = H - y;
+  var r = view.rect;
+  if (popts.rotate) return [r.x + r.w - y, r.y + x];
+  return [r.x + x, r.y + y];
 }
 
-function strokeSet(ctx, blobs, scale, alpha) {
-  if (!blobs.length) return;
+// design-cell point → view px, through the item's placement (position +
+// optional 90° rotation on the cloth) and the global surface transform
+export function itemToView(item, cellX, cellY) {
+  var sx = item.w * view.pxPerCm / item.cols, sy = item.h * view.pxPerCm / item.rows;
+  var px = cellX * sx, py = cellY * sy;
+  var cx, cy;
+  if (item.rot) { cx = item.h * view.pxPerCm - py; cy = px; } else { cx = px; cy = py; }
+  return mapPt(item.x * view.pxPerCm + cx, item.y * view.pxPerCm + cy);
+}
+
+// apply the item's placement on top of the current (surface) transform;
+// afterwards the ctx is in design CELL space for this item
+function itemTransform(ctx, item) {
+  ctx.translate(item.x * view.pxPerCm, item.y * view.pxPerCm);
+  if (item.rot) { ctx.translate(item.h * view.pxPerCm, 0); ctx.rotate(Math.PI / 2); }
+  ctx.scale(item.w * view.pxPerCm / item.cols, item.h * view.pxPerCm / item.rows);
+}
+
+// build the item's outline paths under the full transform, then stroke with
+// the transform popped — canvas records path points through the CTM, so the
+// stroke width stays uniform even though items scale non-uniformly.
+// filter (optional) picks which blobs; withFin adds the rug cut/seam lines.
+function strokeItem(ctx, dpr, item, filter, alpha, withFin) {
+  var any = false;
+  ctx.save();
+  itemTransform(ctx, item);
+  ctx.beginPath();
+  item.blobs.forEach(function (b) {
+    if (filter && !filter(b)) return;
+    any = true;
+    b.loops.forEach(function (loop) {
+      ctx.moveTo(loop[0][0], loop[0][1]);
+      for (var i = 1; i < loop.length; i++) ctx.lineTo(loop[i][0], loop[i][1]);
+      ctx.closePath();
+    });
+  });
+  if (withFin && item.fin.active) {
+    any = true;
+    roundRectPath(ctx, 0, 0, item.cols, item.rows, item.fin.R);
+    if (item.fin.B > 0) {
+      roundRectPath(ctx, item.fin.B, item.fin.B, item.cols - 2 * item.fin.B, item.rows - 2 * item.fin.B, item.fin.Ri);
+    }
+  }
+  ctx.restore();
+  if (!any) return;
+  ctx.save();
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.globalAlpha = alpha;
-  strokeSmoothedLoops(ctx, blobs, scale);
   ctx.stroke();
-  ctx.globalAlpha = 1;
+  ctx.restore();
 }
 
-function drawLabels(ctx, w, h, scale, rect, geom) {
-  var cols = state.gridCols;
-  var fontPx = Math.max(14, Math.max(w, h) / 45);
+function drawItemLabels(ctx, item) {
+  var longPx = Math.max(item.w, item.h) * view.pxPerCm;
+  var fontPx = Math.max(10, longPx / 45); // same ratio as the B/W chart labels
+  var cellPx = Math.min(item.w * view.pxPerCm / item.cols, item.h * view.pxPerCm / item.rows);
   ctx.font = '700 ' + Math.round(fontPx) + 'px JBM, ui-monospace, monospace';
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
   ctx.fillStyle = ink();
-  var innerX0 = geom.B, innerY0 = geom.B, innerX1 = cols - geom.B, innerY1 = state.gridRows - geom.B;
-  state.smoothedBlobs.forEach(function (blob) {
-    var info = blobLabelInfo(blob.cells, cols);
-    var label = state.palette[blob.idx].label;
-    var wThresh = fontPx * (1.4 + 0.8 * (label.length - 1));
-    if (info.wCells * scale < wThresh || info.hCells * scale < fontPx * 1.4) return;
-    if (geom.active && !insideRoundRect(info.c + 0.5, info.r + 0.5, innerX0, innerY0, innerX1, innerY1, geom.Ri)) return;
-    var p = mapPt(info.c * scale + scale / 2, info.r * scale + scale / 2, w, h, rect);
-    ctx.globalAlpha = (view.focus == null || blob.idx === view.focus) ? 1 : DIM_ALPHA;
-    ctx.fillText(label, p[0], p[1] + 1);
+  item.labels.forEach(function (l) {
+    var wThresh = fontPx * (1.4 + 0.8 * (l.t.length - 1));
+    if (l.wc * cellPx < wThresh || l.hc * cellPx < fontPx * 1.4) return;
+    var p = itemToView(item, l.x, l.y);
+    ctx.globalAlpha = (view.focus == null || l.i === view.focus || l.i === -1) ? 1 : DIM_ALPHA;
+    ctx.fillText(l.t, p[0], p[1] + 1);
   });
   ctx.globalAlpha = 1;
-  if (geom.active && geom.B > 0) {
-    var p2 = mapPt(w / 2, geom.B * scale / 2, w, h, rect);
-    ctx.fillText(String(state.palette.length + 1), p2[0], p2[1] + 1);
-  }
+}
+
+// dashed footprint outline around the selected cloth item, in view space
+function drawSelection(ctx, item) {
+  var fp = itemFootprint(item);
+  var pxc = view.pxPerCm;
+  var corners = [[item.x, item.y], [item.x + fp.w, item.y], [item.x + fp.w, item.y + fp.h], [item.x, item.y + fp.h]]
+    .map(function (c) { return mapPt(c[0] * pxc, c[1] * pxc); });
+  ctx.strokeStyle = SELECT;
+  ctx.lineWidth = 2;
+  ctx.setLineDash([8, 6]);
+  ctx.beginPath();
+  ctx.moveTo(corners[0][0], corners[0][1]);
+  for (var i = 1; i < 4; i++) ctx.lineTo(corners[i][0], corners[i][1]);
+  ctx.closePath();
+  ctx.stroke();
+  ctx.setLineDash([]);
 }
 
 function crosshair(ctx, x, y, r) {
@@ -59,12 +120,11 @@ function crosshair(ctx, x, y, r) {
 }
 
 // witness marks + cm grid, in VIEW space (never flipped/rotated — they
-// measure the physical projection). Marks: chart-edge rectangle plus corner
-// and centre crosshairs — draw them once on the cloth with a ruler, then
-// each session align the projection to the drawn marks (or drag the
-// keystone corners onto them). Grid: square cm grid with tick numbers,
-// pitch from the mat width, for the first-time tape-measure calibration.
-function drawMarks(ctx, rect, designW) {
+// measure the physical projection). Marks: surface-edge rectangle plus
+// corner and centre crosshairs — draw them once on the cloth with a ruler,
+// then each session drag the keystone corners onto the drawn marks. Grid:
+// square cm grid with tick numbers for the tape-measure calibration.
+function drawMarks(ctx, rect) {
   ctx.strokeStyle = MARK;
   ctx.fillStyle = MARK;
   ctx.lineWidth = 1;
@@ -77,11 +137,7 @@ function drawMarks(ctx, rect, designW) {
     ctx.stroke();
   }
   if (!popts.grid) return;
-  var matW = parseFloat(els.matW.value) || 0;
-  if (matW <= 0) return;
-  // the design's width always spans matW cm; rotation preserves lengths, so
-  // one px-per-cm figure holds in both view axes and the grid stays square
-  var pxPerCm = designW / matW;
+  var pxPerCm = view.pxPerCm;
   var steps = [1, 2, 5, 10, 20, 25, 50], step = 100;
   for (var si = 0; si < steps.length; si++) {
     if (steps[si] * pxPerCm >= 60) { step = steps[si]; break; }
@@ -107,7 +163,13 @@ function drawMarks(ctx, rect, designW) {
 }
 
 export function renderProjector() {
-  if (!state.smoothedBlobs || els.projector.classList.contains('hidden')) return;
+  if (els.projector.classList.contains('hidden')) return;
+  var items = view.cloth ? getLayout().items : (view.single ? [view.single] : []);
+  var surf = view.cloth ? { w: getLayout().w, h: getLayout().h }
+                        : (view.single ? { w: view.single.w, h: view.single.h } : null);
+  if (!surf) return;
+  view.surf = surf;
+
   var vw = els.projector.clientWidth, vh = els.projector.clientHeight;
   var dpr = window.devicePixelRatio || 1;
   var canvas = els.projCanvas;
@@ -116,13 +178,12 @@ export function renderProjector() {
   var ctx = canvas.getContext('2d');
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 
-  var cols = state.gridCols, rows = state.gridRows;
-  // rotate 90° = the design's columns run down the screen (portrait mat on a
-  // landscape projector uses the full panel instead of letterboxing)
-  var fitC = popts.rotate ? rows : cols, fitR = popts.rotate ? cols : rows;
-  var scale = Math.min((vw - 2 * MARGIN) / fitC, (vh - 2 * MARGIN) / fitR);
-  var w = cols * scale, h = rows * scale;                    // design px
-  var rect = { x: (vw - fitC * scale) / 2, y: (vh - fitR * scale) / 2, w: fitC * scale, h: fitR * scale };
+  // rotate 90° = the surface's width runs down the screen (portrait cloth on
+  // a landscape projector uses the full panel instead of letterboxing)
+  var fitW = popts.rotate ? surf.h : surf.w, fitH = popts.rotate ? surf.w : surf.h;
+  var pxPerCm = Math.min((vw - 2 * MARGIN) / fitW, (vh - 2 * MARGIN) / fitH);
+  view.pxPerCm = pxPerCm;
+  var rect = { x: (vw - fitW * pxPerCm) / 2, y: (vh - fitH * pxPerCm) / 2, w: fitW * pxPerCm, h: fitH * pxPerCm };
   view.rect = rect;
 
   // dim: brightness filter on the canvas; the overlay behind it is painted
@@ -133,33 +194,30 @@ export function renderProjector() {
   ctx.fillStyle = popts.invert ? '#000000' : '#ffffff';
   ctx.fillRect(0, 0, vw, vh);
 
+  var W = surf.w * pxPerCm, H = surf.h * pxPerCm;
   ctx.save();
   ctx.translate(rect.x, rect.y);
   if (popts.rotate) { ctx.translate(rect.w, 0); ctx.rotate(Math.PI / 2); }
-  if (popts.flipH) { ctx.translate(w, 0); ctx.scale(-1, 1); }
-  if (popts.flipV) { ctx.translate(0, h); ctx.scale(1, -1); }
+  if (popts.flipH) { ctx.translate(W, 0); ctx.scale(-1, 1); }
+  if (popts.flipV) { ctx.translate(0, H); ctx.scale(1, -1); }
   ctx.strokeStyle = ink();
   ctx.lineJoin = 'round';
   ctx.lineCap = 'round';
-  ctx.lineWidth = Math.max(1.25, Math.max(w, h) * 0.0025) * popts.lineScale;
-  if (view.focus == null) {
-    strokeSet(ctx, state.smoothedBlobs, scale, 1);
-  } else {
-    strokeSet(ctx, state.smoothedBlobs.filter(function (b) { return b.idx !== view.focus; }), scale, DIM_ALPHA);
-    strokeSet(ctx, state.smoothedBlobs.filter(function (b) { return b.idx === view.focus; }), scale, 1);
-  }
-  var geom = finishingGeometry(cols, rows);
-  if (geom.active) {
-    roundRectPath(ctx, 0, 0, w, h, geom.R * scale); // rug cut line
-    ctx.stroke();
-    if (geom.B > 0) {
-      var Bpx = geom.B * scale;
-      roundRectPath(ctx, Bpx, Bpx, w - 2 * Bpx, h - 2 * Bpx, geom.Ri * scale); // border seam
-      ctx.stroke();
+  ctx.lineWidth = Math.max(1.25, Math.max(W, H) * 0.0025) * popts.lineScale;
+  items.forEach(function (item) {
+    if (!view.cloth && view.focus != null) {
+      strokeItem(ctx, dpr, item, function (b) { return b.i !== view.focus; }, DIM_ALPHA, false);
+      // finishing outlines stay full strength while a colour is isolated
+      strokeItem(ctx, dpr, item, function (b) { return b.i === view.focus; }, 1, true);
+    } else {
+      strokeItem(ctx, dpr, item, null, 1, true);
     }
-  }
+  });
   ctx.restore();
 
-  if (popts.numbers) drawLabels(ctx, w, h, scale, rect, geom);
-  if (popts.marks || popts.grid) drawMarks(ctx, rect, w);
+  if (popts.numbers) items.forEach(function (item) { drawItemLabels(ctx, item); });
+  if (view.cloth && view.selected) {
+    items.forEach(function (item) { if (item.id === view.selected) drawSelection(ctx, item); });
+  }
+  if (popts.marks || popts.grid) drawMarks(ctx, rect);
 }

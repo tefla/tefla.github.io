@@ -10,7 +10,9 @@ import { initCloud } from './cloud.js';
 import { initPrefs } from './prefs.js';
 import { initPanels } from './panels.js';
 import { initPicker, openPicker } from './picker.js';
-import { initProjector } from './projector.js';
+import { initProjector, openClothProjector, renderIfOpen } from './projector.js';
+import { initCloth, getLayout } from './cloth.js';
+import { view as projView } from './projector-state.js';
 
 // ---------- image import ----------
 // `onload` (optional) fires after the chart has regenerated — the cloud
@@ -530,6 +532,7 @@ function relabelAndRender() {
   els.copyBtn.disabled = false;
   els.dlColourSvg.disabled = false;
   els.projOpenBtn.disabled = false;
+  els.clothAddBtn.disabled = false;
 }
 
 function process() {
@@ -1075,6 +1078,7 @@ function init() {
   initPanels(); // restore which panels the user keeps open
   initPicker(); // wire the visual yarn picker modal
   initProjector(); // wire the full-screen projector tracing mode
+  initCloth(openClothProjector, renderIfOpen); // multi-design cloth layout
   initPrefs(); // apply device defaults before anything is loaded
 
   initCloud({
@@ -1086,8 +1090,10 @@ function init() {
   });
 
   // read-only test seam: the same serialize/restore the cloud panel uses, so
-  // the e2e can round-trip project settings (e.g. pins) without Supabase auth
-  window.__tuftTest = { serialize: serializeSettings, restore: restoreSettings, state: state };
+  // the e2e can round-trip project settings (e.g. pins) without Supabase auth;
+  // projView/clothLayout let it compute projected item positions for drag tests
+  window.__tuftTest = { serialize: serializeSettings, restore: restoreSettings, state: state,
+    projView: projView, clothLayout: getLayout };
 }
 
 initEls();

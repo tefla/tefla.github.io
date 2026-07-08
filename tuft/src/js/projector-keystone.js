@@ -58,6 +58,22 @@ function chartCorners() {
 
 function projectPt(p) { return H ? applyH(H, p[0], p[1]) : p; }
 
+// screen px → un-warped view px (inverse homography, for pointer hit-testing
+// on the transformed canvas). Projective inverse = adjugate normalised so
+// the bottom-right term is 1 — the determinant cancels.
+export function screenToView(x, y) {
+  if (!H) return [x, y];
+  var a = H[0], b = H[1], c = H[2], d = H[3], e = H[4], f = H[5], g = H[6], h = H[7];
+  var A22 = a * e - b * d;
+  if (Math.abs(A22) < 1e-12) return [x, y];
+  var inv = [
+    (e - f * h) / A22, (c * h - b) / A22, (b * f - c * e) / A22,
+    (f * g - d) / A22, (a - c * g) / A22, (c * d - a * f) / A22,
+    (d * h - e * g) / A22, (b * g - a * h) / A22
+  ];
+  return applyH(inv, x, y);
+}
+
 export function isEditing() { return editing; }
 
 export function applyKeystone() {

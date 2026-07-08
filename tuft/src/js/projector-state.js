@@ -13,7 +13,11 @@ export var popts = {
   keystone: null   // [[nx,ny]×4] viewport-corner destinations in viewport fractions, null = off
 };
 
-export var view = { rect: null, focus: null };
+// rect/pxPerCm/surf are set by every render (surf = the projected surface in
+// cm — the mat in single view, the cloth in cloth view). cloth toggles the
+// cloth view; single is the frozen snapshot of the current design; selected
+// is the cloth item being moved.
+export var view = { rect: null, focus: null, pxPerCm: 0, surf: null, cloth: false, single: null, selected: null };
 
 function num(v, lo, hi, dflt) {
   return (typeof v === 'number' && isFinite(v)) ? Math.min(hi, Math.max(lo, v)) : dflt;

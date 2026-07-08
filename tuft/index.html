@@ -204,6 +204,32 @@
     </div>
   </section>
 
+  <details class="panel" data-panel="clothlayout">
+    <summary><h2>Cloth layout — project several designs at once</h2></summary>
+    <p class="hint">For small designs on one big cloth: set the cloth size, add each design as you finish it, then project the whole cloth and keystone once. In the projector, tap a design to select it, drag it into place (arrow keys nudge 1&nbsp;cm, R rotates 90°). Stored on this device.</p>
+    <div class="controls">
+      <div class="field">
+        <label for="clothW">Cloth width <span class="val">cm</span></label>
+        <input type="number" id="clothW" min="10" max="500" value="100" />
+      </div>
+      <div class="field">
+        <label for="clothH">Cloth height <span class="val">cm</span></label>
+        <input type="number" id="clothH" min="10" max="500" value="100" />
+      </div>
+    </div>
+    <div class="prefsbar">
+      <button class="autobtn" id="clothAddBtn" type="button" disabled>＋ Add current design to cloth</button>
+      <button class="autobtn" id="clothProjectBtn" type="button" disabled>Project cloth</button>
+      <span class="authmsg hidden" id="clothMsg"></span>
+    </div>
+    <div style="overflow-x:auto">
+      <table class="shop">
+        <thead><tr><th>Design</th><th class="num">Size</th><th class="num">Position</th><th class="num"></th></tr></thead>
+        <tbody id="clothList"><tr><td colspan="4" style="color:var(--ink-soft)">Nothing on the cloth yet</td></tr></tbody>
+      </table>
+    </div>
+  </details>
+
   <details class="panel" data-panel="shop" open>
     <summary><h2>4 — Yarn shopping list</h2></summary>
     <div class="controls" style="margin-bottom:16px">
@@ -309,7 +335,8 @@
     <label><input type="checkbox" id="projMarks" /> Marks</label>
     <label><input type="checkbox" id="projGrid" /> Grid</label>
     <label><input type="checkbox" id="projInvert" /> White on black</label>
-    <label>Colour <select id="projFocus"></select></label>
+    <label id="projClothLabel" class="hidden"><input type="checkbox" id="projCloth" /> Cloth</label>
+    <label id="projFocusLabel">Colour <select id="projFocus"></select></label>
     <label>Lines <input type="range" id="projLines" min="5" max="40" value="10" /></label>
     <label>Bright <input type="range" id="projDim" min="20" max="100" value="100" /></label>
     <button type="button" id="projCorners">Adjust corners</button>
