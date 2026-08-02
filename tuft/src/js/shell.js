@@ -119,22 +119,58 @@ function initZoom() {
   }, { passive: false });
 
   // drag-pan anywhere on the board — except on the crop canvas, whose drags
-  // ARE the crop interaction
+  // ARE the crop interaction. A second finger turns the gesture into a
+  // pinch: zoom around the midpoint, panning with it as the hands drift.
   var drag = null;
+  var touches = new Map(); // pointerId → {x, y}
+  var pinch = null;        // last {d, mx, my} while two pointers are down
+
+  function pinchInfo() {
+    var pts = Array.from(touches.values());
+    return { d: Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y),
+             mx: (pts[0].x + pts[1].x) / 2, my: (pts[0].y + pts[1].y) / 2 };
+  }
+
   board.addEventListener('pointerdown', function (e) {
     if (view === 'source' && e.target === els.cropCanvas) return;
-    drag = { x: e.clientX, y: e.clientY };
+    touches.set(e.pointerId, { x: e.clientX, y: e.clientY });
     board.classList.add('panning');
+    if (touches.size === 2) { pinch = pinchInfo(); drag = null; }
+    else if (touches.size === 1) drag = { x: e.clientX, y: e.clientY };
+    // last: throws on synthetic pointers (tests) — state above must be set
     board.setPointerCapture(e.pointerId);
   });
   board.addEventListener('pointermove', function (e) {
+    if (!touches.has(e.pointerId)) return;
+    touches.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (touches.size === 2 && pinch) {
+      var now = pinchInfo(), r = board.getBoundingClientRect();
+      if (pinch.d > 0 && now.d > 0) {
+        zoomBy(now.d / pinch.d, now.mx - r.left - r.width / 2, now.my - r.top - r.height / 2);
+        tx += now.mx - pinch.mx; ty += now.my - pinch.my;
+        applyTransform();
+      }
+      pinch = now;
+      return;
+    }
     if (!drag) return;
     tx += e.clientX - drag.x; ty += e.clientY - drag.y;
     drag = { x: e.clientX, y: e.clientY };
     userZoomed = true;
     applyTransform();
   });
-  function endPan() { drag = null; board.classList.remove('panning'); }
+  function endPan(e) {
+    touches.delete(e.pointerId);
+    if (touches.size === 1) {
+      // pinch collapses back to a pan from the surviving finger
+      var p = Array.from(touches.values())[0];
+      drag = { x: p.x, y: p.y };
+      pinch = null;
+    } else if (touches.size === 0) {
+      drag = null; pinch = null;
+      board.classList.remove('panning');
+    }
+  }
   board.addEventListener('pointerup', endPan);
   board.addEventListener('pointercancel', endPan);
 
