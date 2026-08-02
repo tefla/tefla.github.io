@@ -11,7 +11,7 @@ export const EL_IDS = ['dropzone','fileInput','thumb','dzTitle','dzSub',
  'cropWrap','cropCanvas','cropDims','resetCropBtn','cropAspect',
  'shopHead','shopTotalLabel','yarnBrand','yarnBrandHint','yarnBrandField',
  'copyBtn','copyStatus','shopText',
- 'advField','advToggle','advBody','advBoundaries','advResetBtn',
+ 'advBoundaries','advResetBtn',
  'yarnPreviewField','yarnPreviewChk','exportYarnHex','exportMirror',
  'multiSource','msGroup','msRegion','msSuppliers','includeMulti',
  'buyLinks','prefsSaveBtn','prefsClearBtn','prefsMsg',
@@ -19,7 +19,8 @@ export const EL_IDS = ['dropzone','fileInput','thumb','dzTitle','dzSub',
  'paletteStrip',
  'projOpenBtn','projector','projCanvas','projMenu','projFlipH','projFlipV','projRotate','projNumbers','projMarks','projGrid','projInvert',
  'projFocus','projFocusLabel','projLines','projDim','projCorners','projCornersReset','projClose','projHandles',
- 'projCloth','projClothLabel','clothW','clothH','clothAddBtn','clothProjectBtn','clothMsg','clothList'];
+ 'projCloth','projClothLabel','clothW','clothH','clothAddBtn','clothProjectBtn','clothMsg','clothList',
+ 'board','fileChip'];
 
 // populate els from the DOM — called once at startup, before init() wires
 // listeners, so every els.X reference downstream is live
@@ -31,7 +32,7 @@ export const FULL_CROP = { x: 0, y: 0, w: 1, h: 1 };
 
 export const state = {
   img: null, gridCols: 8, gridRows: 8, palette: null, grid: null, smoothedBlobs: null, counts: null, totalCells: 0, cropRect: FULL_CROP,
-  advanced: false, weights: null, yarnOverrides: {}, advRowsK: 0,
+  weights: null, yarnOverrides: {}, advRowsK: 0,
   // pinned palette colours: {rawCentroidIdx: [r,g,b]} fixed centroids that
   // k-means seeds but never moves; eyedropOrig arms the pick-from-image mode.
   // eyedropAdd arms "+ Add colour" (next image click adds a pinned slot).

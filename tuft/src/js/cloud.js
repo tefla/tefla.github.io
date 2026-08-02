@@ -12,6 +12,13 @@ var SUPABASE_URL = 'https://nrfeojccyejcflfjuyqv.supabase.co';
 var PUBLISHABLE_KEY = 'sb_publishable_YmGsIGakesw-Xb_rnN_ouQ_jdjBVgfc';
 var IMAGE_MAX_SIDE = 2048; // downscale bound for uploads
 
+// set by initCloud; lets imagine.js push a freshly-pasted OpenRouter key to
+// the signed-in user's row without knowing anything about Supabase
+var pushOpenRouterKeyImpl = null;
+export function pushOpenRouterKey(key) {
+  if (pushOpenRouterKeyImpl) pushOpenRouterKeyImpl(key);
+}
+
 export function initCloud(seam) {
   var client = window.supabase.createClient(SUPABASE_URL, PUBLISHABLE_KEY);
   var user = null;
@@ -305,11 +312,41 @@ export function initCloud(seam) {
     }
   });
 
+  // ---------- OpenRouter key sync (Imagine) ----------
+  // One `user_settings` row per user (see .scratch/pages-supabase/issues/09).
+  // On sign-in: a cloud key fills an empty device; a locally-pasted key is
+  // pushed up. The local key wins any conflict — freshly typed beats stored.
+  function pushKey(key) {
+    return client.from('user_settings')
+      .upsert({ user_id: user.id, openrouter_key: key })
+      .then(function (res) { if (res.error) throw res.error; });
+  }
+
+  function syncOpenRouterKey() {
+    var local = seam.getOpenRouterKey();
+    client.from('user_settings').select('openrouter_key').maybeSingle()
+      .then(function (res) {
+        if (res.error) throw res.error;
+        var cloud = res.data && res.data.openrouter_key;
+        if (cloud && !local) seam.setOpenRouterKey(cloud);
+        else if (local && local !== cloud) return pushKey(local);
+      })
+      .catch(function (err) { showMsg('OpenRouter key sync failed: ' + err.message, true); });
+  }
+
+  pushOpenRouterKeyImpl = function (key) {
+    if (!user) return; // guest — key stays device-local until they sign in
+    pushKey(key).catch(function (err) {
+      showMsg('OpenRouter key sync failed: ' + err.message, true);
+    });
+  };
+
   // fires with INITIAL_SESSION on load (including after a magic-link
   // redirect, which supabase-js consumes from the URL hash automatically)
-  client.auth.onAuthStateChange(function (_event, session) {
+  client.auth.onAuthStateChange(function (event, session) {
     render(session);
     msg('');
     refreshList();
+    if (user && (event === 'INITIAL_SESSION' || event === 'SIGNED_IN')) syncOpenRouterKey();
   });
 }

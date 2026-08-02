@@ -5,14 +5,16 @@ import { computeGridDims, sampleImage, finishingGeometry, insideRoundRect } from
 import { computeSmoothedBlobs } from './trace.js';
 import { computeLineArt } from './lineart.js';
 import { renderColour, renderBW, downloadCanvas, downloadSVG } from './render.js';
-import { setActiveLine, activeLine, updateShoppingList, repaintColourIfPreviewing, computeYarnDisplayHexes, populateBrandSelect, populateMsRegion, populateMsSuppliers, applyRegionFilter, syncMsAllowedFromCheckboxes, setMsCheckboxesFromKeys, MS_SEP, hexToRgb, rgbToLab, deltaE } from './yarns.js';
-import { initCloud } from './cloud.js';
+import { setActiveLine, activeLine, updateShoppingList, repaintColourIfPreviewing, computeYarnDisplayHexes, populateBrandSelect, populateMsRegion, populateMsSuppliers, applyRegionFilter, syncMsAllowedFromCheckboxes, setMsCheckboxesFromKeys, hexToRgb, rgbToLab, deltaE } from './yarns.js';
+import { initCloud, pushOpenRouterKey } from './cloud.js';
+import { initImagine, getOpenRouterKey, setOpenRouterKey } from './imagine.js';
 import { initPrefs } from './prefs.js';
 import { initPanels } from './panels.js';
 import { initPicker, openPicker } from './picker.js';
 import { initProjector, openClothProjector, renderIfOpen } from './projector.js';
 import { initCloth, getLayout } from './cloth.js';
 import { view as projView } from './projector-state.js';
+import { initShell, setView, pickSourceView, restorePickView, imageLoaded as shellImageLoaded } from './shell.js';
 
 // ---------- image import ----------
 // `onload` (optional) fires after the chart has regenerated — the cloud
@@ -38,6 +40,8 @@ function loadFile(file, onload) {
       initCropCanvas();
       autoPickK();
       process();
+      shellImageLoaded(file.name);
+      setView('colour');
       if (onload) onload();
     };
     img.src = e.target.result;
@@ -112,7 +116,7 @@ function refitCropToAspect() {
 }
 
 function initCropCanvas() {
-  var maxSide = 480;
+  var maxSide = 1000;
   var iw = state.img.naturalWidth, ih = state.img.naturalHeight;
   var scale = Math.min(maxSide / iw, maxSide / ih, 1);
   els.cropCanvas.width = Math.round(iw * scale);
@@ -407,6 +411,7 @@ function armAddColour() {
   state.mergeSource = null;
   state.eyedropAdd = true;
   state.eyedropOrig = null;
+  pickSourceView(); // sampling clicks land on the crop canvas
   els.cropCanvas.classList.add('eyedrop');
   els.cropDims.textContent = 'Click the image to add a new pinned colour (Esc to cancel)';
   buildPaletteStrip();
@@ -427,6 +432,7 @@ function sampleImagePixel(pos) {
 
 function armEyedropper(newIdx) {
   state.eyedropOrig = state.order[newIdx];
+  pickSourceView(); // sampling clicks land on the crop canvas
   els.cropCanvas.classList.add('eyedrop');
   els.cropDims.textContent = 'Eyedropper armed — click the image to pin colour ' + (newIdx + 1) + ' (Esc to cancel)';
 }
@@ -436,6 +442,7 @@ function cancelEyedropper() {
   state.eyedropAdd = false;
   els.cropCanvas.classList.remove('eyedrop');
   if (state.img) updateCropDimsLabel();
+  restorePickView();
 }
 
 // recompute palette counts + border cell count from state.grid against the
@@ -471,7 +478,7 @@ function relabelAndRender() {
   var sampled = state.sampled, trained = state.trained;
   var cols = sampled.cols, rows = sampled.rows, n = sampled.n, data = sampled.data, k = trained.k;
 
-  var labels = labelPixels(data, n, trained.centroids, k, state.advanced ? state.weights : null);
+  var labels = labelPixels(data, n, trained.centroids, k, state.weights);
   labels = modeFilterPass(labels, cols, rows, k);
   labels = modeFilterPass(labels, cols, rows, k);
   despeckle(labels, cols, rows, Math.max(4, Math.round(n * 0.0001)));
@@ -613,7 +620,6 @@ function serializeSettings() {
     strands: parseInt(els.strands.value, 10),
     buffer: parseFloat(els.buffer.value),
     cropRect: { x: state.cropRect.x, y: state.cropRect.y, w: state.cropRect.w, h: state.cropRect.h },
-    advanced: state.advanced,
     weights: state.weights ? Array.prototype.slice.call(state.weights) : null,
     yarnOverrides: JSON.parse(JSON.stringify(state.yarnOverrides || {})),
     pins: JSON.parse(JSON.stringify(state.pins || {})),
@@ -648,16 +654,14 @@ function restoreSettings(s) {
   els.matLock.checked = !!s.matLock;
   els.density.value = s.density; els.strands.value = s.strands; els.buffer.value = s.buffer;
   state.cropRect = s.cropRect ? { x: s.cropRect.x, y: s.cropRect.y, w: s.cropRect.w, h: s.cropRect.h } : FULL_CROP;
-  state.advanced = !!s.advanced;
+  // (older saves carry an `advanced` flag from when the reach weights sat
+  // behind a toggle — weights always apply now, so the flag is ignored)
   // pins/merges must be in place before the reprocess below re-seeds/relabels
   state.pins = s.pins ? JSON.parse(JSON.stringify(s.pins)) : {};
   state.mergeGroups = s.mergeGroups ? JSON.parse(JSON.stringify(s.mergeGroups)) : [];
   state.eyedropOrig = null;
   state.eyedropAdd = false;
   state.mergeSource = null;
-  els.advToggle.textContent = state.advanced ? 'Hide' : 'Show';
-  els.advToggle.setAttribute('aria-expanded', state.advanced ? 'true' : 'false');
-  els.advBody.classList.toggle('hidden', !state.advanced);
   els.yarnBrand.value = s.yarnBrand || '';
   setActiveLine(els.yarnBrand.value);
   els.yarnBrandHint.textContent = activeLine
@@ -791,6 +795,20 @@ function init() {
     if (e.dataTransfer.files && e.dataTransfer.files[0]) loadFile(e.dataTransfer.files[0]);
   });
 
+  // the whole board is a drop target too (replace the image any time);
+  // drops on the dropzone card bubble up here, so skip those to avoid a
+  // double load
+  ['dragenter', 'dragover'].forEach(function (evt) {
+    els.board.addEventListener(evt, function (e) { e.preventDefault(); els.board.classList.add('drag'); });
+  });
+  ['dragleave', 'drop'].forEach(function (evt) {
+    els.board.addEventListener(evt, function (e) { e.preventDefault(); els.board.classList.remove('drag'); });
+  });
+  els.board.addEventListener('drop', function (e) {
+    if (els.dropzone.contains(e.target)) return;
+    if (e.dataTransfer.files && e.dataTransfer.files[0]) loadFile(e.dataTransfer.files[0]);
+  });
+
   els.cropCanvas.addEventListener('pointerdown', function (e) {
     if (!state.img) return;
     e.preventDefault();
@@ -868,24 +886,6 @@ function init() {
     var btn = e.target.closest('.yarnSwatchBtn');
     if (!btn) return;
     openPicker(parseInt(btn.dataset.idx, 10));
-  });
-
-  els.shopBody.addEventListener('change', function (e) {
-    if (!e.target.classList.contains('yarnPick')) return;
-    var idx = e.target.dataset.idx;
-    if (e.target.classList.contains('msYarnPick')) {
-      if (e.target.value) {
-        var parts = e.target.value.split(MS_SEP);
-        state.msOverrides[idx] = { key: parts[0], name: parts[1] };
-      } else {
-        delete state.msOverrides[idx];
-      }
-    } else {
-      var key = els.yarnBrand.value + ':' + idx;
-      if (e.target.value) state.yarnOverrides[key] = e.target.value; else delete state.yarnOverrides[key];
-    }
-    updateShoppingList();
-    repaintColourIfPreviewing();
   });
 
   els.yarnPreviewChk.addEventListener('change', function () {
@@ -1049,14 +1049,6 @@ function init() {
   els.borderPct.addEventListener('input', function () { updateBorderHint(); if (state.grid) debouncedFinish(); });
   els.borderColor.addEventListener('input', function () { if (state.grid) debouncedFinish(); });
 
-  els.advToggle.addEventListener('click', function () {
-    state.advanced = !state.advanced;
-    els.advToggle.textContent = state.advanced ? 'Hide' : 'Show';
-    els.advToggle.setAttribute('aria-expanded', state.advanced ? 'true' : 'false');
-    els.advBody.classList.toggle('hidden', !state.advanced);
-    if (state.sampled) relabelAndRender();
-  });
-
   els.advResetBtn.addEventListener('click', function () {
     if (!state.trained) return;
     var k = state.trained.k;
@@ -1075,6 +1067,7 @@ function init() {
     process();
   });
 
+  initShell(); // C-shell chrome: board views, zoom/pan, overlays, popovers
   initPanels(); // restore which panels the user keeps open
   initPicker(); // wire the visual yarn picker modal
   initProjector(); // wire the full-screen projector tracing mode
@@ -1086,8 +1079,13 @@ function init() {
     restore: restoreSettings,
     hasImage: function () { return !!state.img; },
     getImage: function () { return state.img; },
-    loadFile: loadFile
+    loadFile: loadFile,
+    getOpenRouterKey: getOpenRouterKey,
+    setOpenRouterKey: setOpenRouterKey
   });
+
+  // in-app AI candidate generation; key edits sync to the signed-in account
+  initImagine({ loadFile: loadFile, onKeyChange: pushOpenRouterKey });
 
   // read-only test seam: the same serialize/restore the cloud panel uses, so
   // the e2e can round-trip project settings (e.g. pins) without Supabase auth;

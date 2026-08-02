@@ -6,267 +6,244 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
 <link rel="stylesheet" href="src/styles.css" />
 </head>
-<body>
-<div class="wrap">
-  <header class="top">
-    <div class="titlerow">
-      <h1>Tuft Pattern Maker</h1>
-      <div class="authbar" id="authBar">
-        <button class="autobtn" id="loginBtn" type="button">Sign in</button>
-        <form id="loginForm" class="hidden">
-          <span style="display:flex; align-items:center; gap:8px; flex-wrap:wrap">
-            <input type="email" id="loginEmail" placeholder="you@example.com" autocomplete="email" required />
-            <button class="autobtn" id="sendLinkBtn" type="submit">Send magic link</button>
-            <!-- shown once the Google provider is configured on the Supabase project -->
-            <button class="autobtn hidden" id="googleBtn" type="button">Sign in with Google</button>
-            <button class="autobtn" id="cancelLoginBtn" type="button">Cancel</button>
-          </span>
-        </form>
-        <span id="authedBox" class="hidden" style="display:flex; align-items:center; gap:8px">
-          <span class="useremail" id="userEmail"></span>
-          <button class="autobtn" id="logoutBtn" type="button">Sign out</button>
-        </span>
-        <span class="authmsg hidden" id="authMsg"></span>
+<body class="view-colour">
+
+<!-- ==================== the board: one full-bleed view at a time ==================== -->
+<div class="board" id="board">
+  <div class="boardpan" id="boardPan">
+    <div class="view view-source-el">
+      <canvas id="cropCanvas"></canvas>
+    </div>
+    <div class="view view-colour-el">
+      <div class="canvas-frame" id="colourFrame">
+        <canvas id="colourCanvas" width="480" height="480"></canvas>
+        <p class="placeholder-note" id="colourPlaceholder"></p>
       </div>
     </div>
-    <p class="tag">Turn a reference image into a flat colour tufting chart: pick a colour count, export a colour PNG/SVG for the gun and a black &amp; white outline chart for the projector, and get a yarn shopping list with gram estimates.</p>
-  </header>
-
-  <div class="workspace">
-  <div class="rail">
-  <details class="panel" data-panel="import" open>
-    <summary><h2>1 — Import image</h2></summary>
-    <label class="dropzone" id="dropzone" tabindex="0" for="fileInput">
-      <img class="thumb" id="thumb" alt="" />
-      <div class="copy">
-        <strong id="dzTitle">Drop an image here, or click to choose one</strong>
-        <span id="dzSub">PNG or JPG — the reference photo, painting, or sketch you want to tuft</span>
-      </div>
-    </label>
-    <input type="file" id="fileInput" accept="image/*" />
-
-    <div class="cropWrap hidden" id="cropWrap">
-      <div class="cropHead">
-        <span class="hint">Drag to select the region to use — drag inside the box to move it, corners to resize</span>
-        <select id="cropAspect" class="yarnPick" style="width:auto">
-          <option value="free">Free</option>
-          <option value="mat">Match mat W:H</option>
-          <option value="1.5">3:2</option>
-          <option value="0.6667">2:3</option>
-          <option value="1.3333">4:3</option>
-          <option value="0.75">3:4</option>
-          <option value="1.7778">16:9</option>
-          <option value="0.5625">9:16</option>
-        </select>
-        <button class="autobtn" id="resetCropBtn" type="button">Use full image</button>
-      </div>
-      <div class="cropCanvasFrame">
-        <canvas id="cropCanvas"></canvas>
-      </div>
-      <span class="hint" id="cropDims"></span>
-    </div>
-  </details>
-
-  <details class="panel" data-panel="settings" open>
-    <summary><h2>2 — Pattern settings</h2></summary>
-    <div class="controls">
-      <div class="field">
-        <label for="detailSize">Detail <span class="val" id="detailVal">600 px</span></label>
-        <div class="row"><input type="range" id="detailSize" min="60" max="900" value="600" /></div>
-        <span class="hint">Sample resolution along the longer side — high keeps thin lines and small features faithful, low simplifies</span>
-      </div>
-      <div class="field">
-        <label for="kColors">Colours <span class="val" id="kVal">3</span></label>
-        <div class="row">
-          <input type="range" id="kColors" min="2" max="12" value="3" />
-          <button class="autobtn" id="autoBtn" type="button">Auto</button>
-        </div>
-        <span class="hint">Detected automatically when you load an image — drag to override, Auto to re-detect</span>
-      </div>
-      <div class="field">
-        <label for="lineThickness">Line thickness <span class="val" id="lineThickVal">off</span></label>
-        <div class="row"><input type="range" id="lineThickness" min="0" max="20" value="0" /></div>
-        <span class="hint">Off = darkest colour is a filled area. Above 0 = outlines become adjustable-width strokes, decoupled from the drawing</span>
-      </div>
-      <div class="field">
-        <label for="matW">Mat width <span class="val"><span id="matWVal">70</span> cm</span></label>
-        <input type="number" id="matW" min="10" max="300" value="70" />
-      </div>
-      <div class="field">
-        <label for="matH">Mat height <span class="val"><span id="matHVal">70</span> cm</span></label>
-        <input type="number" id="matH" min="10" max="300" value="70" />
-        <label class="chkline"><input type="checkbox" id="matLock" /> 🔒 Lock to image ratio</label>
-        <span class="hint hidden" id="matLockHint"></span>
-      </div>
-      <details class="subgroup" data-panel="yarnmath">
-        <summary>Yarn estimate — density · strands · waste</summary>
-        <div class="controls">
-          <div class="field">
-            <label for="density">Yarn density <span class="val"><span id="densityVal">900</span> g/m²</span></label>
-            <input type="number" id="density" min="200" max="2000" step="50" value="900" />
-            <span class="hint">Rule of thumb for a single strand, cut pile; lower for loop pile or a shorter trim</span>
-          </div>
-          <div class="field">
-            <label for="strands">Strands <span class="val"><span id="strandsVal">1</span> at once</span></label>
-            <input type="number" id="strands" min="1" max="4" step="1" value="1" />
-            <span class="hint">How many threads you feed into the gun together — multiplies yarn used</span>
-          </div>
-          <div class="field">
-            <label for="buffer">Waste buffer <span class="val"><span id="bufferVal">15</span>%</span></label>
-            <div class="row"><input type="range" id="buffer" min="0" max="40" step="5" value="15" /></div>
-            <span class="hint">Covers trim waste, mistakes, and colour changes — real usage is never perfectly efficient</span>
-          </div>
-        </div>
-      </details>
-      <details class="subgroup" data-panel="finishing">
-        <summary>Finishing — corners &amp; border</summary>
-        <div class="controls">
-          <div class="field">
-            <label for="roundPct">Corner radius <span class="val"><span id="roundVal">0</span>%</span></label>
-            <div class="row"><input type="range" id="roundPct" min="0" max="50" value="0" /></div>
-            <span class="hint" id="roundHint">% of the shorter side</span>
-          </div>
-          <div class="field">
-            <label for="borderPct">Border <span class="val"><span id="borderVal">0</span>%</span></label>
-            <div class="row"><input type="range" id="borderPct" min="0" max="25" value="0" /></div>
-            <span class="hint" id="borderHint">% of the shorter side</span>
-          </div>
-          <div class="field" id="borderColorField">
-            <label for="borderColor">Border colour</label>
-            <div class="row"><input type="color" id="borderColor" value="#222222" /></div>
-          </div>
-        </div>
-      </details>
-      <div class="field" style="grid-column: 1 / -1;" id="advField">
-        <label>Advanced
-          <button class="autobtn" id="advToggle" type="button" aria-expanded="false">Show</button>
-        </label>
-        <div id="advBody" class="hidden">
-          <span class="hint">Reach — grow or shrink each colour's territory at the quantisation boundary; the pattern re-flows as you drag</span>
-          <div id="advBoundaries"></div>
-          <button class="autobtn" id="advResetBtn" type="button" style="margin-top:10px">Reset all to ×1</button>
-        </div>
+    <div class="view view-bw-el">
+      <div class="canvas-frame" id="bwFrame">
+        <canvas id="bwCanvas" width="480" height="480"></canvas>
+        <p class="placeholder-note" id="bwPlaceholder"></p>
       </div>
     </div>
-  </details>
+  </div>
 
-  <details class="panel" data-panel="prefs">
-    <summary><h2>Preferences</h2></summary>
-    <p class="hint">Your workshop defaults, applied every time the app opens: strands, density, buffer, mat size &amp; ratio lock, yarn brand, suppliers &amp; region, export option. Stored on this device.</p>
-    <div class="prefsbar">
-      <button class="autobtn" id="prefsSaveBtn" type="button">Save current as defaults</button>
-      <button class="autobtn" id="prefsClearBtn" type="button">Clear defaults</button>
+  <!-- empty state: shown until an image is loaded; also the drop/click target -->
+  <label class="dropzone" id="dropzone" tabindex="0" for="fileInput">
+    <img class="thumb" id="thumb" alt="" />
+    <div class="copy">
+      <strong id="dzTitle">Drop an image here, or click to choose one</strong>
+      <span id="dzSub">PNG or JPG — the reference photo, painting, or sketch you want to tuft</span>
+    </div>
+  </label>
+  <input type="file" id="fileInput" accept="image/*" />
+</div>
+
+<!-- ==================== floating chrome ==================== -->
+<div class="float brand">
+  <span class="t">TUFT</span>
+  <label class="filechip" id="fileChip" for="fileInput" title="Open or replace the image">Open image…</label>
+  <button type="button" class="filechip" id="imagineBtn" title="Generate a design with AI">✨ Imagine…</button>
+</div>
+
+<div class="float viewpill" id="viewPill">
+  <button type="button" data-view="source">Source</button>
+  <button type="button" data-view="colour" class="on">Colour</button>
+  <button type="button" data-view="bw">B/W</button>
+</div>
+
+<!-- crop toolbar — Source view only -->
+<div class="float cropbar hidden" id="cropWrap">
+  <span class="hint">Drag to crop — inside moves, corners resize</span>
+  <select id="cropAspect">
+    <option value="free">Free</option>
+    <option value="mat">Match mat W:H</option>
+    <option value="1.5">3:2</option>
+    <option value="0.6667">2:3</option>
+    <option value="1.3333">4:3</option>
+    <option value="0.75">3:4</option>
+    <option value="1.7778">16:9</option>
+    <option value="0.5625">9:16</option>
+  </select>
+  <button class="autobtn" id="resetCropBtn" type="button">Use full image</button>
+  <span class="hint" id="cropDims"></span>
+</div>
+
+<div class="float actions">
+  <div class="popwrap">
+    <button type="button" class="pillbtn" id="exportBtn">Export</button>
+    <div class="popover hidden" id="exportPop">
+      <button class="dl" id="dlColourPng" disabled>Colour PNG</button>
+      <button class="dl" id="dlColourSvg" disabled>Colour SVG</button>
+      <button class="dl" id="dlBwPng" disabled>Projector B/W PNG</button>
+      <label class="export-yarnhex">
+        <input type="checkbox" id="exportMirror" checked />
+        Mirror for tufting
+        <span class="hint">Tufting is worked from the back — downloads are flipped so the finished front matches the preview</span>
+      </label>
+      <label class="export-yarnhex">
+        <input type="checkbox" id="exportYarnHex" />
+        Matched yarn colours
+        <span class="hint">Export PNG/SVG using the matched yarns' hex values — needs a yarn brand or suppliers</span>
+      </label>
+    </div>
+  </div>
+  <button type="button" class="pillbtn primary" id="projOpenBtn" disabled>▶ Projector</button>
+  <div class="popwrap">
+    <button type="button" class="pillbtn" id="menuBtn" aria-label="More">⋯</button>
+    <div class="popover menu hidden" id="menuPop">
+      <button type="button" class="mi" id="miImagine">✨ Imagine a design…</button>
+      <button type="button" class="mi" id="miCloth">Cloth layout…</button>
+      <button type="button" class="mi" id="miCloud">Cloud projects…</button>
+      <hr />
+      <button type="button" class="mi" id="prefsSaveBtn">Save current as defaults</button>
+      <button type="button" class="mi" id="prefsClearBtn">Clear defaults</button>
       <span class="authmsg hidden" id="prefsMsg"></span>
+      <hr />
+      <span class="tiny">Defaults cover strands, density, buffer, mat size &amp; lock, yarn brand, suppliers &amp; region, export options — applied every time the app opens, stored on this device.</span>
+      <span class="tiny">Everything runs locally in this page — nothing leaves your browser unless you sign in and save a project, or use ✨ Imagine (which sends your prompt to OpenRouter with your own key).</span>
     </div>
-  </details>
-  </div><!-- /rail -->
+  </div>
+</div>
 
-  <div class="stage">
-  <section class="panel">
-    <h2>3 — Pattern output</h2>
-    <div class="outputs">
-      <div class="output-card">
-        <h3>Colour pattern</h3>
-        <div class="canvas-frame" id="colourFrame">
-          <canvas id="colourCanvas" width="480" height="480"></canvas>
-          <p class="placeholder-note" id="colourPlaceholder">Import an image to generate the pattern</p>
-        </div>
-        <div class="dl-row">
-          <button class="dl" id="dlColourPng" disabled>Download PNG</button>
-          <button class="dl ghost" id="dlColourSvg" disabled>Download SVG</button>
-        </div>
-        <label class="export-yarnhex">
-          <input type="checkbox" id="exportYarnHex" />
-          Export PNG/SVG in matched yarn colours
-          <span class="hint">Uses the hex values of the yarns matched in section 4 — needs a yarn brand or multi-supplier selection</span>
-        </label>
-      </div>
-      <div class="output-card">
-        <h3>Projector chart (B/W)</h3>
-        <div class="canvas-frame" id="bwFrame">
-          <canvas id="bwCanvas" width="480" height="480"></canvas>
-          <p class="placeholder-note" id="bwPlaceholder">Import an image to generate the pattern</p>
-        </div>
-        <div class="dl-row">
-          <button class="dl" id="dlBwPng" disabled>Download PNG</button>
-          <button class="dl ghost" id="projOpenBtn" disabled>Projector mode</button>
-        </div>
-      </div>
+<!-- properties card -->
+<div class="float props" id="propsCard">
+  <div class="proptabs">
+    <button type="button" data-ptab="design" class="on">Design</button>
+    <button type="button" data-ptab="yarn">Yarn</button>
+    <button type="button" class="listbtn" id="shopOpenBtn">List ↗</button>
+  </div>
+  <div class="propbody" id="ptabDesign">
+    <div class="field">
+      <label for="detailSize">Detail <span class="val" id="detailVal">600 px</span></label>
+      <div class="row"><input type="range" id="detailSize" min="60" max="900" value="600" /></div>
+      <span class="hint">High keeps thin lines and small features faithful, low simplifies</span>
     </div>
-    <label class="export-yarnhex">
-      <input type="checkbox" id="exportMirror" checked />
-      Mirror exports for tufting
-      <span class="hint">Tufting is worked from the back, so all three downloads (colour PNG/SVG and the B/W projector chart) are flipped horizontally — the finished front then matches the on-screen preview. Untick for a front-view export.</span>
-    </label>
-    <div class="palette-editor">
-      <div class="palette-editor-head">Palette <span class="hint">Pin a colour to lock it: set an exact colour or pick one from the image. Pinned colours stay fixed while the rest re-detect.</span></div>
-      <div class="palette-strip" id="paletteStrip"></div>
+    <div class="field">
+      <label for="kColors">Colours <span class="val" id="kVal">3</span></label>
+      <div class="row">
+        <input type="range" id="kColors" min="2" max="12" value="3" />
+        <button class="autobtn" id="autoBtn" type="button">Auto</button>
+      </div>
+      <span class="hint">Auto-detected on load — drag to override. Pin, merge or add colours on the palette below the chart.</span>
     </div>
-  </section>
+    <div class="field">
+      <label for="lineThickness">Line thickness <span class="val" id="lineThickVal">off</span></label>
+      <div class="row"><input type="range" id="lineThickness" min="0" max="20" value="0" /></div>
+      <span class="hint">Off = darkest colour is a filled area; above 0 = outlines become strokes</span>
+    </div>
+    <details class="subgroup" data-panel="finishing">
+      <summary>Finishing — corners &amp; border</summary>
+      <div class="field">
+        <label for="roundPct">Corner radius <span class="val"><span id="roundVal">0</span>%</span></label>
+        <div class="row"><input type="range" id="roundPct" min="0" max="50" value="0" /></div>
+        <span class="hint" id="roundHint">% of the shorter side</span>
+      </div>
+      <div class="field">
+        <label for="borderPct">Border <span class="val"><span id="borderVal">0</span>%</span></label>
+        <div class="row"><input type="range" id="borderPct" min="0" max="25" value="0" /></div>
+        <span class="hint" id="borderHint">% of the shorter side</span>
+      </div>
+      <div class="field" id="borderColorField">
+        <label for="borderColor">Border colour</label>
+        <div class="row"><input type="color" id="borderColor" value="#222222" /></div>
+      </div>
+    </details>
+    <details class="subgroup" data-panel="reach">
+      <summary>Reach — fine-tune colour boundaries</summary>
+      <span class="hint">Grow or shrink each colour's territory at the quantisation boundary; the pattern re-flows as you drag</span>
+      <div id="advBoundaries"></div>
+      <button class="autobtn" id="advResetBtn" type="button" style="margin-top:10px">Reset all to ×1</button>
+    </details>
+  </div>
+  <div class="propbody hidden" id="ptabYarn">
+    <div class="field">
+      <label for="matW">Mat width <span class="val"><span id="matWVal">70</span> cm</span></label>
+      <input type="number" id="matW" min="10" max="300" value="70" />
+    </div>
+    <div class="field">
+      <label for="matH">Mat height <span class="val"><span id="matHVal">70</span> cm</span></label>
+      <input type="number" id="matH" min="10" max="300" value="70" />
+      <label class="chkline"><input type="checkbox" id="matLock" /> 🔒 Lock to image ratio</label>
+      <span class="hint hidden" id="matLockHint"></span>
+    </div>
+    <details class="subgroup" data-panel="yarnmath">
+      <summary>Yarn estimate — density · strands · waste</summary>
+      <div class="field">
+        <label for="density">Yarn density <span class="val"><span id="densityVal">900</span> g/m²</span></label>
+        <input type="number" id="density" min="200" max="2000" step="50" value="900" />
+        <span class="hint">Rule of thumb for a single strand, cut pile; lower for loop pile or a shorter trim</span>
+      </div>
+      <div class="field">
+        <label for="strands">Strands <span class="val"><span id="strandsVal">1</span> at once</span></label>
+        <input type="number" id="strands" min="1" max="4" step="1" value="1" />
+        <span class="hint">Threads fed into the gun together — multiplies yarn used</span>
+      </div>
+      <div class="field">
+        <label for="buffer">Waste buffer <span class="val"><span id="bufferVal">15</span>%</span></label>
+        <div class="row"><input type="range" id="buffer" min="0" max="40" step="5" value="15" /></div>
+        <span class="hint">Covers trim waste, mistakes, and colour changes</span>
+      </div>
+    </details>
+    <div class="field" id="yarnBrandField">
+      <label for="yarnBrand">Yarn brand</label>
+      <select id="yarnBrand">
+        <option value="">Generic — hex colours only</option>
+      </select>
+      <span class="hint" id="yarnBrandHint">Pick a supplier to match every pattern colour to the nearest yarn they sell</span>
+    </div>
+    <div class="field">
+      <label class="chkline">
+        <input type="checkbox" id="multiSource" />
+        Buy from multiple suppliers
+      </label>
+      <span class="hint">Match each colour across every allowed supplier, grouped by supplier in the list</span>
+    </div>
+    <div class="field">
+      <label class="chkline">
+        <input type="checkbox" id="includeMulti" />
+        Include multicolour yarns
+      </label>
+      <span class="hint">Off by default: variegated skeins never stand in for a solid automatically — you can still pick them by hand</span>
+    </div>
+    <div class="field hidden" id="yarnPreviewField">
+      <label>
+        <input type="checkbox" id="yarnPreviewChk" />
+        Preview chart in yarn colours
+      </label>
+    </div>
+    <div class="field hidden" id="msGroup">
+      <label for="msRegion">Region</label>
+      <select id="msRegion"></select>
+      <div class="ms-suppliers" id="msSuppliers"></div>
+    </div>
+  </div>
+</div>
 
-  <details class="panel" data-panel="clothlayout">
-    <summary><h2>Cloth layout — project several designs at once</h2></summary>
-    <p class="hint">For small designs on one big cloth: set the cloth size, add each design as you finish it, then project the whole cloth and keystone once. In the projector, tap a design to select it, drag it into place (arrow keys nudge 1&nbsp;cm, R rotates 90°). Stored on this device.</p>
-    <div class="controls">
-      <div class="field">
-        <label for="clothW">Cloth width <span class="val">cm</span></label>
-        <input type="number" id="clothW" min="10" max="500" value="100" />
-      </div>
-      <div class="field">
-        <label for="clothH">Cloth height <span class="val">cm</span></label>
-        <input type="number" id="clothH" min="10" max="500" value="100" />
-      </div>
-    </div>
-    <div class="prefsbar">
-      <button class="autobtn" id="clothAddBtn" type="button" disabled>＋ Add current design to cloth</button>
-      <button class="autobtn" id="clothProjectBtn" type="button" disabled>Project cloth</button>
-      <span class="authmsg hidden" id="clothMsg"></span>
-    </div>
-    <div style="overflow-x:auto">
-      <table class="shop">
-        <thead><tr><th>Design</th><th class="num">Size</th><th class="num">Position</th><th class="num"></th></tr></thead>
-        <tbody id="clothList"><tr><td colspan="4" style="color:var(--ink-soft)">Nothing on the cloth yet</td></tr></tbody>
-      </table>
-    </div>
-  </details>
+<!-- palette pill, centred in the free board width -->
+<div class="bottombar">
+  <div class="float palpill" title="Pin a colour to lock it — pinned colours stay fixed while the rest re-detect">
+    <div class="palette-strip" id="paletteStrip"></div>
+  </div>
+</div>
 
-  <details class="panel" data-panel="shop" open>
-    <summary><h2>4 — Yarn shopping list</h2></summary>
-    <div class="controls" style="margin-bottom:16px">
-      <div class="field" id="yarnBrandField">
-        <label for="yarnBrand">Yarn brand</label>
-        <select id="yarnBrand">
-          <option value="">Generic — hex colours only</option>
-        </select>
-        <span class="hint" id="yarnBrandHint">Pick a supplier to match every pattern colour to the nearest yarn they sell</span>
-      </div>
-      <div class="field">
-        <label>
-          <input type="checkbox" id="multiSource" />
-          Buy from multiple suppliers
-        </label>
-        <span class="hint">Match each colour to its nearest yarn across every allowed supplier, grouped by supplier below</span>
-      </div>
-      <div class="field">
-        <label>
-          <input type="checkbox" id="includeMulti" />
-          Include multicolour yarns
-        </label>
-        <span class="hint">Off by default: variegated/multicolour skeins are held out of auto-matching so a print or marl never stands in for a solid colour. You can still pick them by hand.</span>
-      </div>
-      <div class="field hidden" id="yarnPreviewField">
-        <label>
-          <input type="checkbox" id="yarnPreviewChk" />
-          Preview chart in yarn colours
-        </label>
-      </div>
-      <div class="field hidden" id="msGroup" style="grid-column: 1 / -1;">
-        <label for="msRegion">Region</label>
-        <select id="msRegion"></select>
-        <div class="ms-suppliers" id="msSuppliers"></div>
-      </div>
-    </div>
-    <div class="shop-meta" id="shopMeta">Import an image to see quantities</div>
+<!-- stats + zoom -->
+<div class="float statschip"><div class="shop-meta" id="shopMeta">Import an image to see quantities</div></div>
+<div class="float zoompill">
+  <button type="button" id="zoomOut" aria-label="Zoom out">−</button>
+  <span id="zoomLabel">100%</span>
+  <button type="button" id="zoomIn" aria-label="Zoom in">＋</button>
+  <button type="button" id="zoomFit" aria-label="Fit">⛶</button>
+</div>
+
+<!-- ==================== overlays ==================== -->
+<div class="overlay" id="shopOverlay">
+  <div class="overlay-head">
+    <span class="t">Yarn shopping list</span>
+    <button type="button" class="hbtn" id="shopExpand" title="Expand to full page">⛶</button>
+    <button type="button" class="hbtn overlay-close" title="Close">✕</button>
+  </div>
+  <div class="overlay-body">
     <div style="overflow-x:auto">
       <table class="shop">
         <thead>
@@ -295,10 +272,126 @@
       <summary>Plain-text list</summary>
       <textarea class="shoptext" id="shopText" readonly onclick="this.select()"></textarea>
     </details>
-  </details>
+  </div>
+</div>
 
-  <details class="panel" data-panel="cloud">
-    <summary><h2>5 — Cloud projects</h2></summary>
+<div class="overlay" id="clothOverlay">
+  <div class="overlay-head">
+    <span class="t">Cloth layout</span>
+    <button type="button" class="hbtn overlay-close" title="Close">✕</button>
+  </div>
+  <div class="overlay-body">
+    <p class="hint">For small designs on one big cloth: set the cloth size, add each design as you finish it, then project the whole cloth and keystone once. In the projector, tap a design to select it, drag it into place (arrow keys nudge 1&nbsp;cm, R rotates 90°). Stored on this device.</p>
+    <div class="controls">
+      <div class="field">
+        <label for="clothW">Cloth width <span class="val">cm</span></label>
+        <input type="number" id="clothW" min="10" max="500" value="100" />
+      </div>
+      <div class="field">
+        <label for="clothH">Cloth height <span class="val">cm</span></label>
+        <input type="number" id="clothH" min="10" max="500" value="100" />
+      </div>
+    </div>
+    <div class="prefsbar">
+      <button class="autobtn" id="clothAddBtn" type="button" disabled>＋ Add current design to cloth</button>
+      <button class="autobtn" id="clothProjectBtn" type="button" disabled>Project cloth</button>
+      <span class="authmsg hidden" id="clothMsg"></span>
+    </div>
+    <div style="overflow-x:auto">
+      <table class="shop">
+        <thead><tr><th>Design</th><th class="num">Size</th><th class="num">Position</th><th class="num"></th></tr></thead>
+        <tbody id="clothList"><tr><td colspan="4" style="color:var(--ink-soft)">Nothing on the cloth yet</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<div class="overlay" id="imagineOverlay">
+  <div class="overlay-head">
+    <span class="t">✨ Imagine a design</span>
+    <span class="imagine-spend" id="imgSpend"></span>
+    <button type="button" class="hbtn overlay-close" title="Close">✕</button>
+  </div>
+  <div class="overlay-body">
+    <div class="field">
+      <label for="imgSubject">Subject</label>
+      <input type="text" id="imgSubject" placeholder="a yellow giraffe head with brown patches" maxlength="300" />
+      <span class="hint">Just the thing itself — the style, outlines and colour limits come from the preset</span>
+    </div>
+    <div class="controls imagine-controls">
+      <div class="field">
+        <label for="imgPreset">Style</label>
+        <select id="imgPreset"></select>
+        <span class="hint" id="imgPresetHint"></span>
+      </div>
+      <div class="field">
+        <label for="imgColours">Palette</label>
+        <select id="imgColours"></select>
+      </div>
+      <div class="field">
+        <label for="imgCount">Candidates</label>
+        <select id="imgCount">
+          <option value="1">1</option>
+          <option value="2">2</option>
+          <option value="4" selected>4</option>
+          <option value="6">6</option>
+          <option value="8">8</option>
+        </select>
+      </div>
+    </div>
+    <details class="subgroup" data-panel="imagineMore">
+      <summary>More — model, full prompt &amp; API key</summary>
+      <div class="field">
+        <label for="imgModel">Model</label>
+        <select id="imgModel"></select>
+      </div>
+      <div class="field">
+        <label for="imgPrompt">Full prompt <button type="button" class="autobtn hidden" id="imgPromptReset">Reset to preset</button></label>
+        <textarea class="shoptext" id="imgPrompt" rows="6" spellcheck="false"></textarea>
+        <span class="hint">Assembled live from subject + preset. Edit it and your version is sent instead.</span>
+      </div>
+      <div class="field">
+        <label for="imgKey">OpenRouter API key</label>
+        <input type="password" id="imgKey" placeholder="sk-or-…" autocomplete="off" />
+        <span class="hint">Stored on this device — and synced to your account when you're signed in to Cloud projects, so other devices pick it up automatically. Create one at openrouter.ai/settings/keys — a few pence covers a whole session.</span>
+      </div>
+    </details>
+    <div class="prefsbar">
+      <button class="autobtn" id="imgGoBtn" type="button">✨ Generate</button>
+      <div class="imagine-toggle" id="imgViewToggle">
+        <button type="button" data-imgview="chart" class="on">Chart preview</button>
+        <button type="button" data-imgview="ai">AI image</button>
+      </div>
+      <span class="authmsg hidden" id="imgStatus"></span>
+    </div>
+    <p class="hint imagine-hint">Candidates are shown pushed through the real tufting pipeline — in your matched yarn colours when a brand is selected. Tap one to make it the working image; ↻ riffs more variations of it.</p>
+    <div class="imagine-grid" id="imgGrid"></div>
+  </div>
+</div>
+
+<div class="overlay" id="cloudOverlay">
+  <div class="overlay-head">
+    <span class="t">Cloud projects</span>
+    <button type="button" class="hbtn overlay-close" title="Close">✕</button>
+  </div>
+  <div class="overlay-body">
+    <div class="authbar" id="authBar">
+      <button class="autobtn" id="loginBtn" type="button">Sign in</button>
+      <form id="loginForm" class="hidden">
+        <span style="display:flex; align-items:center; gap:8px; flex-wrap:wrap">
+          <input type="email" id="loginEmail" placeholder="you@example.com" autocomplete="email" required />
+          <button class="autobtn" id="sendLinkBtn" type="submit">Send magic link</button>
+          <!-- shown once the Google provider is configured on the Supabase project -->
+          <button class="autobtn hidden" id="googleBtn" type="button">Sign in with Google</button>
+          <button class="autobtn" id="cancelLoginBtn" type="button">Cancel</button>
+        </span>
+      </form>
+      <span id="authedBox" class="hidden" style="display:flex; align-items:center; gap:8px">
+        <span class="useremail" id="userEmail"></span>
+        <button class="autobtn" id="logoutBtn" type="button">Sign out</button>
+      </span>
+      <span class="authmsg hidden" id="authMsg"></span>
+    </div>
     <div class="projbar">
       <input type="text" id="projName" placeholder="Project name" maxlength="120" />
       <button class="autobtn" id="projSaveBtn" type="button">Save</button>
@@ -315,12 +408,10 @@
         </tbody>
       </table>
     </div>
-  </details>
-
-  <footer class="foot">Everything runs locally in this page — nothing leaves your browser unless you sign in and save a project to your account.</footer>
-  </div><!-- /stage -->
-  </div><!-- /workspace -->
+  </div>
 </div>
+
+<!-- ==================== projector + yarn picker (unchanged) ==================== -->
 <div id="projector" class="projector hidden">
   <canvas id="projCanvas"></canvas>
   <div class="proj-handles hidden" id="projHandles">

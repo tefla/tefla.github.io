@@ -184,23 +184,6 @@ export function matchYarn(rgb, paletteIdx) {
   return { yarn: best, deltaE: bestD };
 }
 
-// compact per-row mapping select: first option clears the override (labelled
-// "auto — Name"), the rest list every line colour nearest-ΔE-first
-export function buildYarnPickSelect(p, paletteIdx) {
-  var lab = rgbToLab(p.rgb);
-  var opts = activeLine.colors.map(function (c) { return { name: c.name, code: c.code, d: deltaE(lab, c.lab) }; })
-    .sort(function (a, b) { return a.d - b.d; });
-  var key = els.yarnBrand.value + ':' + paletteIdx;
-  var overrideName = state.yarnOverrides[key] || '';
-  var html = '<select class="yarnPick" data-idx="' + paletteIdx + '">' +
-    '<option value=""' + (overrideName === '' ? ' selected' : '') + '>auto — ' + escapeHtml(opts[0].name) + '</option>';
-  opts.forEach(function (o) {
-    html += '<option value="' + escapeHtml(o.name) + '"' + (overrideName === o.name ? ' selected' : '') + '>' +
-      escapeHtml(o.name) + (o.code ? ' [' + escapeHtml(o.code) + ']' : '') + ' · ΔE ' + Math.round(o.d) + '</option>';
-  });
-  return html + '</select>';
-}
-
 // multi-source: a flat pool of every colour across every allowed supplier
 // line, each entry tagged with its own supplier so matches/grouping can
 // work across brands with different currencies/cone weights
@@ -250,26 +233,10 @@ function matchYarnMulti(rgb, paletteIdx, pool) {
   return { yarn: best, deltaE: bestD };
 }
 
-// multi-source per-row select: same shape as buildYarnPickSelect but the
-// candidate list spans the whole pool and each option is labelled with its
-// supplier; option values pack key+name behind a control character (\x1f)
-// since colour names collide across suppliers and can contain any text
+// picker refs in multi-source mode pack supplier key + colour name behind a
+// control character (\x1f) since colour names collide across suppliers and
+// can contain any text — see pickerCandidates/applyPickerChoice
 export var MS_SEP = '\x1f';
-function buildYarnPickSelectMulti(p, paletteIdx, pool) {
-  var lab = rgbToLab(p.rgb);
-  var opts = pool.map(function (c) { return { key: c.key, brand: c.brand, name: c.name, code: c.code, d: deltaE(lab, c.lab) }; })
-    .sort(function (a, b) { return a.d - b.d; });
-  var ov = state.msOverrides[paletteIdx];
-  var ovValue = ov ? ov.key + MS_SEP + ov.name : '';
-  var html = '<select class="yarnPick msYarnPick" data-idx="' + paletteIdx + '">' +
-    '<option value=""' + (ovValue === '' ? ' selected' : '') + '>auto — ' + escapeHtml(opts[0].brand) + ' · ' + escapeHtml(opts[0].name) + '</option>';
-  opts.forEach(function (o) {
-    var value = o.key + MS_SEP + o.name;
-    html += '<option value="' + escapeHtml(value) + '"' + (ovValue === value ? ' selected' : '') + '>' +
-      escapeHtml(o.brand) + ' · ' + escapeHtml(o.name) + (o.code ? ' [' + escapeHtml(o.code) + ']' : '') + ' · ΔE ' + Math.round(o.d) + '</option>';
-  });
-  return html + '</select>';
-}
 
 // pools grams for one matched multi-source colour into its supplier's buy
 // group, keyed by supplier line then by yarn name (mirrors the single-mode
@@ -418,7 +385,7 @@ export function updateShoppingList() {
   if (!state.palette) return;
   // multi-source is an alternate matching path over the SAME palette/mat
   // maths below; when it's off (the default) every line here behaves
-  // exactly as before — activeLine/matchYarn/buildYarnPickSelect untouched
+  // exactly as before — activeLine/matchYarn untouched
   var multi = state.multiSource && state.msAllowed && state.msAllowed.length > 0;
   var pool = multi ? buildYarnPool(state.msAllowed) : null;
 
@@ -515,27 +482,17 @@ export function updateShoppingList() {
       var mrough = mm.deltaE > 22; // beyond ~22 ΔE the substitute visibly shifts the design
       var mwarnSpan = mrough ? ' <span style="color:var(--warn)" title="No close match in this range — nearest is noticeably different">≉</span>' : '';
       supplierCell = '<td><span class="supplier-tag">' + escapeHtml(mm.yarn.brand) + '</span></td>';
-      if (state.advanced) {
-        buyCell = '<td><div class="swatchcell"><button type="button" class="swatch yarnSwatchBtn" data-idx="' + i + '" title="Change yarn" style="background:' + swatchBg(mm.yarn) + '"></button>' +
-          buildYarnPickSelectMulti(p, i, pool) + mwarnSpan + '</div></td>';
-      } else {
-        buyCell = '<td><div class="swatchcell"><button type="button" class="swatch yarnSwatchBtn" data-idx="' + i + '" title="Change yarn" style="background:' + swatchBg(mm.yarn) + '"></button><span>' +
-          escapeHtml(mm.yarn.name) + (mm.yarn.code ? ' <span class="hex">' + escapeHtml(mm.yarn.code) + '</span>' : '') +
-          mwarnSpan + '</span></div></td>';
-      }
+      buyCell = '<td><div class="swatchcell"><button type="button" class="swatch yarnSwatchBtn" data-idx="' + i + '" title="Change yarn" style="background:' + swatchBg(mm.yarn) + '"></button><span>' +
+        escapeHtml(mm.yarn.name) + (mm.yarn.code ? ' <span class="hex">' + escapeHtml(mm.yarn.code) + '</span>' : '') +
+        mwarnSpan + '</span></div></td>';
       buyText = '   -> ' + mm.yarn.brand + ' / ' + mm.yarn.name + (mm.manual ? ' (manual)' : '') + (mrough ? ' (poor match)' : '');
     } else if (activeLine) {
       var m = matches[i];
       var rough = m.deltaE > 22; // beyond ~22 ΔE the substitute visibly shifts the design
       var warnSpan = rough ? ' <span style="color:var(--warn)" title="No close match in this range — nearest is noticeably different">≉</span>' : '';
-      if (state.advanced) {
-        buyCell = '<td><div class="swatchcell"><button type="button" class="swatch yarnSwatchBtn" data-idx="' + i + '" title="Change yarn" style="background:' + swatchBg(m.yarn) + '"></button>' +
-          buildYarnPickSelect(p, i) + warnSpan + '</div></td>';
-      } else {
-        buyCell = '<td><div class="swatchcell"><button type="button" class="swatch yarnSwatchBtn" data-idx="' + i + '" title="Change yarn" style="background:' + swatchBg(m.yarn) + '"></button><span>' +
-          escapeHtml(m.yarn.name) + (m.yarn.code ? ' <span class="hex">' + escapeHtml(m.yarn.code) + '</span>' : '') +
-          warnSpan + '</span></div></td>';
-      }
+      buyCell = '<td><div class="swatchcell"><button type="button" class="swatch yarnSwatchBtn" data-idx="' + i + '" title="Change yarn" style="background:' + swatchBg(m.yarn) + '"></button><span>' +
+        escapeHtml(m.yarn.name) + (m.yarn.code ? ' <span class="hex">' + escapeHtml(m.yarn.code) + '</span>' : '') +
+        warnSpan + '</span></div></td>';
       buyText = '   -> ' + m.yarn.name + (m.manual ? ' (manual)' : '') + (rough ? ' (poor match)' : '');
     }
     rows += '<tr>' +
