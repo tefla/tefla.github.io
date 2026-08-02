@@ -34,6 +34,7 @@
     <div class="copy">
       <strong id="dzTitle">Drop an image here, or click to choose one</strong>
       <span id="dzSub">PNG or JPG — the reference photo, painting, or sketch you want to tuft</span>
+      <button type="button" class="autobtn dz-imagine" id="dzImagineBtn">✨ …or imagine one with AI</button>
     </div>
   </label>
   <input type="file" id="fileInput" accept="image/*" />
@@ -228,6 +229,9 @@
     </div>
   </div>
 </div>
+
+<!-- transient status toast -->
+<div class="toast" id="toast" aria-live="polite"></div>
 
 <!-- palette pill, centred in the free board width -->
 <div class="bottombar">

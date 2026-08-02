@@ -39,6 +39,18 @@ export function imageLoaded(name) {
   $('fileChip').textContent = name;
 }
 
+// ---------- toast: transient status, visible from any view ----------
+// (the old channel wrote into #cropDims, a Source-view-only label — messages
+// fired from the Colour view landed where the user wasn't looking)
+var toastTimer = null;
+export function toast(text) {
+  var el = $('toast');
+  el.textContent = text;
+  el.classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(function () { el.classList.remove('show'); }, 3200);
+}
+
 // ---------- fit / zoom / pan ----------
 // #boardPan is centre-anchored; tx/ty offset from centre, then scale. The
 // crop canvas keeps its own pointer math working because it reads sizes via
@@ -239,8 +251,19 @@ export function initShell() {
 
   document.addEventListener('keydown', function (e) {
     if (e.key !== 'Escape') return;
+    // the yarn picker is modal above everything and owns this Esc — without
+    // the guard one press closed the picker AND the overlay beneath it
+    if (!$('yarnPicker').classList.contains('hidden')) return;
     closePops();
     if (anyOverlayOpen()) closeOverlays();
+  });
+
+  // the dropzone's second door: generate instead of importing. The button
+  // sits inside the file-input <label>, so swallow the label activation.
+  $('dzImagineBtn').addEventListener('click', function (e) {
+    e.preventDefault();
+    e.stopPropagation();
+    openOverlay('imagineOverlay');
   });
 
   initSheet();

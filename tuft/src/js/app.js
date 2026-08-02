@@ -14,7 +14,7 @@ import { initPicker, openPicker } from './picker.js';
 import { initProjector, openClothProjector, renderIfOpen } from './projector.js';
 import { initCloth, getLayout } from './cloth.js';
 import { view as projView } from './projector-state.js';
-import { initShell, setView, pickSourceView, restorePickView, imageLoaded as shellImageLoaded } from './shell.js';
+import { initShell, setView, pickSourceView, restorePickView, imageLoaded as shellImageLoaded, toast } from './shell.js';
 
 // ---------- image import ----------
 // `onload` (optional) fires after the chart has regenerated — the cloud
@@ -405,7 +405,7 @@ function unionMergeGroup(a, b) {
 // accent with no histogram peak — a pink ear — gets its own colour at low k)
 function armAddColour() {
   if (parseInt(els.kColors.value, 10) >= parseInt(els.kColors.max, 10)) {
-    els.cropDims.textContent = 'Colour limit reached — merge or raise Colours first';
+    toast('Colour limit reached — merge or raise Colours first');
     return;
   }
   state.mergeSource = null;
@@ -413,7 +413,7 @@ function armAddColour() {
   state.eyedropOrig = null;
   pickSourceView(); // sampling clicks land on the crop canvas
   els.cropCanvas.classList.add('eyedrop');
-  els.cropDims.textContent = 'Click the image to add a new pinned colour (Esc to cancel)';
+  toast('Click the image to add a new pinned colour (Esc to cancel)');
   buildPaletteStrip();
 }
 
@@ -434,7 +434,7 @@ function armEyedropper(newIdx) {
   state.eyedropOrig = state.order[newIdx];
   pickSourceView(); // sampling clicks land on the crop canvas
   els.cropCanvas.classList.add('eyedrop');
-  els.cropDims.textContent = 'Eyedropper armed — click the image to pin colour ' + (newIdx + 1) + ' (Esc to cancel)';
+  toast('Eyedropper armed — click the image to pin colour ' + (newIdx + 1) + ' (Esc to cancel)');
 }
 
 function cancelEyedropper() {
