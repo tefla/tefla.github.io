@@ -55,16 +55,26 @@ function applyTransform() {
   $('zoomLabel').textContent = Math.round(scale * 100) + '%';
 }
 
+// chrome clearance comes from #fitProbe's computed paddings — CSS states the
+// real insets per breakpoint (and per phone-sheet state), and computed
+// padding always resolves calc()/env() to plain px. Desktop values match the
+// old hardcoded constants (120/64/110) exactly.
+function fitPad() {
+  var cs = getComputedStyle($('fitProbe'));
+  return { x: parseFloat(cs.paddingLeft) || 0,
+           top: parseFloat(cs.paddingTop) || 0,
+           bottom: parseFloat(cs.paddingBottom) || 0 };
+}
+
 export function fit() {
   var c = content(), board = $('board');
   var w = c.offsetWidth, h = c.offsetHeight;
-  // clearance for the floating chrome: pills top and bottom, props card right
-  var PAD_X = 120, PAD_TOP = 64, PAD_BOTTOM = 110;
+  var pad = fitPad();
   if (!w || !h) { scale = 1; ty = 0; } else {
-    scale = Math.min((board.clientWidth - PAD_X * 2) / w,
-                     (board.clientHeight - PAD_TOP - PAD_BOTTOM) / h);
+    scale = Math.min((board.clientWidth - pad.x * 2) / w,
+                     (board.clientHeight - pad.top - pad.bottom) / h);
     scale = Math.max(0.05, Math.min(scale, 6));
-    ty = (PAD_TOP - PAD_BOTTOM) / 2; // nudge up out from under the palette pill
+    ty = (pad.top - pad.bottom) / 2; // nudge up out from under the palette pill
   }
   tx = 0;
   userZoomed = false;
@@ -153,6 +163,32 @@ function closePops() {
   ['exportPop', 'menuPop'].forEach(function (p) { $(p).classList.add('hidden'); });
 }
 
+// ---------- phone props sheet: peek (default) ↔ open ----------
+// body.sheet-open drives the CSS (sheet height + fit insets); ≤700px only —
+// on desktop the grabber is hidden and the class is inert
+var PHONE = window.matchMedia('(max-width: 700px)');
+
+function initSheet() {
+  $('sheetGrab').addEventListener('click', function () {
+    document.body.classList.toggle('sheet-open');
+    fit();
+  });
+  // tapping a tab while peeked opens the sheet on that tab
+  Array.prototype.forEach.call(document.querySelectorAll('.proptabs [data-ptab]'), function (b) {
+    b.addEventListener('click', function () {
+      if (PHONE.matches && !document.body.classList.contains('sheet-open')) {
+        document.body.classList.add('sheet-open');
+        fit();
+      }
+    });
+  });
+  // crossing the breakpoint resets to the peeked default
+  PHONE.addEventListener('change', function () {
+    document.body.classList.remove('sheet-open');
+    fit();
+  });
+}
+
 export function initShell() {
   // view pill
   Array.prototype.forEach.call(document.querySelectorAll('#viewPill button'), function (b) {
@@ -207,6 +243,7 @@ export function initShell() {
     if (anyOverlayOpen()) closeOverlays();
   });
 
+  initSheet();
   initZoom();
   setView('colour');
 }

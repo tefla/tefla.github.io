@@ -108,8 +108,14 @@
   </div>
 </div>
 
+<!-- fit() clearance probe: shell.js reads this element's computed paddings
+     as the board insets, so each breakpoint (and the phone sheet state)
+     declares its real chrome clearance in CSS instead of JS constants -->
+<div id="fitProbe" aria-hidden="true"></div>
+
 <!-- properties card -->
 <div class="float props" id="propsCard">
+  <button type="button" class="sheet-grab" id="sheetGrab" aria-label="Expand or collapse settings"><span></span></button>
   <div class="proptabs">
     <button type="button" data-ptab="design" class="on">Design</button>
     <button type="button" data-ptab="yarn">Yarn</button>
