@@ -6,7 +6,8 @@
 //
 // initCloud(seam) is called from app.js init(); `seam` supplies the app
 // integration points: serialize(), restore(data), hasImage(), getImage(),
-// loadFile(file, onload).
+// loadFile(file, onload), getOpenRouterKey(), setOpenRouterKey(key).
+import { openOverlay } from './shell.js';
 
 var SUPABASE_URL = 'https://nrfeojccyejcflfjuyqv.supabase.co';
 var PUBLISHABLE_KEY = 'sb_publishable_YmGsIGakesw-Xb_rnN_ouQ_jdjBVgfc';
@@ -25,7 +26,7 @@ export function initCloud(seam) {
 
   var $ = function (id) { return document.getElementById(id); };
   var loginBtn = $('loginBtn'), loginForm = $('loginForm'), loginEmail = $('loginEmail'),
-      sendLinkBtn = $('sendLinkBtn'), cancelLoginBtn = $('cancelLoginBtn'),
+      sendLinkBtn = $('sendLinkBtn'), accountKey = $('accountKey'),
       authedBox = $('authedBox'), userEmail = $('userEmail'), logoutBtn = $('logoutBtn'),
       authMsg = $('authMsg'), googleBtn = $('googleBtn');
   var projName = $('projName'), projSaveBtn = $('projSaveBtn'),
@@ -49,29 +50,21 @@ export function initCloud(seam) {
       (location.pathname === '/' ? '/' : location.pathname.replace(/\/$/, ''));
   }
 
+  // guest form is ALWAYS visible now — the account chip is the door, the
+  // panel is the room; no reveal dance. loginBtn/cancelLoginBtn remain in
+  // the DOM (hidden) for compatibility. The chip in the chrome mirrors auth
+  // state via the tuft:auth event (shell.js listens).
   function render(session) {
     user = session ? session.user : null;
     authedBox.classList.toggle('hidden', !user);
-    loginBtn.classList.toggle('hidden', !!user || !loginForm.classList.contains('hidden'));
+    loginForm.classList.toggle('hidden', !!user);
+    loginBtn.classList.add('hidden');
     if (user) {
-      loginForm.classList.add('hidden');
       userEmail.textContent = user.email;
       showMsg('');
     }
+    document.dispatchEvent(new CustomEvent('tuft:auth', { detail: { user: user } }));
   }
-
-  loginBtn.addEventListener('click', function () {
-    loginBtn.classList.add('hidden');
-    loginForm.classList.remove('hidden');
-    showMsg('');
-    loginEmail.focus();
-  });
-
-  cancelLoginBtn.addEventListener('click', function () {
-    loginForm.classList.add('hidden');
-    loginBtn.classList.remove('hidden');
-    showMsg('');
-  });
 
   loginForm.addEventListener('submit', function (e) {
     e.preventDefault();
@@ -122,8 +115,7 @@ export function initCloud(seam) {
   logoutBtn.addEventListener('click', function () {
     client.auth.signOut().then(function (res) {
       if (res.error) { showMsg('Sign-out failed: ' + res.error.message, true); return; }
-      loginForm.classList.add('hidden');
-      loginBtn.classList.remove('hidden');
+      // render(null) via onAuthStateChange re-shows the guest form
     });
   });
 
@@ -341,6 +333,19 @@ export function initCloud(seam) {
     });
   };
 
+  // the Account panel's key field shares the one device store with the
+  // Imagine panel's field (seam get/set — imagine.js owns the store)
+  accountKey.value = seam.getOpenRouterKey();
+  accountKey.addEventListener('change', function () {
+    seam.setOpenRouterKey(accountKey.value.trim());
+    pushOpenRouterKeyImpl(accountKey.value.trim());
+  });
+  // refresh from the store whenever the panel is summoned — the same key may
+  // have just been edited in Imagine → More, or pulled by a sign-in
+  document.addEventListener('tuft:overlay', function (e) {
+    if (e.detail.id === 'cloudOverlay') accountKey.value = seam.getOpenRouterKey();
+  });
+
   // fires with INITIAL_SESSION on load (including after a magic-link
   // redirect, which supabase-js consumes from the URL hash automatically)
   client.auth.onAuthStateChange(function (event, session) {
@@ -348,5 +353,8 @@ export function initCloud(seam) {
     msg('');
     refreshList();
     if (user && (event === 'INITIAL_SESSION' || event === 'SIGNED_IN')) syncOpenRouterKey();
+    // an explicit sign-in (magic-link return, OAuth redirect) opens the
+    // Account panel so the round-trip visibly lands somewhere
+    if (user && event === 'SIGNED_IN') openOverlay('cloudOverlay');
   });
 }

@@ -89,18 +89,14 @@
     </div>
   </div>
   <button type="button" class="pillbtn primary" id="projOpenBtn" disabled>▶ Projector</button>
+  <button type="button" class="pillbtn" id="accountBtn" title="Sign in — cloud projects &amp; synced settings">Sign in</button>
   <div class="popwrap">
     <button type="button" class="pillbtn" id="menuBtn" aria-label="More">⋯</button>
     <div class="popover menu hidden" id="menuPop">
       <button type="button" class="mi" id="miImagine">✨ Imagine a design…</button>
       <button type="button" class="mi" id="miCloth">Cloth layout…</button>
-      <button type="button" class="mi" id="miCloud">Cloud projects…</button>
+      <button type="button" class="mi" id="miCloud">Account &amp; projects…</button>
       <hr />
-      <button type="button" class="mi" id="prefsSaveBtn">Save current as defaults</button>
-      <button type="button" class="mi" id="prefsClearBtn">Clear defaults</button>
-      <span class="authmsg hidden" id="prefsMsg"></span>
-      <hr />
-      <span class="tiny">Defaults cover strands, density, buffer, mat size &amp; lock, yarn brand, suppliers &amp; region, export options — applied every time the app opens, stored on this device.</span>
       <span class="tiny">Everything runs locally in this page — nothing leaves your browser unless you sign in and save a project, or use ✨ Imagine (which sends your prompt to OpenRouter with your own key).</span>
     </div>
   </div>
@@ -353,7 +349,7 @@
       <div class="field">
         <label for="imgKey">OpenRouter API key</label>
         <input type="password" id="imgKey" placeholder="sk-or-…" autocomplete="off" />
-        <span class="hint">Stored on this device — and synced to your account when you're signed in to Cloud projects, so other devices pick it up automatically. Create one at openrouter.ai/settings/keys — a few pence covers a whole session.</span>
+        <span class="hint">Stored on this device — and synced to your account when you're signed in (Account panel, top right), so other devices pick it up automatically. Create one at openrouter.ai/settings/keys — a few pence covers a whole session.</span>
       </div>
     </details>
     <div class="prefsbar">
@@ -371,26 +367,34 @@
 
 <div class="overlay" id="cloudOverlay">
   <div class="overlay-head">
-    <span class="t">Cloud projects</span>
+    <span class="t">Account</span>
     <button type="button" class="hbtn overlay-close" title="Close">✕</button>
   </div>
   <div class="overlay-body">
     <div class="authbar" id="authBar">
-      <button class="autobtn" id="loginBtn" type="button">Sign in</button>
-      <form id="loginForm" class="hidden">
+      <!-- kept for cloud.js compat; render() keeps it hidden now the guest
+           form is always visible -->
+      <button class="autobtn hidden" id="loginBtn" type="button">Sign in</button>
+      <form id="loginForm">
         <span style="display:flex; align-items:center; gap:8px; flex-wrap:wrap">
           <input type="email" id="loginEmail" placeholder="you@example.com" autocomplete="email" required />
           <button class="autobtn" id="sendLinkBtn" type="submit">Send magic link</button>
           <!-- shown once the Google provider is configured on the Supabase project -->
           <button class="autobtn hidden" id="googleBtn" type="button">Sign in with Google</button>
-          <button class="autobtn" id="cancelLoginBtn" type="button">Cancel</button>
+          <button class="autobtn hidden" id="cancelLoginBtn" type="button">Cancel</button>
         </span>
+        <span class="hint">Sign in to save projects to the cloud and carry your OpenRouter key to every device.</span>
       </form>
       <span id="authedBox" class="hidden" style="display:flex; align-items:center; gap:8px">
         <span class="useremail" id="userEmail"></span>
         <button class="autobtn" id="logoutBtn" type="button">Sign out</button>
       </span>
       <span class="authmsg hidden" id="authMsg"></span>
+    </div>
+    <div class="field">
+      <label for="accountKey">OpenRouter API key</label>
+      <input type="password" id="accountKey" placeholder="sk-or-…" autocomplete="off" />
+      <span class="hint">Used by ✨ Imagine. Synced to your account when signed in, so other devices pick it up automatically; also editable in Imagine → More.</span>
     </div>
     <div class="projbar">
       <input type="text" id="projName" placeholder="Project name" maxlength="120" />
@@ -408,6 +412,15 @@
         </tbody>
       </table>
     </div>
+    <details class="subgroup" data-panel="accountDevice">
+      <summary>This device — defaults</summary>
+      <div class="prefsbar">
+        <button class="autobtn" id="prefsSaveBtn" type="button">Save current as defaults</button>
+        <button class="autobtn" id="prefsClearBtn" type="button">Clear defaults</button>
+        <span class="authmsg hidden" id="prefsMsg"></span>
+      </div>
+      <span class="tiny">Defaults cover strands, density, buffer, mat size &amp; lock, yarn brand, suppliers &amp; region, export options — applied every time the app opens, stored on this device.</span>
+    </details>
   </div>
 </div>
 

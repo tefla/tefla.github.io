@@ -134,6 +134,7 @@ export function openOverlay(id) {
     el.classList.toggle('open', o === id);
     if (o !== id) el.classList.remove('full');
   });
+  document.dispatchEvent(new CustomEvent('tuft:overlay', { detail: { id: id } }));
 }
 function closeOverlays() {
   OVERLAYS.forEach(function (o) { $(o).classList.remove('open', 'full'); });
@@ -176,6 +177,17 @@ export function initShell() {
   $('miCloud').addEventListener('click', function () { closePops(); openOverlay('cloudOverlay'); });
   $('imagineBtn').addEventListener('click', function () { openOverlay('imagineOverlay'); });
   $('miImagine').addEventListener('click', function () { closePops(); openOverlay('imagineOverlay'); });
+
+  // account chip: the always-visible door to the Account panel. cloud.js
+  // broadcasts auth state (tuft:auth) because auth is its domain; the chip
+  // is chrome, so it's dressed here.
+  $('accountBtn').addEventListener('click', function () { openOverlay('cloudOverlay'); });
+  document.addEventListener('tuft:auth', function (e) {
+    var chip = $('accountBtn'), user = e.detail.user;
+    chip.classList.toggle('authed', !!user);
+    chip.textContent = user ? (user.email || '?').charAt(0).toUpperCase() : 'Sign in';
+    chip.title = user ? user.email : 'Sign in — cloud projects & synced settings';
+  });
   Array.prototype.forEach.call(document.querySelectorAll('.overlay-close'), function (b) {
     b.addEventListener('click', closeOverlays);
   });
