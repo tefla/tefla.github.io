@@ -201,7 +201,11 @@
   .cropbar .hint { margin: 0; }
   .cropbar select { width: auto; font-size: 12.5px; padding: 4px 6px; }
 
-  .actions { top: 14px; right: 14px; display: flex; align-items: center; gap: 6px; padding: 5px; }
+  /* above the other floats (z 30): the Export/⋯ popovers drop straight into
+     the props card's rect (top 62px right 14px), and .float's z-index makes
+     each float its own stacking context — the popover's own z-index can't
+     escape it, so the LATER-in-DOM props card was painting over open menus */
+  .actions { top: 14px; right: 14px; display: flex; align-items: center; gap: 6px; padding: 5px; z-index: 40; }
   .pillbtn {
     font: inherit; font-size: 12.5px; cursor: pointer;
     background: var(--surface-2); color: var(--ink);
