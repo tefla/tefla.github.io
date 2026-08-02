@@ -175,6 +175,8 @@ export function initShell() {
   $('shopExpand').addEventListener('click', function () { $('shopOverlay').classList.toggle('full'); });
   $('miCloth').addEventListener('click', function () { closePops(); openOverlay('clothOverlay'); });
   $('miCloud').addEventListener('click', function () { closePops(); openOverlay('cloudOverlay'); });
+  // phone-only replacement for the hidden fileChip (tb-left dies ≤700px)
+  $('miOpen').addEventListener('click', function () { closePops(); $('fileInput').click(); });
   $('imagineBtn').addEventListener('click', function () { openOverlay('imagineOverlay'); });
   $('miImagine').addEventListener('click', function () { closePops(); openOverlay('imagineOverlay'); });
 

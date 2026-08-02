@@ -39,39 +39,25 @@
   <input type="file" id="fileInput" accept="image/*" />
 </div>
 
-<!-- ==================== floating chrome ==================== -->
-<div class="float brand">
-  <span class="t">TUFT</span>
-  <label class="filechip" id="fileChip" for="fileInput" title="Open or replace the image">Open image…</label>
-  <button type="button" class="filechip" id="imagineBtn" title="Generate a design with AI">✨ Imagine…</button>
-</div>
-
-<div class="float viewpill" id="viewPill">
-  <button type="button" data-view="source">Source</button>
-  <button type="button" data-view="colour" class="on">Colour</button>
-  <button type="button" data-view="bw">B/W</button>
-</div>
-
-<!-- crop toolbar — Source view only -->
-<div class="float cropbar hidden" id="cropWrap">
-  <span class="hint">Drag to crop — inside moves, corners resize</span>
-  <select id="cropAspect">
-    <option value="free">Free</option>
-    <option value="mat">Match mat W:H</option>
-    <option value="1.5">3:2</option>
-    <option value="0.6667">2:3</option>
-    <option value="1.3333">4:3</option>
-    <option value="0.75">3:4</option>
-    <option value="1.7778">16:9</option>
-    <option value="0.5625">9:16</option>
-  </select>
-  <button class="autobtn" id="resetCropBtn" type="button">Use full image</button>
-  <span class="hint" id="cropDims"></span>
-</div>
-
-<div class="float actions">
+<!-- ==================== top bar: one negotiated flex row ==================== -->
+<!-- One fixed bar owns the whole top edge — clusters can never collide the
+     way three independent fixed floats did at phone widths. The crop bar is
+     its contextual second row (Source view only). -->
+<div class="topbar" id="topbar">
+  <div class="tb-row">
+    <div class="tb-card tb-left">
+      <span class="t">TUFT</span>
+      <label class="filechip" id="fileChip" for="fileInput" title="Open or replace the image">Open image…</label>
+      <button type="button" class="filechip" id="imagineBtn" title="Generate a design with AI">✨ Imagine…</button>
+    </div>
+    <div class="tb-card viewpill" id="viewPill">
+      <button type="button" data-view="source">Source</button>
+      <button type="button" data-view="colour" class="on">Colour</button>
+      <button type="button" data-view="bw">B/W</button>
+    </div>
+    <div class="tb-card tb-right">
   <div class="popwrap">
-    <button type="button" class="pillbtn" id="exportBtn">Export</button>
+    <button type="button" class="pillbtn" id="exportBtn"><span class="ico" title="Export">⤓</span><span class="lbl">Export</span></button>
     <div class="popover hidden" id="exportPop">
       <button class="dl" id="dlColourPng" disabled>Colour PNG</button>
       <button class="dl" id="dlColourSvg" disabled>Colour SVG</button>
@@ -88,17 +74,37 @@
       </label>
     </div>
   </div>
-  <button type="button" class="pillbtn primary" id="projOpenBtn" disabled>▶ Projector</button>
+  <button type="button" class="pillbtn primary" id="projOpenBtn" disabled>▶<span class="lbl"> Projector</span></button>
   <button type="button" class="pillbtn" id="accountBtn" title="Sign in — cloud projects &amp; synced settings">Sign in</button>
   <div class="popwrap">
     <button type="button" class="pillbtn" id="menuBtn" aria-label="More">⋯</button>
     <div class="popover menu hidden" id="menuPop">
+      <button type="button" class="mi" id="miOpen">Open image…</button>
       <button type="button" class="mi" id="miImagine">✨ Imagine a design…</button>
       <button type="button" class="mi" id="miCloth">Cloth layout…</button>
       <button type="button" class="mi" id="miCloud">Account &amp; projects…</button>
       <hr />
       <span class="tiny">Everything runs locally in this page — nothing leaves your browser unless you sign in and save a project, or use ✨ Imagine (which sends your prompt to OpenRouter with your own key).</span>
     </div>
+  </div>
+    </div>
+  </div>
+
+  <!-- crop toolbar — contextual second row, Source view only -->
+  <div class="tb-card cropbar hidden" id="cropWrap">
+    <span class="hint">Drag to crop — inside moves, corners resize</span>
+    <select id="cropAspect">
+      <option value="free">Free</option>
+      <option value="mat">Match mat W:H</option>
+      <option value="1.5">3:2</option>
+      <option value="0.6667">2:3</option>
+      <option value="1.3333">4:3</option>
+      <option value="0.75">3:4</option>
+      <option value="1.7778">16:9</option>
+      <option value="0.5625">9:16</option>
+    </select>
+    <button class="autobtn" id="resetCropBtn" type="button">Use full image</button>
+    <span class="hint" id="cropDims"></span>
   </div>
 </div>
 
@@ -109,6 +115,7 @@
     <button type="button" data-ptab="yarn">Yarn</button>
     <button type="button" class="listbtn" id="shopOpenBtn">List ↗</button>
   </div>
+  <div class="prop-stats"><div class="shop-meta" id="shopMeta">Import an image to see quantities</div></div>
   <div class="propbody" id="ptabDesign">
     <div class="field">
       <label for="detailSize">Detail <span class="val" id="detailVal">600 px</span></label>
@@ -223,8 +230,7 @@
   </div>
 </div>
 
-<!-- stats + zoom -->
-<div class="float statschip"><div class="shop-meta" id="shopMeta">Import an image to see quantities</div></div>
+<!-- zoom -->
 <div class="float zoompill">
   <button type="button" id="zoomOut" aria-label="Zoom out">−</button>
   <span id="zoomLabel">100%</span>

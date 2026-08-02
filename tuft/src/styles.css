@@ -173,8 +173,31 @@
     z-index: 30;
   }
 
-  .brand { top: 14px; left: 14px; padding: 8px 14px; display: flex; align-items: center; gap: 10px; }
-  .brand .t { font-family: 'JBM', ui-monospace, monospace; font-weight: 700; font-size: 13px; letter-spacing: 0.04em; }
+  /* ---------- topbar: one negotiated flex row ---------- */
+  /* z 40 keeps its popovers above the props card (z 30) — each positioned
+     element is its own stacking context, so a child popover's z-index can
+     never escape; the bar itself must outrank the card */
+  .topbar {
+    position: fixed; top: 14px; left: 14px; right: 14px; z-index: 40;
+    display: flex; flex-direction: column; gap: 8px;
+    pointer-events: none; /* the cards re-enable — the bar itself is a layout ghost */
+  }
+  .topbar > * { pointer-events: auto; }
+  .tb-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+  .tb-card {
+    background: color-mix(in srgb, var(--surface) 92%, transparent);
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    box-shadow: var(--float-shadow);
+    pointer-events: auto;
+  }
+  .tb-left { padding: 8px 14px; display: flex; align-items: center; gap: 10px; }
+  .tb-left .t { font-family: 'JBM', ui-monospace, monospace; font-weight: 700; font-size: 13px; letter-spacing: 0.04em; }
+  .tb-right { display: flex; align-items: center; gap: 6px; padding: 5px; }
+  .tb-right .ico { display: none; }
+  #miOpen { display: none; } /* phone-only — desktop has the fileChip */
   .filechip {
     font-size: 12px; color: var(--ink-soft); background: var(--surface-2);
     border-radius: 6px; padding: 2px 9px; cursor: pointer;
@@ -182,30 +205,22 @@
   }
   .filechip:hover { color: var(--accent); }
 
-  .viewpill { top: 14px; left: 50%; transform: translateX(-50%); width: max-content; display: flex; padding: 4px; gap: 2px; }
+  .viewpill { width: max-content; display: flex; padding: 4px; gap: 2px; }
   .viewpill button {
     border: 0; background: none; border-radius: 8px; padding: 5px 14px;
     font: inherit; font-size: 12.5px; cursor: pointer; color: var(--ink-soft);
   }
   .viewpill button.on { background: var(--accent); color: var(--accent-ink); }
 
-  /* crop toolbar — Source view only */
+  /* crop toolbar — the topbar's contextual second row, Source view only */
   .cropbar {
-    top: 62px; left: 50%; transform: translateX(-50%);
-    width: max-content;
     display: none;
     align-items: center; gap: 10px; padding: 7px 12px;
-    max-width: calc(100vw - 360px); flex-wrap: wrap; justify-content: center;
+    flex-wrap: wrap; justify-content: center;
   }
   body.view-source .cropbar:not(.hidden) { display: flex; }
   .cropbar .hint { margin: 0; }
   .cropbar select { width: auto; font-size: 12.5px; padding: 4px 6px; }
-
-  /* above the other floats (z 30): the Export/⋯ popovers drop straight into
-     the props card's rect (top 62px right 14px), and .float's z-index makes
-     each float its own stacking context — the popover's own z-index can't
-     escape it, so the LATER-in-DOM props card was painting over open menus */
-  .actions { top: 14px; right: 14px; display: flex; align-items: center; gap: 6px; padding: 5px; z-index: 40; }
   /* account chip: ghost "Sign in" as a guest, accent initial-circle signed in */
   #accountBtn.authed {
     width: 30px; height: 30px; min-height: 30px; padding: 0; border-radius: 50%;
@@ -393,7 +408,9 @@
   .pal-merge-hint { align-self: center; color: var(--accent); font-size: 12.5px; font-weight: 600; white-space: nowrap; }
 
   /* ==================== stats + zoom ==================== */
-  .statschip { top: 62px; left: 14px; padding: 7px 12px; max-width: min(36vw, 560px); overflow: hidden; }
+  /* stats line in the props-card head — read-only info next to the controls
+     it reflects (was a separate top-left float) */
+  .prop-stats { padding: 0 14px 6px; border-bottom: 1px solid var(--line); }
   .shop-meta {
     display: flex; flex-wrap: nowrap; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
     font-size: 11px; color: var(--ink-soft); font-family: 'JBM', ui-monospace, monospace;
@@ -409,11 +426,11 @@
   .zoompill button:hover { background: var(--surface-2); }
   .zoompill span { font-family: 'JBM', ui-monospace, monospace; font-size: 11.5px; min-width: 44px; text-align: center; }
 
-  /* pre-image: only the brand, actions, and props remain */
+  /* pre-image: only the brand cluster, right cluster, and props remain */
   body:not(.has-image) .viewpill,
   body:not(.has-image) .cropbar,
   body:not(.has-image) .palpill,
-  body:not(.has-image) .statschip,
+  body:not(.has-image) .prop-stats,
   body:not(.has-image) .zoompill { display: none; }
 
   /* ==================== overlays ==================== */
@@ -665,14 +682,27 @@
     .pillbtn { min-height: 40px; }
   }
 
-  /* ==================== narrow screens (rough fallback) ==================== */
-  @media (max-width: 820px) {
+  /* ==================== narrow screens ==================== */
+  /* 700px, not 820: iPad portrait (~768–834px) keeps the desktop rail for
+     work at the tufting frame — only phones get the sheet layout */
+  @media (max-width: 700px) {
     .props { top: auto; bottom: 0; right: 0; left: 0; width: auto; height: 46vh; border-radius: 14px 14px 0 0; }
     .bottombar { left: 10px; right: 10px; bottom: calc(46vh + 10px); }
-    .statschip { display: none; }
     .zoompill { left: auto; right: 14px; bottom: calc(46vh + 64px); }
-    .brand .filechip { max-width: 90px; }
     .overlay { width: 100vw; }
+    /* topbar diet: wordmark + filename come out (the filename isn't
+       load-bearing; "Open image…" lives on in the dropzone), Export and
+       Projector go icon-only — one row that can't collide */
+    .tb-left { display: none; }
+    #miOpen { display: block; }
+    .tb-right .lbl { display: none; }
+    .tb-right .ico { display: inline; }
+    .topbar { left: 10px; right: 10px; }
+    .tb-row { gap: 6px; }
+    .tb-right { gap: 4px; }
+    .tb-right .pillbtn { padding: 6px 9px; font-size: 12px; }
+    .viewpill { padding: 3px; }
+    .viewpill button { padding: 5px 9px; font-size: 12px; }
   }
 
   /* ---------- Imagine — AI candidate generation ---------- */
@@ -722,11 +752,8 @@
     .imagine-controls { grid-template-columns: 1fr 1fr; gap: 12px; }
     .imagine-controls .field:first-child { grid-column: 1 / -1; }
   }
-  /* narrow screens: the top chrome has no room for a second brand chip (the
-     view pill already crowds it) — the ⋯ menu entry is the phone door in */
-  @media (max-width: 820px) {
-    #imagineBtn { display: none; }
-  }
+  /* narrow screens: the whole tb-left cluster is hidden (see the 700px
+     block) — ✨ Imagine's phone doors are the dropzone and the ⋯ menu */
   @media (pointer: coarse) {
     /* 16px floor stops iOS Safari zooming the page on focus */
     #imgSubject, #imgKey, #imgPrompt { font-size: 16px; }
