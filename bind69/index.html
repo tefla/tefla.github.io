@@ -141,7 +141,7 @@ const KEYMAP = {
   ArrowUp: 'fup', ArrowDown: 'fdown', ArrowLeft: 'fleft', ArrowRight: 'fright',
   Space: 'bomb', KeyE: 'use', KeyQ: 'drop', ShiftLeft: 'dash', ShiftRight: 'dash',
   Enter: 'confirm', Escape: 'pause', KeyP: 'pause', Tab: 'map', KeyM: 'mute',
-  KeyF: 'fullscreen', KeyR: 'restart', Backquote: 'debug',
+  KeyF: 'fullscreen', KeyR: 'restart', Backquote: 'debug', KeyC: 'stats',
 };
 
 /* Standard Gamepad button index -> the same action names the keyboard emits,
@@ -155,6 +155,7 @@ const PADBTN = {
   2: ['use'],               // X
   3: ['drop'],              // Y       — 'drop' is the cycle-active action
   4: ['drop'],              // L1
+  5: ['stats'],             // R1      — hold-free toggle for the stat panel
   6: ['use'],               // L2
   7: ['bomb'],              // R2
   8: ['map'],               // centre-left small button
@@ -7977,6 +7978,13 @@ G.Pool = function (factory, reset) {
       const up = pr.up || pr.fup, down = pr.down || pr.fdown;
       if (up) { S.pMenu = (S.pMenu + PAUSE_MENU.length - 1) % PAUSE_MENU.length; snd('uiMove', { vol: 0.4 }); }
       if (down) { S.pMenu = (S.pMenu + 1) % PAUSE_MENU.length; snd('uiMove', { vol: 0.4 }); }
+      /* up/down drive the menu, so left/right are free to walk the build
+         panel below it — the one place a paused player can read an item */
+      const U = G.UI;
+      if (U && U.inspectMove) {
+        if (pr.left || pr.fleft) U.inspectMove(-1);
+        if (pr.right || pr.fright) U.inspectMove(1);
+      }
       if (pr.confirm || pr.bomb || pr.use) return PAUSE_MENU[S.pMenu].action;
       return null;
     },
@@ -8033,9 +8041,17 @@ G.Pool = function (factory, reset) {
       const keeps = !!(G.Save && G.Save.available && G.Save.profile);
       txt(c, keeps ? 'MAIN MENU SUSPENDS THIS RUN - CONTINUE PICKS IT UP'
         : 'NO VOLUME MOUNTED - LEAVING LOSES THIS RUN',
-        cx, 228, { size: 1, align: 'center', color: keeps ? 'rgba(190,225,215,0.5)' : '#ffb45a' });
+        cx, 220, { size: 1, align: 'center', color: keeps ? 'rgba(190,225,215,0.5)' : '#ffb45a' });
 
-      txt(c, 'ESC RESUME    TAB MAP    M MUTE    R RESTART', cx, VH - 40,
+      /* the band a paused player actually came here to read: what they are
+         carrying, what it does, and what it did to their numbers */
+      const U = G.UI, p = g && g.player;
+      if (U && p && U.drawStatPanel) {
+        U.drawStatPanel(c, p, 34, 240, 178, { all: false });
+        U.drawBuildPanel(c, p, 224, 240, 382, 72, { title: 'BUILD' });
+      }
+
+      txt(c, 'ESC RESUME   TAB MAP   LEFT/RIGHT INSPECT   C STATS   R RESTART', cx, VH - 18,
         { size: 1, color: 'rgba(190,225,215,0.5)', align: 'center' });
     },
 
@@ -8107,23 +8123,35 @@ G.Pool = function (factory, reset) {
         ], 46, 134, { color: 'rgba(255,190,200,0.75)', addr: '#6b2030', reveal: dump });
       }
 
-      /* the loadout you actually assembled */
+      /* the loadout you actually assembled, and the numbers it added up to.
+         A death screen that reports only counts tells a player nothing about
+         the run they just lost; the loadout and the stat line are what turn
+         it into something they can learn from. */
       const inv = seg(t, 0.85, 1.4);
       if (inv > 0 && run && run.items) {
-        R.panel(c, 250, 124, 356, 92, { color: '#ff3a5c', title: 'LOADOUT  ' + run.items.length });
-        const n = Math.min(run.items.length, 32);
+        const U = G.UI, p = G.Game && G.Game.player;
+        R.panel(c, 250, 124, 214, 92, { color: '#ff3a5c', title: 'LOADOUT  ' + run.items.length });
+        const n = Math.min(run.items.length, 30);
         for (let i = 0; i < n; i++) {
           if (i / Math.max(1, n) > inv) break;
           const d = run.items[i];
-          const ix = 257 + (i % 16) * 21, iy = 134 + ((i / 16) | 0) * 24;
-          c.fillStyle = 'rgba(255,255,255,0.06)'; c.fillRect(ix, iy, 20, 20);
-          c.fillStyle = rgba(d.color || '#ff3a5c', 0.5); c.fillRect(ix, iy, 20, 1);
-          c.save(); c.translate(ix + 2, iy + 2);
-          if (d.icon) { try { d.icon(c, 16, 16); } catch (e) { } }
-          else { c.fillStyle = d.color || '#4af0b0'; c.fillRect(2, 2, 12, 12); }
-          c.restore();
+          const ix = 256 + (i % 10) * 20, iy = 132 + ((i / 10) | 0) * 21;
+          if (U && U.itemTile) U.itemTile(c, d, ix, iy, 16, { dim: U.itemTile && p && G.Itemdex.dormant(p, d) });
+          else {
+            c.fillStyle = 'rgba(255,255,255,0.06)'; c.fillRect(ix, iy, 18, 18);
+            c.save(); c.translate(ix + 1, iy + 1);
+            if (d.icon) { try { d.icon(c, 16, 16); } catch (e) { } }
+            c.restore();
+          }
         }
-        if (!run.items.length) txt(c, 'NO PROGRAMS ACQUIRED', 428, 165, { size: 1, color: 'rgba(255,180,190,0.45)', align: 'center' });
+        if (!run.items.length) txt(c, 'NO PROGRAMS ACQUIRED', 357, 165, { size: 1, color: 'rgba(255,180,190,0.45)', align: 'center' });
+
+        if (U && U.drawStatPanel && p) {
+          c.globalAlpha = inv;
+          U.drawStatPanel(c, p, 476, 124, 130,
+            { all: false, delta: false, title: 'FINAL STATS', accent: '#ff3a5c' });
+          c.globalAlpha = 1;
+        }
       }
 
       /* how deep you got */
@@ -8202,18 +8230,27 @@ G.Pool = function (factory, reset) {
       }
       const inv = seg(t, 1.1, 1.7);
       if (inv > 0 && run && run.items) {
-        R.panel(c, 250, 126, 356, 92, { color: accent, title: 'LOADOUT  ' + run.items.length });
-        const n = Math.min(run.items.length, 32);
+        const U = G.UI, p = G.Game && G.Game.player;
+        R.panel(c, 250, 126, 214, 92, { color: accent, title: 'LOADOUT  ' + run.items.length });
+        const n = Math.min(run.items.length, 30);
         for (let i = 0; i < n; i++) {
           if (i / Math.max(1, n) > inv) break;
           const d = run.items[i];
-          const ix = 257 + (i % 16) * 21, iy = 136 + ((i / 16) | 0) * 24;
-          c.fillStyle = 'rgba(255,255,255,0.06)'; c.fillRect(ix, iy, 20, 20);
-          c.fillStyle = rgba(d.color || accent, 0.5); c.fillRect(ix, iy, 20, 1);
-          c.save(); c.translate(ix + 2, iy + 2);
-          if (d.icon) { try { d.icon(c, 16, 16); } catch (e) { } }
-          else { c.fillStyle = d.color || accent; c.fillRect(2, 2, 12, 12); }
-          c.restore();
+          const ix = 256 + (i % 10) * 20, iy = 134 + ((i / 10) | 0) * 21;
+          if (U && U.itemTile) U.itemTile(c, d, ix, iy, 16, {});
+          else {
+            c.fillStyle = 'rgba(255,255,255,0.06)'; c.fillRect(ix, iy, 18, 18);
+            c.save(); c.translate(ix + 1, iy + 1);
+            if (d.icon) { try { d.icon(c, 16, 16); } catch (e) { } }
+            c.restore();
+          }
+        }
+        /* the build that finished the descent is the record worth keeping */
+        if (U && U.drawStatPanel && p) {
+          c.globalAlpha = inv;
+          U.drawStatPanel(c, p, 476, 126, 130,
+            { all: false, delta: false, title: 'FINAL STATS', accent: accent });
+          c.globalAlpha = 1;
         }
       }
       drawGains(c, t, accent);
@@ -10107,7 +10144,10 @@ G.Pool = function (factory, reset) {
    colour, size, trail or aura so a stat stick still reads on screen.
    ============================================================ */
 (function () {
-  const S = G.Stats, add = S.add;
+  const S = G.Stats;
+  /* every definition below belongs to the same family, so the archetype is
+     stamped once here rather than repeated on all 36 */
+  const add = (d) => { d.archetype = d.archetype || 'stat'; return S.add(d); };
 
   /* ---- O_NONBLOCK : broken chain link ---- */
   add({
@@ -10362,6 +10402,7 @@ G.Pool = function (factory, reset) {
   add({
     id: 'heatsink', name: 'heat sink', quality: 1, color: '#8a9aa8',
     desc: 'Copper mass between you and the fault.',
+    effect: 'Adds one heart of maximum health, and heals one heart.',
     pools: ['treasure', 'shop'], tint: '#cfe0ea', tintW: 0.3,
     add: { knockback: 0.7 },
     onPickup(p) { p.maxHp += 2; p.hp = Math.min(p.maxHp, p.hp + 2); },
@@ -10665,6 +10706,7 @@ G.Pool = function (factory, reset) {
   add({
     id: 'bitflip', name: 'bitflip', quality: 2, color: '#ffe36a',
     desc: 'A cosmic ray rewrites one of your stats on every floor.',
+    effect: 'Re-rolls one of your stats at random on arrival at every floor.',
     pools: ['treasure', 'secret'], tint: '#ffe36a', tintW: 0.5,
     add: { luck: 1 },
     onPickup(p, run) { flip(p, run); },
@@ -10722,6 +10764,7 @@ G.Pool = function (factory, reset) {
   add({
     id: 'jit', name: 'JIT compiler', quality: 3, color: '#ffd24a',
     desc: 'The longer you stay in a room, the faster the hot loop runs.',
+    effect: 'Fire rate and damage ramp up over 7s in an uncleared room, and decay when it clears.',
     pools: ['treasure'], tint: '#ffd24a', tintW: 0.8, trail: 0.15,
     calcMul(p, s) {
       const w = Math.min(1, (p.mem.jitT || 0) / 7);
@@ -10933,12 +10976,14 @@ G.Pool = function (factory, reset) {
    These are the ones that change what a packet *is*.
    ============================================================ */
 (function () {
-  const S = G.Stats, add = S.add;
+  const S = G.Stats;
+  const add = (d) => { d.archetype = d.archetype || 'shot'; return S.add(d); };
 
   /* ---- nmap : radar sweep ---- */
   add({
     id: 'nmap', name: 'nmap -sS', quality: 2, color: '#4af0b0',
     desc: 'Half-open scan. Your packets find the host on their own.',
+    effect: 'Packets steer toward the nearest process.',
     pools: ['treasure', 'shop'], flags: ['homing'],
     synergies: ['nmap+fork() => split children re-acquire', 'nmap+forkbomb => the ring collapses inward'],
     px: [
@@ -10962,6 +11007,7 @@ G.Pool = function (factory, reset) {
   add({
     id: 'ptrace', name: 'ptrace', quality: 2, color: '#e8fff4',
     desc: 'Attach to the process and walk straight through it.',
+    effect: 'Packets pass through several bodies before stopping.',
     pools: ['treasure', 'shop'], flags: ['piercing'],
     synergies: ['ptrace+raw socket => the beam sharpens per body'],
     px: [
@@ -10983,6 +11029,7 @@ G.Pool = function (factory, reset) {
   add({
     id: 'retransmit', name: 'TCP retransmit', quality: 2, color: '#ffd8a0',
     desc: 'Dropped? Send it again. And again. Off every wall.',
+    effect: 'Packets bounce off walls and stay alive longer.',
     pools: ['treasure', 'shop'], flags: ['bouncing'],
     synergies: ['retransmit+mmap => bounces off bodies through walls'],
     px: [
@@ -11005,6 +11052,7 @@ G.Pool = function (factory, reset) {
   add({
     id: 'mmap', name: 'mmap(MAP_ANON)', quality: 3, color: '#c48cff',
     desc: 'Map it straight into the address space. Walls are advisory.',
+    effect: 'Packets pass straight through terrain.',
     pools: ['treasure'], flags: ['spectral'],
     synergies: ['mmap+retransmit => walls and bodies both stop mattering'],
     px: [
@@ -11026,6 +11074,7 @@ G.Pool = function (factory, reset) {
   add({
     id: 'heapspray', name: 'heap spray', quality: 3, color: '#ffc23a',
     desc: 'Fill the heap with landing pads, then let go of the pointer.',
+    effect: 'Packets explode on impact.',
     pools: ['treasure', 'boss'], flags: ['explosive'],
     synergies: ['heapspray+ulimit => a wall of simultaneous detonations',
       'heapspray+nulldref => everything collapses to one point, then that point goes'],
@@ -11048,6 +11097,7 @@ G.Pool = function (factory, reset) {
   add({
     id: 'fork', name: 'fork()', quality: 3, color: '#a0ffd0',
     desc: 'Every packet is a parent. It splits on contact.',
+    effect: 'Packets split in two on impact.',
     pools: ['treasure', 'boss'], flags: ['splitting'],
     synergies: ['fork+nmap => the children keep the scent'],
     px: [
@@ -11069,6 +11119,7 @@ G.Pool = function (factory, reset) {
   add({
     id: 'memleak', name: 'memory leak', quality: 2, color: '#8ef05a',
     desc: 'Whatever you hit keeps losing bytes long after you stop.',
+    effect: 'Hits poison the target, draining it over time.',
     pools: ['treasure', 'shop'], flags: ['poison'],
     synergies: ['memleak+electrolysis => corrosion doubles the tick rate'],
     px: [
@@ -11091,6 +11142,7 @@ G.Pool = function (factory, reset) {
   add({
     id: 'thermal', name: 'thermal throttle', quality: 2, color: '#ff8a1a',
     desc: 'Run them hot enough and they cook themselves.',
+    effect: 'Hits set the target on fire.',
     pools: ['treasure', 'shop'], flags: ['burn'],
     synergies: ['thermal+heapspray => blasts leave burning ground'],
     px: [
@@ -11113,6 +11165,7 @@ G.Pool = function (factory, reset) {
   add({
     id: 'deadlock', name: 'deadlock', quality: 2, color: '#9fe4ff',
     desc: 'Two locks, wrong order, forever. Nothing moves again.',
+    effect: 'Hits freeze the target in place.',
     pools: ['treasure', 'shop'], flags: ['freeze'],
     synergies: ['deadlock+sigsegv => frozen processes burst into shrapnel'],
     px: [
@@ -11135,6 +11188,7 @@ G.Pool = function (factory, reset) {
   add({
     id: 'irqstorm', name: 'IRQ storm', quality: 2, color: '#9fd8ff',
     desc: 'The interrupt line never goes low. Nothing gets any work done.',
+    effect: 'Hits arc into one nearby process.',
     pools: ['treasure', 'shop'], flags: ['shock'],
     synergies: ['irqstorm+broadcast => arcs jump further and stun every hop'],
     px: [
@@ -11157,6 +11211,7 @@ G.Pool = function (factory, reset) {
   add({
     id: 'broadcast', name: 'broadcast storm', quality: 3, color: '#cfe9ff',
     desc: 'One frame, every port, forever. It gets around.',
+    effect: 'Hits chain onward through two more processes.',
     pools: ['treasure'], flags: ['chain'],
     synergies: ['broadcast+irqstorm => every hop is stunned on arrival'],
     px: [
@@ -11179,6 +11234,7 @@ G.Pool = function (factory, reset) {
   add({
     id: 'rawsocket', name: 'raw socket', quality: 4, color: '#ff4a6a',
     desc: 'No stack, no framing, no delay. Just a line of pure signal.',
+    effect: 'Fires a fast piercing beam that ignores terrain, at shorter reach.',
     pools: ['treasure', 'boss'], flags: ['laser'],
     synergies: ['rawsocket+ropchain => the beam sharpens with every body',
       'rawsocket+pagefault => the beam drags everything into its own line'],
@@ -11201,6 +11257,7 @@ G.Pool = function (factory, reset) {
   add({
     id: 'cronring', name: 'crontab', quality: 3, color: '#b0ffe0',
     desc: '* * * * * — packets that never leave, circling you forever.',
+    effect: 'Packets orbit you instead of flying off.',
     pools: ['treasure'], flags: ['orbit', 'wideorbit'],
     synergies: ['cronring+heapspray => a minefield you carry with you'],
     px: [
@@ -11222,6 +11279,7 @@ G.Pool = function (factory, reset) {
   add({
     id: 'callback', name: 'callback', quality: 3, color: '#ffb84a',
     desc: 'It goes out, it does the work, it comes back to you.',
+    effect: 'Packets fly out, then return through everything on the way back.',
     pools: ['treasure'], flags: ['boomerang'],
     synergies: ['callback+ptrace => hits the column going out and coming back'],
     px: [
@@ -11243,6 +11301,7 @@ G.Pool = function (factory, reset) {
   add({
     id: 'pagefault', name: 'page fault', quality: 3, color: '#7a6aff',
     desc: 'The address is not mapped. Everything nearby falls into the hole.',
+    effect: 'Packets drag nearby processes toward them.',
     pools: ['treasure'], flags: ['gravity'],
     synergies: ['pagefault+rawsocket => the beam drags them into its own line'],
     px: [
@@ -11265,6 +11324,7 @@ G.Pool = function (factory, reset) {
   add({
     id: 'electrolysis', name: 'electrolysis', quality: 2, color: '#c8ff3a',
     desc: 'Strip the oxide layer. Everything after this hurts more.',
+    effect: 'Hits corrode the target, so later hits land harder.',
     pools: ['treasure', 'shop'], flags: ['acid'],
     synergies: ['electrolysis+memleak => corrosion doubles the leak rate'],
     px: [
@@ -11287,6 +11347,7 @@ G.Pool = function (factory, reset) {
   add({
     id: 'pipeop', name: 'pipe(2)', quality: 4, color: '#ffb0d0',
     desc: 'An unbroken stream from you to whatever is in the way.',
+    effect: 'Fires a continuous piercing beam instead of discrete packets.',
     pools: ['treasure', 'boss'], flags: ['continuous', 'beam'],
     mul: { fireDelay: 0.62, damage: 0.62, shotSpeed: 1.7 },
     synergies: ['pipeop+btb => the ramp never resets while the beam is on target'],
@@ -11308,6 +11369,7 @@ G.Pool = function (factory, reset) {
   add({
     id: 'blockdev', name: '/dev/sda', quality: 2, color: '#d8f0ff',
     desc: 'Block device semantics. One enormous write at a time.',
+    effect: 'One heavy packet: far bigger and harder-hitting, but slower.',
     pools: ['treasure'], flags: ['bigshot'],
     synergies: ['blockdev+threadpool => a planetoid with its own moons'],
     px: [
@@ -11329,6 +11391,7 @@ G.Pool = function (factory, reset) {
   add({
     id: 'nanoservice', name: 'nanoservice', quality: 2, color: '#c8ff8a',
     desc: 'Split the monolith. A hundred tiny requests per second.',
+    effect: 'Packets are tiny and fast, and each one hits for less.',
     pools: ['treasure', 'shop'], flags: ['tiny', 'rapid'],
     mul: { fireDelay: 0.66 }, add: { shotCount: 1, spread: 0.06 },
     px: [
@@ -11350,6 +11413,7 @@ G.Pool = function (factory, reset) {
   add({
     id: 'vampiretap', name: 'vampire tap', quality: 3, color: '#ff6a8a',
     desc: 'Pierce the sheath, take what you need off the wire.',
+    effect: 'Hits sometimes heal you.',
     pools: ['treasure', 'devil'], flags: ['lifesteal'],
     synergies: ['vampiretap+nanoservice => enough hits per second to outheal contact'],
     px: [
@@ -11372,6 +11436,7 @@ G.Pool = function (factory, reset) {
   add({
     id: 'sigstop', name: 'SIGSTOP', quality: 1, color: '#8ab0d0',
     desc: 'Signal 19. Suspended, not killed. Yet.',
+    effect: 'Hits slow the target down.',
     pools: ['treasure', 'shop'], flags: ['slow'],
     px: [
       '....000000....',
@@ -11392,6 +11457,7 @@ G.Pool = function (factory, reset) {
   add({
     id: 'sigterm', name: 'SIGTERM', quality: 1, color: '#b06aff',
     desc: 'Signal 15. Polite. They still run.',
+    effect: 'Hits make the target flee.',
     pools: ['treasure', 'shop'], flags: ['fear'],
     px: [
       '...000000.....',
@@ -11463,12 +11529,14 @@ G.Pool = function (factory, reset) {
    BIND69 — ITEMS: SHOT TRANSFORMERS (custom flags from 310)
    ============================================================ */
 (function () {
-  const S = G.Stats, add = S.add;
+  const S = G.Stats;
+  const add = (d) => { d.archetype = d.archetype || 'shot'; return S.add(d); };
 
   /* ---- SIGSEGV : shatter ---- */
   add({
     id: 'sigsegv', name: 'SIGSEGV', quality: 3, color: '#d0f4ff',
     desc: 'Frozen processes do not fault gracefully. They come apart.',
+    effect: 'Frozen targets shatter into ice shards.',
     pools: ['treasure'], flags: ['shatter'],
     synergies: ['sigsegv+deadlock => frozen targets burst into shrapnel',
       'sigsegv+fragmentation => bomblets freeze the pack, shards clear it'],
@@ -11493,6 +11561,7 @@ G.Pool = function (factory, reset) {
   add({
     id: 'forkbomb', name: ':(){ :|:& };:', quality: 4, color: '#ffd8f0',
     desc: 'A fork bomb in a shell one-liner. Everything ends in a ring.',
+    effect: 'Packets burst into a ring of shots when they die.',
     pools: ['treasure', 'boss'], flags: ['nova'],
     synergies: ['forkbomb+nmap => the ring collapses inward onto live targets'],
     px: [
@@ -11514,6 +11583,7 @@ G.Pool = function (factory, reset) {
   add({
     id: 'fragmentation', name: 'IP fragmentation', quality: 3, color: '#ffb06a',
     desc: 'Too big for the MTU. It arrives in pieces, and the pieces go off.',
+    effect: 'Packets scatter live bomblets on impact.',
     pools: ['treasure'], flags: ['cluster'],
     synergies: ['fragmentation+deadlock => frost bomblets', 'fragmentation+sigsegv => freeze then shatter'],
     px: [
@@ -11537,6 +11607,7 @@ G.Pool = function (factory, reset) {
   add({
     id: 'stickybit', name: 'sticky bit', quality: 2, color: '#c0d84a',
     desc: 'chmod +t. Once it is on them, it does not come off.',
+    effect: 'Packets latch on and keep chewing the target.',
     pools: ['treasure', 'shop'], flags: ['sticky'],
     synergies: ['stickybit+heapspray => mines that walk into the crowd'],
     px: [
@@ -11559,6 +11630,7 @@ G.Pool = function (factory, reset) {
   add({
     id: 'ropchain', name: 'ROP chain', quality: 4, color: '#ffe0a0',
     desc: 'Every gadget you land on makes the next one hit harder.',
+    effect: 'Packets pierce, and bite harder with every body they pass.',
     pools: ['treasure', 'boss'], flags: ['bore'],
     synergies: ['ropchain+rawsocket => the beam sharpens with every body'],
     px: [
@@ -11581,6 +11653,7 @@ G.Pool = function (factory, reset) {
   add({
     id: 'natrebind', name: 'NAT rebinding', quality: 3, color: '#ffa04a',
     desc: 'The address keeps changing. Your packets keep finding new hosts.',
+    effect: 'Packets bounce off bodies toward the next target.',
     pools: ['treasure'], flags: ['ricochet'],
     synergies: ['natrebind+dma => carve the room, then ricochet inside it'],
     px: [
@@ -11602,6 +11675,7 @@ G.Pool = function (factory, reset) {
   add({
     id: 'spectre', name: 'spectre', quality: 4, color: '#a0e0ff',
     desc: 'Speculative execution. The packet was never observed where it went.',
+    effect: 'Packets are never quite where you saw them.',
     pools: ['treasure', 'devil'], flags: ['quantum'],
     synergies: ['spectre+ptrace => it drills a line it never travelled'],
     px: [
@@ -11624,6 +11698,7 @@ G.Pool = function (factory, reset) {
   add({
     id: 'symlink', name: 'symlink', quality: 3, color: '#d0d8ff',
     desc: 'ln -s. Every packet has a second path to the same place.',
+    effect: 'Every packet has a mirrored twin on the far side of you.',
     pools: ['treasure'], flags: ['mirror'],
     synergies: ['symlink+reuseport => eight-way fire from a four-way build'],
     px: [
@@ -11645,6 +11720,7 @@ G.Pool = function (factory, reset) {
   add({
     id: 'threadpool', name: 'thread pool', quality: 3, color: '#ffe06a',
     desc: 'Workers peel off the main packet and go hunting on their own.',
+    effect: 'Packets shed smaller packets as they fly.',
     pools: ['treasure'], flags: ['swarm'],
     synergies: ['threadpool+blockdev => a planetoid with its own moons'],
     px: [
@@ -11666,6 +11742,7 @@ G.Pool = function (factory, reset) {
   add({
     id: 'dma', name: 'DMA', quality: 3, color: '#c8b090',
     desc: 'Bypass the CPU entirely. Walls are just memory you have not written yet.',
+    effect: 'Packets chew through the terrain they cross.',
     pools: ['treasure'], flags: ['drill'],
     synergies: ['dma+retransmit => carve the room open then bounce inside it'],
     px: [
@@ -11688,6 +11765,7 @@ G.Pool = function (factory, reset) {
   add({
     id: 'entropypool', name: 'entropy pool', quality: 3, color: '#ff9ad8',
     desc: 'Every packet reads a different byte from the pool and becomes it.',
+    effect: 'Every packet draws a random flag from the pool.',
     pools: ['treasure', 'secret'], flags: ['entropy'],
     px: [
       '..000000000...',
@@ -11708,6 +11786,7 @@ G.Pool = function (factory, reset) {
   add({
     id: 'btb', name: 'branch target buffer', quality: 3, color: '#ffcf4a',
     desc: 'Hit without missing and the predictor keeps raising its bet.',
+    effect: 'Consecutive hits without a miss ramp your damage up.',
     pools: ['treasure'], flags: ['stack'],
     synergies: ['btb+pipeop => the ramp never resets while the beam is on target'],
     px: [
@@ -11730,6 +11809,7 @@ G.Pool = function (factory, reset) {
   add({
     id: 'racecond', name: 'race condition', quality: 3, color: '#ff5ad0',
     desc: 'Whichever packet arrives first wins. They all try very hard.',
+    effect: 'Packets accelerate the longer they fly.',
     pools: ['treasure'], flags: ['overclock'],
     px: [
       '..2222222.....',
@@ -11750,6 +11830,7 @@ G.Pool = function (factory, reset) {
   add({
     id: 'refcount', name: 'refcounting', quality: 3, color: '#ff4a7a',
     desc: 'Every dropped reference returns something to you.',
+    effect: 'Every body a packet passes returns something to you.',
     pools: ['treasure', 'devil'], flags: ['siphon'],
     px: [
       '....222222....',
@@ -11770,6 +11851,7 @@ G.Pool = function (factory, reset) {
   add({
     id: 'mutex', name: 'mutex', quality: 2, color: '#8aa04a',
     desc: 'Mutual exclusion. They hold the lock and they hold still.',
+    effect: 'Hits pin the target where it stands.',
     pools: ['treasure', 'shop'], flags: ['rooted'],
     px: [
       '...000000.....',
@@ -11791,6 +11873,7 @@ G.Pool = function (factory, reset) {
   add({
     id: 'tlbshoot', name: 'TLB shootdown', quality: 3, color: '#d0a0ff',
     desc: 'The mapping is invalidated mid-flight. It phases while it travels.',
+    effect: 'Packets phase in and out of the address space.',
     pools: ['treasure'], flags: ['blink'],
     px: [
       '.....66.......',
@@ -11809,6 +11892,7 @@ G.Pool = function (factory, reset) {
   add({
     id: 'nulldref', name: 'null deref', quality: 4, color: '#8a5cff',
     desc: 'Read address zero. It pulls the room in, then collapses.',
+    effect: 'Packets pull the room inward, then collapse.',
     pools: ['treasure', 'devil'], flags: ['voidflag'],
     synergies: ['nulldref+heapspray => everything collapses to one point, then that point goes'],
     px: [
@@ -11831,6 +11915,7 @@ G.Pool = function (factory, reset) {
   add({
     id: 'synflood', name: 'SYN flood', quality: 3, color: '#7ad8ff',
     desc: 'Half-open every connection at once. Nothing completes, everything hurts.',
+    effect: 'Packets pierce.',
     pools: ['treasure'],
     add: { shotCount: 2, spread: 0.19 }, mul: { damage: 0.62, fireDelay: 0.86 },
     flags: ['piercing'], tint: '#7ad8ff', tintW: 0.8,
@@ -11853,6 +11938,7 @@ G.Pool = function (factory, reset) {
   add({
     id: 'polymorphic', name: 'polymorphic engine', quality: 4, color: '#ff9ad8',
     desc: 'Re-encodes itself every emission. No two packets are the same shape.',
+    effect: 'Every packet re-rolls its own flags, and splits on impact.',
     pools: ['treasure', 'devil'], flags: ['entropy', 'splitting'],
     synergies: ['polymorphic+anything => the roll inherits your whole build'],
     px: [
@@ -11874,6 +11960,7 @@ G.Pool = function (factory, reset) {
   add({
     id: 'zeroday', name: '0-day', quality: 4, color: '#ff2a4a',
     desc: 'Nobody has a patch. Nothing has resistance.',
+    effect: 'Packets pierce and gain bite with every body they pass.',
     pools: ['treasure', 'boss', 'devil'], flags: ['piercing', 'bore'],
     add: { critChance: 0.12, damage: 1.2 }, sparkle: 0.8,
     px: [
@@ -11896,6 +11983,7 @@ G.Pool = function (factory, reset) {
   add({
     id: 'netfilter', name: 'netfilter', quality: 3, color: '#cfe9ff',
     desc: 'Every packet traverses the chain, and so does the current.',
+    effect: 'Hits arc into a nearby process and chain onward.',
     pools: ['treasure'], flags: ['chain', 'shock'],
     synergies: ['netfilter alone => arcs jump further and every hop is stunned'],
     px: [
@@ -11918,6 +12006,7 @@ G.Pool = function (factory, reset) {
   add({
     id: 'mangle', name: 'MANGLE table', quality: 2, color: '#ffa04a',
     desc: 'Rewrite the header in flight. Nothing travels in a straight line.',
+    effect: 'Packets bounce off bodies and walls alike.',
     pools: ['treasure', 'shop'], flags: ['ricochet', 'bouncing'],
     px: [
       '.000000000....',
@@ -11939,6 +12028,7 @@ G.Pool = function (factory, reset) {
   add({
     id: 'icmpredirect', name: 'ICMP redirect', quality: 3, color: '#4af0b0',
     desc: 'Tell the packet there is a better route. There always is.',
+    effect: 'Packets steer toward processes and bounce off walls.',
     pools: ['treasure'], flags: ['homing', 'bouncing'],
     px: [
       '....gggg......',
@@ -11975,6 +12065,7 @@ G.Pool = function (factory, reset) {
   add({
     id: 'sudo', name: 'sudo', quality: 4, tag: 'active', charge: 4, color: '#ff3a5c',
     desc: 'Escalate. Everything in the room is reminded who owns it.',
+    effect: 'Damages every process in the room and wipes all hostile fire.',
     pools: ['treasure', 'boss'],
     onUse(p, ctx) {
       FX().flash('#ffffff', 0.2);
@@ -12006,6 +12097,7 @@ G.Pool = function (factory, reset) {
   add({
     id: 'killdash9', name: 'kill -9 %1', quality: 3, tag: 'active', charge: 3, color: '#ff2a4a',
     desc: 'Pick the biggest process in the room and end it.',
+    effect: 'Instantly kills the highest-health process in the room. Not bosses.',
     pools: ['treasure'],
     onUse(p, ctx) {
       const l = S.enemies(ctx);
@@ -12039,6 +12131,7 @@ G.Pool = function (factory, reset) {
   add({
     id: 'cli', name: 'cli', quality: 4, tag: 'active', charge: 4, color: '#9fe4ff',
     desc: 'Clear the interrupt flag. Nothing gets scheduled but you.',
+    effect: 'Freezes every process for 5s and nearly stops hostile fire dead.',
     pools: ['treasure', 'boss'],
     onUse(p, ctx) {
       FX().snd('curse', { vol: 0.8, rate: 0.6 });
@@ -12073,6 +12166,7 @@ G.Pool = function (factory, reset) {
   add({
     id: 'ddzero', name: 'dd if=/dev/zero', quality: 3, tag: 'active', charge: 2, color: '#cfe0ea',
     desc: 'Write zeroes over everything in flight.',
+    effect: 'Wipes hostile fire, damages the room, and grants 1.2s of invulnerability.',
     pools: ['treasure', 'shop'], price: 15,
     onUse(p, ctx) {
       const es = eshots();
@@ -12104,6 +12198,7 @@ G.Pool = function (factory, reset) {
   add({
     id: 'chroot', name: 'chroot', quality: 2, tag: 'active', charge: 2, color: '#c48cff',
     desc: 'Change your root. You reappear somewhere safer.',
+    effect: 'Teleports you to the safest open spot, with 1.4s of invulnerability.',
     pools: ['treasure', 'shop'], price: 12,
     onUse(p, ctx) {
       const PF = G.PF;
@@ -12144,6 +12239,7 @@ G.Pool = function (factory, reset) {
   add({
     id: 'strace', name: 'strace -f', quality: 3, tag: 'active', charge: 2, color: '#ffd24a',
     desc: 'Follow every fork. Marked processes take double damage.',
+    effect: 'Marks every process for 12s. Marked processes take extra damage.',
     pools: ['treasure', 'shop'], price: 18,
     onUse(p, ctx) {
       const l = S.enemies(ctx);
@@ -12175,6 +12271,7 @@ G.Pool = function (factory, reset) {
   add({
     id: 'gdb', name: 'gdb attach', quality: 3, tag: 'active', charge: 3, color: '#4af0b0',
     desc: 'Attach a debugger. It fights for you until it dies.',
+    effect: 'Turns the nearest process against its own side for 10s.',
     pools: ['treasure'],
     onUse(p, ctx) {
       const l = S.enemies(ctx);
@@ -12214,6 +12311,7 @@ G.Pool = function (factory, reset) {
   add({
     id: 'coredump', name: 'core dump', quality: 2, tag: 'active', charge: 2, color: '#ff8a2a',
     desc: 'Spill the whole address space on the floor. It is unstable.',
+    effect: 'Scatters four live bombs around you.',
     pools: ['treasure', 'shop'], price: 14,
     onUse(p, ctx) {
       const g = G.Game; if (!g) return;
@@ -12247,6 +12345,7 @@ G.Pool = function (factory, reset) {
   add({
     id: 'defrag', name: 'defrag', quality: 2, tag: 'active', charge: 2, color: '#8ef05a',
     desc: 'Compact the free list. Loose blocks come to you.',
+    effect: 'Pulls every pickup in the room to you, and heals one heart.',
     pools: ['treasure', 'shop'], price: 10,
     onUse(p, ctx) {
       const rm = room();
@@ -12281,6 +12380,7 @@ G.Pool = function (factory, reset) {
   add({
     id: 'kexec', name: 'kexec', quality: 3, tag: 'active', charge: 2, color: '#c48cff',
     desc: 'Boot a different kernel. Every pedestal in the room re-rolls.',
+    effect: 'Re-rolls the item on every untaken pedestal in this room.',
     pools: ['treasure', 'shop'], price: 15,
     onUse(p, ctx) {
       const rm = room();
@@ -12315,6 +12415,7 @@ G.Pool = function (factory, reset) {
   add({
     id: 'gc', name: 'stop-the-world GC', quality: 3, tag: 'active', charge: 3, color: '#7a6aff',
     desc: 'Everything unreachable gets dragged to one place and collected.',
+    effect: 'Drags every process to the middle of the room, then detonates it.',
     pools: ['treasure'],
     onUse(p, ctx) {
       const l = S.enemies(ctx);
@@ -12352,6 +12453,7 @@ G.Pool = function (factory, reset) {
   add({
     id: 'overvolt', name: 'overvolt', quality: 3, tag: 'active', charge: 3, color: '#ffd24a',
     desc: 'Push 1.6V through a 1.1V part. For eight glorious seconds.',
+    effect: 'For 8s your damage, fire rate and shot speed all spike.',
     pools: ['treasure'],
     onUse(p, ctx) {
       p.mem.overvolt = 8;
@@ -12389,6 +12491,7 @@ G.Pool = function (factory, reset) {
   add({
     id: 'tcpdump', name: 'tcpdump -w', quality: 3, tag: 'active', charge: 2, color: '#9fe4ff',
     desc: 'Capture everything on the wire and replay it back at them.',
+    effect: 'Turns every hostile packet on screen into a homing, piercing packet of yours.',
     pools: ['treasure', 'shop'], price: 20,
     onUse(p, ctx) {
       const es = eshots(), C = G.Combat;
@@ -12427,6 +12530,7 @@ G.Pool = function (factory, reset) {
   add({
     id: 'panic', name: 'panic()', quality: 4, tag: 'active', charge: 2, color: '#ff2a4a',
     desc: 'Take the system down with you. Costs half a heart.',
+    effect: 'Costs half a heart. Heavily damages the whole room and wipes hostile fire.',
     pools: ['treasure', 'devil'],
     onUse(p, ctx) {
       if (p.hp <= 1) { FX().snd('deny', { vol: 0.6 }); return; }
@@ -12459,6 +12563,7 @@ G.Pool = function (factory, reset) {
   add({
     id: 'pingflood', name: 'ping -f', quality: 2, tag: 'active', charge: 2, color: '#4af0b0',
     desc: 'Flood ping. A full circle of packets, right now.',
+    effect: 'Fires twenty packets outward in a full circle.',
     pools: ['treasure', 'shop'], price: 12,
     onUse(p, ctx) {
       const C = G.Combat; if (!C) return;
@@ -12491,6 +12596,7 @@ G.Pool = function (factory, reset) {
   add({
     id: 'decoy', name: 'process decoy', quality: 3, tag: 'active', charge: 3, color: '#d0d8ff',
     desc: 'Three identical PIDs. Let them guess which one is you.',
+    effect: 'Spawns three decoys for 12s. They orbit you and swallow hostile fire.',
     pools: ['treasure'],
     onUse(p, ctx) {
       for (let i = 0; i < 3; i++) {
@@ -12550,6 +12656,7 @@ G.Pool = function (factory, reset) {
   add({
     id: 'nohup', name: 'nohup', quality: 3, tag: 'active', charge: 1, chargeRate: 0.09, color: '#8ef05a',
     desc: 'Detach the shot loop from your terminal. It keeps firing on its own.',
+    effect: 'For 6s your shots keep firing on their own while you move.',
     pools: ['treasure', 'shop'], price: 16,
     onUse(p, ctx) {
       p.mem.nohup = 6;
@@ -12643,6 +12750,7 @@ G.Pool = function (factory, reset) {
   famItem({
     id: 'daemon', name: 'daemon', quality: 3, color: '#4af0b0',
     desc: 'A background process with no controlling terminal and a grudge.',
+    effect: 'Orbits you and fires at the nearest process.',
     pools: ['treasure'],
     px: [
       '..g........g..',
@@ -12684,6 +12792,7 @@ G.Pool = function (factory, reset) {
   famItem({
     id: 'kworker', name: 'kworker/0:1', quality: 2, color: '#ffd24a',
     desc: 'A kernel worker thread. It does not know what it is doing, only that it must.',
+    effect: 'Chases nearby processes and grinds whatever it touches.',
     pools: ['treasure', 'shop'],
     px: [
       '....000000....',
@@ -12728,6 +12837,7 @@ G.Pool = function (factory, reset) {
   famItem({
     id: 'crond', name: 'crond', quality: 3, color: '#ff8a2a',
     desc: 'Runs a job every few seconds. The job is a bomb.',
+    effect: 'Follows you and drops a live bomb every seven seconds.',
     pools: ['treasure'],
     px: [
       '...00000000...',
@@ -12773,6 +12883,7 @@ G.Pool = function (factory, reset) {
   famItem({
     id: 'watchdog', name: 'watchdog timer', quality: 3, color: '#ff3a5c',
     desc: 'If nothing pets it, it resets whatever is standing nearby.',
+    effect: 'Follows you and shockwaves anything that closes on you.',
     pools: ['treasure'],
     px: [
       '.rr........rr.',
@@ -12833,6 +12944,7 @@ G.Pool = function (factory, reset) {
   famItem({
     id: 'zombieproc', name: 'zombie process', quality: 2, color: '#8ef05a',
     desc: 'Defunct. Never reaped. Still in the process table, still angry.',
+    effect: 'Shambles at the nearest process, and body-blocks hostile fire.',
     pools: ['treasure', 'devil'],
     px: [
       '...00000000...',
@@ -12885,6 +12997,7 @@ G.Pool = function (factory, reset) {
   famItem({
     id: 'sshd', name: 'sshd', quality: 3, color: '#9fe4ff',
     desc: 'Binds to port 22 and holds the position until the room is clear.',
+    effect: 'Anchors when the fight starts and fires piercing shots until the room clears.',
     pools: ['treasure'],
     px: [
       '.....0000.....',
@@ -12944,6 +13057,7 @@ G.Pool = function (factory, reset) {
   famItem({
     id: 'firewalld', name: 'firewalld', quality: 3, color: '#ff8a2a',
     desc: 'DROP by default. It orbits you and swallows what comes in.',
+    effect: 'Orbits you and swallows hostile packets that touch it.',
     pools: ['treasure', 'angel'],
     px: [
       '000000000000..',
@@ -12994,6 +13108,7 @@ G.Pool = function (factory, reset) {
   famItem({
     id: 'logrotate', name: 'logrotate', quality: 3, color: '#cfe0ea',
     desc: 'Rotates. Compresses. Whatever is in the way gets archived.',
+    effect: 'A blade on a wide orbit that cuts whatever it swings through.',
     pools: ['treasure'],
     px: [
       '.....55.......',
@@ -13034,6 +13149,7 @@ G.Pool = function (factory, reset) {
   famItem({
     id: 'ntpd', name: 'ntpd', quality: 2, color: '#c48cff',
     desc: 'Disciplines the local clock. Everything near it runs slow.',
+    effect: 'Orbits you and slows every process near it.',
     pools: ['treasure', 'shop'],
     px: [
       '....000000....',
@@ -13084,6 +13200,7 @@ G.Pool = function (factory, reset) {
   famItem({
     id: 'avahi', name: 'avahi-daemon', quality: 2, color: '#8ef05a',
     desc: 'Announces itself constantly. Whatever it finds takes more damage.',
+    effect: 'Marks the nearest process so everything hurts it more.',
     pools: ['treasure', 'shop'],
     px: [
       '......55......',
@@ -13135,6 +13252,7 @@ G.Pool = function (factory, reset) {
   famItem({
     id: 'bgpd', name: 'bgpd', quality: 4, color: '#ff4a6a',
     desc: 'Advertises a route straight to the far side of the room.',
+    effect: 'Fires a slow, long-range piercing laser across the room.',
     pools: ['treasure', 'boss'],
     px: [
       '00000.........',
@@ -13190,6 +13308,7 @@ G.Pool = function (factory, reset) {
   famItem({
     id: 'swapper', name: 'swapper (pid 0)', quality: 2, color: '#ffe36a',
     desc: 'The idle task. It has nothing better to do than fetch your coins.',
+    effect: 'Fetches loose pickups and drags them back to you.',
     pools: ['treasure', 'shop'],
     px: [
       '..000000000...',
@@ -13238,6 +13357,7 @@ G.Pool = function (factory, reset) {
   famItem({
     id: 'tty0', name: '/dev/tty0', quality: 4, color: '#b9ffe2',
     desc: 'Everything you send to the terminal gets echoed back out of it.',
+    effect: 'Echoes every volley you fire, at reduced power.',
     pools: ['treasure', 'boss'],
     onShoot(p, s, rng, i, n) {
       if (i !== 0) return;
@@ -13302,6 +13422,7 @@ G.Pool = function (factory, reset) {
   trinket({
     id: 'dmesg', name: 'dmesg -w', quality: 1, color: '#8ef05a',
     desc: 'Read the ring buffer after every fight. There is usually something in it.',
+    effect: 'Clearing a room usually drops a coin or half a heart.',
     onRoomClear(p, room, ctx) {
       const g = G.Game; if (!g || !g.spawnPickup) return;
       const rng = (ctx && ctx.rng) || G.rnd;
@@ -13328,6 +13449,7 @@ G.Pool = function (factory, reset) {
   trinket({
     id: 'sigchld', name: 'SIGCHLD', quality: 2, color: '#4af0b0',
     desc: 'The child terminated. Something small crawls out of it.',
+    effect: 'Kills often spray three homing packets out of the corpse.',
     pools: ['treasure', 'shop'],
     onKill(p, e, ctx) {
       const C = G.Combat; if (!C) return;
@@ -13361,6 +13483,7 @@ G.Pool = function (factory, reset) {
   trinket({
     id: 'errno', name: 'errno', quality: 2, color: '#ff3a5c',
     desc: 'Something went wrong. The next few packets are furious about it.',
+    effect: 'Taking a hit spikes your damage and fire rate for 4s.',
     pools: ['treasure', 'shop'],
     onDamage(p, amt) { p.mem.errno = 4; p.recompute && p.recompute(); return amt; },
     calcMul(p, s) { if ((p.mem.errno || 0) > 0) { s.damage *= 1.6; s.fireDelay *= 0.85; } },
@@ -13389,6 +13512,7 @@ G.Pool = function (factory, reset) {
   trinket({
     id: 'ulimitc', name: 'ulimit -c unlimited', quality: 3, color: '#ff8a2a',
     desc: 'Every fault writes a full core file. Right where you are standing.',
+    effect: 'Taking a hit drops a live bomb where you were standing.',
     pools: ['treasure'],
     onDamage(p, amt, src) {
       const g = G.Game;
@@ -13415,6 +13539,7 @@ G.Pool = function (factory, reset) {
   trinket({
     id: 'atime', name: 'noatime', quality: 2, color: '#ff6a8a',
     desc: 'Clear a room without being touched and the mount stays clean.',
+    effect: 'Clear a room without being hit and you heal half a heart.',
     onRoomClear(p, room, ctx) {
       if (p.mem.hurtThisRoom) { p.mem.hurtThisRoom = 0; return; }
       if (p.heal(1)) FX().popup(p.x, p.y - 26, 'clean mount', '#ff6a8a');
@@ -13441,6 +13566,7 @@ G.Pool = function (factory, reset) {
   trinket({
     id: 'inode', name: 'inode table', quality: 2, color: '#ffe36a',
     desc: 'Every dead process frees an inode. Sometimes a key falls out.',
+    effect: 'Kills occasionally drop a key or a bomb.',
     onKill(p, e, ctx) {
       const g = G.Game; if (!g || !g.spawnPickup) return;
       if (Math.random() > 0.07) return;
@@ -13467,6 +13593,7 @@ G.Pool = function (factory, reset) {
   trinket({
     id: 'checksum', name: 'CRC32', quality: 3, color: '#9fe4ff',
     desc: 'One hit in four fails its checksum and is discarded.',
+    effect: 'One hit in four fails its checksum and does nothing.',
     pools: ['treasure', 'angel'],
     onDamage(p, amt, src) {
       if (Math.random() > 0.25) return amt;
@@ -13495,6 +13622,7 @@ G.Pool = function (factory, reset) {
   trinket({
     id: 'canary', name: 'stack canary', quality: 3, color: '#ffe36a',
     desc: 'A known value before the return address. It dies so you do not.',
+    effect: 'Absorbs one hit per floor, then re-arms on the next floor.',
     pools: ['treasure', 'angel'],
     onPickup(p) { p.mem.canary = 1; },
     onNewFloor(p) { p.mem.canary = 1; FX().popup(p.x, p.y - 26, 'canary set', '#ffe36a'); },
@@ -13526,6 +13654,7 @@ G.Pool = function (factory, reset) {
   trinket({
     id: 'tmpfs', name: 'tmpfs', quality: 1, color: '#cfe0ea',
     desc: 'Mounted fresh on every floor, with something useful already in it.',
+    effect: 'Every new floor starts you with an extra bomb and key.',
     onNewFloor(p, run) {
       if (!run) return;
       run.bombs = (run.bombs || 0) + 1;
@@ -13553,6 +13682,7 @@ G.Pool = function (factory, reset) {
   trinket({
     id: 'keepalive', name: 'SO_KEEPALIVE', quality: 3, color: '#4a86ff',
     desc: 'The connection refuses to drop. First hit in a room bounces.',
+    effect: 'Shields you on pickup, on each new floor, and on every room clear.',
     pools: ['treasure', 'angel'],
     onRoomClear(p) { p.shield = Math.min(2, (p.shield || 0) + 1); },
     onPickup(p) { p.shield = (p.shield || 0) + 1; },
@@ -13576,6 +13706,7 @@ G.Pool = function (factory, reset) {
   trinket({
     id: 'swappart', name: 'swap partition', quality: 4, color: '#c48cff',
     desc: 'When memory runs out you get paged to disk instead of killed. Once.',
+    effect: 'Once per run a killing blow leaves you alive on one heart instead.',
     pools: ['treasure', 'angel', 'devil'],
     onPickup(p) { p.mem.swapLeft = 1; },
     onDamage(p, amt) {
@@ -13611,6 +13742,7 @@ G.Pool = function (factory, reset) {
   trinket({
     id: 'ldpreload', name: 'LD_PRELOAD', quality: 3, color: '#ff9ad8',
     desc: 'Inject a shared object ahead of libc. Whatever it does, it does all floor.',
+    effect: 'Grants one random shot flag, re-rolled on every floor.',
     pools: ['treasure', 'secret'],
     onPickup(p, run) { roll(p, run); },
     onNewFloor(p, run) { roll(p, run); },
@@ -13640,6 +13772,7 @@ G.Pool = function (factory, reset) {
   trinket({
     id: 'rcu', name: 'RCU grace period', quality: 2, color: '#9fe4ff',
     desc: 'Wait for every reader to finish, then reclaim. Slowly.',
+    effect: 'Every third room you clear heals half a heart.',
     onRoomClear(p) {
       p.mem.rcu = (p.mem.rcu || 0) + 1;
       if (p.mem.rcu >= 3) { p.mem.rcu = 0; p.heal(1); FX().popup(p.x, p.y - 26, 'reclaimed', '#9fe4ff'); }
@@ -13684,6 +13817,7 @@ G.Pool = function (factory, reset) {
   trinket({
     id: 'schedboost', name: 'sched_boost', quality: 2, color: '#4af0b0',
     desc: 'Each kill bumps your priority. It decays if you stop killing.',
+    effect: 'Kills stack speed and fire rate up to eight times. Stacks decay if you stop.',
     onKill(p) { p.mem.sched = Math.min(8, (p.mem.sched || 0) + 1); p.mem.schedT = 4; p.recompute && p.recompute(); },
     calcAdd(p, s) { s.speed += (p.mem.sched || 0) * 4; s.fireDelay -= (p.mem.sched || 0) * 0.008; },
     update(p, dt) {
@@ -13711,6 +13845,7 @@ G.Pool = function (factory, reset) {
   trinket({
     id: 'bashhistory', name: '.bash_history', quality: 2, color: '#8a9aa8',
     desc: 'Press up. Run it again. Rooms you clear give extra charge.',
+    effect: 'Every room you clear adds a charge to your active item.',
     onRoomClear(p) { if (p.addCharge) p.addCharge(1); },
     px: [
       '000000000000..',
@@ -13732,6 +13867,7 @@ G.Pool = function (factory, reset) {
   trinket({
     id: 'ptracescope', name: 'ptrace_scope=0', quality: 2, color: '#ffd24a',
     desc: 'Anyone can attach to anything. Kills sometimes pay out.',
+    effect: 'Kills sometimes drop a coin.',
     onKill(p, e, ctx) {
       const g = G.Game; if (!g || !g.spawnPickup) return;
       if (Math.random() > 0.13) return;
@@ -13758,6 +13894,7 @@ G.Pool = function (factory, reset) {
   trinket({
     id: 'sigpipe', name: 'SIGPIPE', quality: 3, color: '#ff8a2a',
     desc: 'The reader is gone. Whatever was written goes everywhere instead.',
+    effect: 'Kills damage everything standing near the corpse.',
     pools: ['treasure'],
     onKill(p, e, ctx) {
       const l = S.enemies(ctx);
@@ -13790,6 +13927,7 @@ G.Pool = function (factory, reset) {
   trinket({
     id: 'oomscore', name: 'oom_score_adj', quality: 3, color: '#ff2a4a',
     desc: 'The closer you are to being reaped, the harder you push back.',
+    effect: 'The lower your health, the more damage and fire rate you gain.',
     pools: ['treasure', 'devil'],
     calcMul(p, s) {
       const k = 1 - clamp(p.hp / Math.max(1, p.maxHp), 0, 1);
@@ -13821,6 +13959,7 @@ G.Pool = function (factory, reset) {
   trinket({
     id: 'vmsplice', name: 'vmsplice', quality: 2, color: '#b9ffe2',
     desc: 'Splice pages straight into the pipe when you walk in.',
+    effect: 'Walking into an uncleared room fires a ring of packets around you.',
     pools: ['treasure'],
     update(p, dt, ctx) {
       const rm = (ctx && ctx.room) || (G.Game && G.Game.room);
@@ -13869,6 +14008,7 @@ G.Pool = function (factory, reset) {
     def.pools = def.pools || ['devil'];
     def.quality = def.quality == null ? 4 : def.quality;
     def.devil = true;
+    def.archetype = def.archetype || 'pact';
     const prev = def.onPickup;
     def.onPickup = function (p, run) {
       S.integrity(run, -(cost || 12));
@@ -13885,6 +14025,8 @@ G.Pool = function (factory, reset) {
   function angel(def) {
     def.pools = def.pools || ['angel'];
     def.quality = def.quality == null ? 3 : def.quality;
+    def.angel = true;
+    def.archetype = def.archetype || 'blessing';
     const prev = def.onPickup;
     def.onPickup = function (p, run) {
       S.integrity(run, +4);
@@ -13925,6 +14067,7 @@ G.Pool = function (factory, reset) {
   devil({
     id: 'dirtycow', name: 'dirty COW', quality: 4, color: '#ff2ad0',
     desc: 'Race the copy-on-write. Your packets feed on how broken this system is.',
+    effect: 'Packets grow stronger the more system integrity you have burned.',
     flags: ['corrupt'], add: { damage: 1.2 },
     synergies: ['dirtycow+ring0 => damage scales with everything you have burned'],
     px: [
@@ -13946,6 +14089,7 @@ G.Pool = function (factory, reset) {
   devil({
     id: 'devmem', name: '/dev/mem', quality: 4, color: '#c48cff',
     desc: 'Raw physical memory. Write wherever you like — walls included.',
+    effect: 'Packets pass through terrain and several bodies.',
     flags: ['spectral', 'piercing'], add: { damage: 1.6 },
     px: [
       '...00000000...',
@@ -13967,6 +14111,7 @@ G.Pool = function (factory, reset) {
   devil({
     id: 'rowhammer', name: 'rowhammer', quality: 4, color: '#ffd24a',
     desc: 'Hammer the adjacent row until something flips. Sometimes it flips to dead.',
+    effect: 'One hit in twenty rips a chunk straight out of the target.',
     onHit(p, e, shot, ctx) {
       if (Math.random() > 0.05) return;
       FX().snd('glitch', { vol: 0.7, rate: 1.3 });
@@ -14015,6 +14160,7 @@ G.Pool = function (factory, reset) {
   devil({
     id: 'setuid', name: 'setuid root', quality: 4, color: '#ff3a5c',
     desc: 'You run as root. So does everything that hits you.',
+    effect: 'You hit far harder, and everything that hits you hits twice as hard.',
     mul: { damage: 1.7 },
     onDamage(p, amt) { return amt * 2; },
     px: [
@@ -14037,6 +14183,7 @@ G.Pool = function (factory, reset) {
   devil({
     id: 'wxviolation', name: 'W^X violation', quality: 4, color: '#ff8a2a',
     desc: 'Writable and executable. Half your health, twice your teeth.',
+    effect: 'Costs one heart of maximum health, permanently.',
     mul: { damage: 2.0, fireDelay: 0.9 },
     onPickup(p) {
       p.maxHp = Math.max(2, p.maxHp - 2);
@@ -14061,6 +14208,7 @@ G.Pool = function (factory, reset) {
   devil({
     id: 'meltdown', name: 'meltdown', quality: 4, color: '#8a5cff',
     desc: 'Read kernel memory from userland. You see everything and it hurts.',
+    effect: 'Packets pierce and bore, and every floor arrives fully mapped.',
     flags: ['piercing', 'bore'],
     onPickup(p, run) {
       const fl = run && run.floor;
@@ -14091,6 +14239,7 @@ G.Pool = function (factory, reset) {
   devil({
     id: 'rmrf', name: 'rm -rf /', quality: 4, tag: 'active', charge: 4, color: '#ff2a4a',
     desc: 'No prompt. No preserve-root. It takes the room and a little of you.',
+    effect: 'Devastates the room, wipes hostile fire, destroys terrain, and burns 3 more integrity.',
     onUse(p, ctx) {
       FX().flash('#ffffff', 0.4);
       FX().shake(16, 0.8);
@@ -14123,6 +14272,7 @@ G.Pool = function (factory, reset) {
   devil({
     id: 'procmem', name: '/proc/self/mem', quality: 4, color: '#ff4a7a',
     desc: 'Write into your own process image. Every kill mends you a little.',
+    effect: 'Packets steal health, and every body they pass returns something to you.',
     flags: ['lifesteal', 'siphon'], add: { damage: 1.1 },
     px: [
       '..222222222...',
@@ -14148,6 +14298,7 @@ G.Pool = function (factory, reset) {
   angel({
     id: 'signedcert', name: 'signed certificate', quality: 3, color: '#fff2b0',
     desc: 'Verified by a root you trust. Wounded processes do not survive it.',
+    effect: 'Packets execute processes already below half health.',
     flags: ['holy'], add: { damage: 0.8 },
     synergies: ['signedcert+nmap => executioner rounds that pick out the wounded'],
     px: [
@@ -14170,6 +14321,7 @@ G.Pool = function (factory, reset) {
   angel({
     id: 'secureboot', name: 'secure boot', quality: 3, color: '#9fe4ff',
     desc: 'Unsigned damage will not execute. Some of it just does not run.',
+    effect: 'Three hits in ten simply do not execute.',
     onDamage(p, amt) {
       if (Math.random() < 0.3) {
         FX().popup(p.x, p.y - 24, 'UNSIGNED', '#9fe4ff');
@@ -14198,6 +14350,7 @@ G.Pool = function (factory, reset) {
   angel({
     id: 'tpm', name: 'TPM attestation', quality: 3, color: '#b9ffe2',
     desc: 'Measured boot. Every floor you arrive in a known-good state.',
+    effect: 'Adds one heart of maximum health and fills you to it.',
     onNewFloor(p) { p.heal(2); FX().popup(p.x, p.y - 26, 'attested', '#b9ffe2'); },
     onPickup(p) { p.maxHp += 2; p.hp = p.maxHp; },
     px: [
@@ -14220,6 +14373,7 @@ G.Pool = function (factory, reset) {
   angel({
     id: 'aslr', name: 'ASLR', quality: 3, color: '#c48cff',
     desc: 'Your base address moves every frame. Some things simply miss.',
+    effect: 'One hit in five misses you entirely.',
     add: { speed: 10, luck: 2 },
     onDamage(p, amt) {
       if (Math.random() < 0.2) {
@@ -14248,6 +14402,7 @@ G.Pool = function (factory, reset) {
   angel({
     id: 'sgx', name: 'SGX enclave', quality: 4, color: '#4a86ff',
     desc: 'A region nothing else can read. It regenerates around you.',
+    effect: 'Grants two shields.',
     onPickup(p) { p.shield = (p.shield || 0) + 2; },
     onRoomClear(p) { if ((p.shield || 0) < 2) { p.shield = (p.shield || 0) + 1; FX().snd('activeReady', { vol: 0.5 }); } },
     px: [
@@ -14269,6 +14424,7 @@ G.Pool = function (factory, reset) {
   angel({
     id: 'kexecgood', name: 'warm reboot', quality: 3, color: '#8ef05a',
     desc: 'When the room clears, the machine comes back cleaner than it went down.',
+    effect: 'Every second room you clear heals half a heart and adds an active charge.',
     onRoomClear(p, room, ctx) {
       p.mem.wb = (p.mem.wb || 0) + 1;
       if (p.mem.wb < 2) return;
@@ -14399,6 +14555,7 @@ G.Pool = function (factory, reset) {
     id: 'sqeburst', name: 'io_uring SQE burst', quality: 3, color: '#63d8ff',
     pools: ['treasure', 'shop'], price: 20,
     desc: 'Install a burst driver. One submission, three completions.',
+    effect: 'Each volley fires now, then twice more in quick succession, for less per packet.',
     synergies: ['burst+splitting => each completion inherits the split payload'],
     px: [
       '..cccccccc....', '.c55555555c...', '.c5c55c55c...', '.c55555555c...',
@@ -14435,6 +14592,7 @@ G.Pool = function (factory, reset) {
     id: 'ringbuffer', name: 'ring buffer', quality: 3, color: '#ffd24a',
     pools: ['treasure', 'shop'], price: 20,
     desc: 'Install a buffering driver. Idle packets flush with the next write.',
+    effect: 'Holding fire stores up to five packets. The next volley flushes them as a fan.',
     synergies: ['buffer+homing => the whole flush converges on a host'],
     px: [
       '....yyyy......', '..yyYYYYyy....', '.yYy....yYy...', '.yY......Yy...',
@@ -14474,6 +14632,7 @@ G.Pool = function (factory, reset) {
     id: 'binsemaphore', name: 'binary semaphore', quality: 4, color: '#ff6ab8',
     pools: ['treasure', 'secret'],
     desc: 'Install a single-flight driver. One enormous packet may exist.',
+    effect: 'Only one packet may exist at a time, but it is huge, piercing, and fires fast.',
     synergies: ['semaphore+boomerang => the lock releases when the packet returns'],
     px: [
       '....mmmm......', '..mmPPPPmm....', '.mP......Pm...', '.mP..mm..Pm...',
@@ -14664,6 +14823,7 @@ G.Pool = function (factory, reset) {
     id: 'socketunit', name: 'systemd.socket', quality: 3, color: '#4af0b0',
     pools: ['treasure', 'shop'], price: 15,
     desc: 'Deploy a socket-activated sentry. It inherits your packet payload.',
+    effect: 'Press E to place a sentry that fires your own packets for 14s. Two at a time.',
     px: [
       '.....gg.......', '....gGGg......', '...gG55Gg.....', '..ggG55Ggg....',
       '..gGGGGGGg....', '...gggggg.....', '....g..g......', '...gg..gg.....',
@@ -14674,6 +14834,7 @@ G.Pool = function (factory, reset) {
     id: 'iptablesinput', name: 'iptables -A INPUT', quality: 3, color: '#ff8a2a',
     pools: ['treasure', 'shop'], price: 15,
     desc: 'Deploy a directional rule. Hostile packets matching it are DROPped.',
+    effect: 'Press E to place a wall that deletes hostile packets crossing it for 11s.',
     px: [
       '..oooooooooo..', '..o55555555o..', '..o5o55o55o...', '..o55555555o..',
       '..o5o55o55o...', '..o55555555o..', '..oooooooooo..', '.....oo.......',
@@ -14685,6 +14846,7 @@ G.Pool = function (factory, reset) {
     id: 'socatrelay', name: 'socat relay', quality: 4, color: '#9fe4ff',
     pools: ['treasure', 'secret'],
     desc: 'Deploy linked sockets. Packets entering one leave through the next.',
+    effect: 'Press E to place up to three linked nodes. Packets entering one leave the next.',
     px: [
       '..cccc........', '.c5555c.......', '.c5cc5c..cccc.', '.c5cc5c.c5555c',
       '.c5555c.c5cc5c', '..cccc..c5cc5c', '...tt...c5555c', '..tt.....cccc.',
@@ -14779,6 +14941,7 @@ G.Pool = function (factory, reset) {
     id: 'rootkitattach', name: 'loadable rootkit', quality: 3, color: '#ff2ad0',
     pools: ['treasure', 'devil'],
     desc: 'Packets install hidden hooks. Each hook makes the host less trusted.',
+    effect: 'Hits often install a rootkit. Up to five stacks, each making the host take more.',
     synergies: ['rootkit+rapid => stacks vulnerability before the host can recover'],
     px: [
       '....mmmm......', '...mPPPPm.....', '..mP0PP0Pm....', '..mPPPPPPm....',
@@ -14790,6 +14953,7 @@ G.Pool = function (factory, reset) {
     id: 'logicbombattach', name: 'logic bomb', quality: 3, color: '#ff8a2a',
     pools: ['treasure', 'curse'],
     desc: 'Four successful installations execute the payload inside its host.',
+    effect: 'Hits usually arm a bomb. The fourth stack detonates inside the host.',
     synergies: ['logic bomb+piercing => arm several hosts with one packet'],
     px: [
       '.....oo.......', '....oYYo......', '...oYooYo.....', '..oYoYYoYo....',
@@ -14802,6 +14966,7 @@ G.Pool = function (factory, reset) {
     id: 'botnetattach', name: 'botnet client', quality: 4, color: '#8ef05a',
     pools: ['treasure', 'devil', 'secret'],
     desc: 'Compromised hosts join the swarm and attack nearby processes.',
+    effect: 'Hits sometimes recruit the host, which then attacks its own side for 6s.',
     synergies: ['botnet+chain => infected hosts become lightning relays'],
     px: [
       '..gg....gg....', '.gGGg..gGGg...', '.gG0GggG0Gg...', '..gGGGGGGg....',
@@ -15087,6 +15252,7 @@ G.Pool = function (factory, reset) {
     id: 'epollwait', name: 'epoll_wait(-1)', quality: 3, color: '#ffd24a',
     pools: ['treasure', 'shop'], price: 20,
     desc: 'Block on an empty set. Standing still arms a radial write.',
+    effect: 'Standing still for about a second fires a ring of packets around you.',
     synergies: ['epoll_wait+homing => the whole ring converges on one host'],
     px: [
       '......z.......', '..z...z...z...', '...zzzzzzz....', '..zzYYYYYzz...',
@@ -15099,6 +15265,7 @@ G.Pool = function (factory, reset) {
     id: 'sigaltstack', name: 'sigaltstack', quality: 3, color: '#9fd8ff',
     pools: ['treasure', 'shop'], price: 20,
     desc: 'A signal that misses lands you on the alternate stack, guarded.',
+    effect: 'A hostile packet that narrowly misses you grants a shield.',
     synergies: ['sigaltstack+chroot => two faults in a row cost nothing'],
     px: [
       '.....t..t..t..', '..bbbbbbbb....', '.b55555555b...', '.b5wwww555b...',
@@ -15111,6 +15278,7 @@ G.Pool = function (factory, reset) {
     id: 'oomkiller', name: 'oom_killer', quality: 4, color: '#ff8a2a',
     pools: ['treasure', 'devil'],
     desc: 'Four reaps with no fault of your own frees memory, violently.',
+    effect: 'Four kills without taking a hit sets off an EMP blast around you.',
     synergies: ['oom_killer+explosive => the reap chains into the next process'],
     px: [
       '..o......o....', '...o....o.....', '....oooooo....', '...ohhhhhho...',
@@ -15123,6 +15291,7 @@ G.Pool = function (factory, reset) {
     id: 'schedyield', name: 'sched_yield()', quality: 3, color: '#ff5ad0',
     pools: ['treasure', 'secret'],
     desc: 'Give the CPU up when you turn. It hands you back a faster slice.',
+    effect: 'Changing fire direction surges your damage and fire rate for 2.6s.',
     synergies: ['sched_yield+rapid => a turning fight never leaves the surge'],
     px: [
       '...mmmm.......', '..mPPPPm......', '.mPP..PPm.....', '.mP....Pm..m..',
@@ -15360,6 +15529,7 @@ G.Pool = function (factory, reset) {
     id: 'eccscrub', name: 'ECC scrub', quality: 3, color: '#8ef05a',
     pools: ['treasure', 'shop'], price: 20,
     desc: 'Every third fault is corrected, and the room is scrubbed of packets.',
+    effect: 'Every third hit is corrected to nothing, and wipes all hostile fire.',
     synergies: ['ECC scrub+iptables -A INPUT => the room stops landing hits at all'],
     px: [
       '.vvvvvvvvvvvv.', '.v0v0v0v0v0v0.', '.vvvvvvvvvvvv.', '.v5v5v5v5v5v5.',
@@ -15371,6 +15541,7 @@ G.Pool = function (factory, reset) {
     id: 'tcpdumpw', name: 'tcpdump -w', quality: 4, color: '#7ad8ff',
     pools: ['treasure', 'secret'],
     desc: 'Capture one fault every few seconds and replay the traffic at its sender.',
+    effect: 'Once every 9s a hit is captured and replayed back at whatever sent it.',
     synergies: ['tcpdump -w+piercing => the replay goes through the whole line'],
     px: [
       '....ttttt.....', '..tt55555tt...', '.t5555555t....', '.t55ccccc55t..',
@@ -15383,6 +15554,7 @@ G.Pool = function (factory, reset) {
     id: 'md5check', name: 'md5sum -c', quality: 3, color: '#ff3a5c',
     pools: ['treasure', 'shop'], price: 20,
     desc: 'A fault that matches the last one fails the check, and is answered.',
+    effect: 'A hit matching the previous one is voided, and answered with a blast.',
     synergies: ['md5sum -c+knockbackUp => the answer clears the ring around you'],
     px: [
       '..rrrr..rrrr..', '.rRRRRrrRRRRr.', '.rR00RrrR00Rr.', '.rRRRRrrRRRRr.',
@@ -15395,6 +15567,7 @@ G.Pool = function (factory, reset) {
     id: 'chrootjail', name: 'chroot', quality: 3, color: '#c48cff',
     pools: ['treasure', 'angel'],
     desc: 'The first fault in each room is undone — you snap back a second.',
+    effect: 'The first hit in each room is undone. You snap back to where you were.',
     synergies: ['chroot+sigaltstack => two faults in a row cost nothing'],
     px: [
       'ppp........ppp', 'p............p', 'p..pPPPPPP..p.', '...pP0PP0Pp...',
@@ -15577,6 +15750,7 @@ G.Pool = function (factory, reset) {
     id: 'kexecpayload', name: 'kexec payload', quality: 3, color: '#ffc23a',
     pools: ['treasure', 'shop'], price: 20,
     desc: 'Four staged images per room. Each one detonates where it lands.',
+    effect: 'Four explosive rounds per room, reloaded when the room clears.',
     synergies: ['kexec payload+splitting => the fragments carry the charge'],
     px: [
       '.....yy.......', '....yYYy......', '...yY55Yy.....', '...yY55Yy.....',
@@ -15589,6 +15763,7 @@ G.Pool = function (factory, reset) {
     id: 'nicecryo', name: 'nice -n 19', quality: 3, color: '#9fe4ff',
     pools: ['treasure', 'shop'], price: 20,
     desc: 'Deprioritised packets. The reserve refills on its own, slowly.',
+    effect: 'Six freezing rounds. One reloads every 3.2s on its own.',
     synergies: ['nice -n 19+shock => a frozen host takes the full arc'],
     px: [
       '..cccccccc....', '.c55555555c...', '.c5cc5cc55c...', '.c55cc5cc5c...',
@@ -15601,6 +15776,7 @@ G.Pool = function (factory, reset) {
     id: 'odirect', name: 'O_DIRECT', quality: 3, color: '#e8fff4',
     pools: ['treasure', 'secret'],
     desc: 'Cache-bypassing darts. Every reap loads another one.',
+    effect: 'Eight armour-piercing rounds. Every kill loads another.',
     synergies: ['O_DIRECT+bigshot => one dart clears an entire column'],
     px: [
       '......55......', '.....5665.....', '.....5665.....', '.....5665.....',
@@ -15613,6 +15789,7 @@ G.Pool = function (factory, reset) {
     id: 'cgrouplimit', name: 'cgroup v2 limit', quality: 4, color: '#7a6aff',
     pools: ['treasure', 'devil'],
     desc: 'Pinning rounds. Taking a fault is what loads the next two.',
+    effect: 'Three pinning rounds. Taking a hit reloads two of them.',
     synergies: ['cgroup v2 limit+chroot => the fault that reloads you is free'],
     px: [
       '..pppppppppp..', '.pPPPPPPPPPPp.', '.pP00PPPP00Pp.', '.pPPPPPPPPPPp.',
@@ -15645,6 +15822,275 @@ G.Pool = function (factory, reset) {
       row++;
     }
   });
+})();
+
+
+/* ===== 330_itemdex.js ===== */
+/* ============================================================
+   BIND69 — ITEMDEX: what an item IS and what it DOES   (owner: ITEMS)
+
+   One source of truth for every surface that describes an item. The pickup
+   card, the pause build grid, the map strip and the death screen all read
+   from here, so they cannot drift apart the way four hand-written panels
+   would.
+
+   Two questions, two answers:
+
+     archOf(def)   what KIND of thing is this?  -> a row in ARCH, which
+                   carries the badge text, the one-line rule for the whole
+                   family, and the frame token UI draws around the icon.
+
+     effect(def)   what does it DO?  -> def.effect when the item's behaviour
+                   is code (no generator can read a hook), otherwise a line
+                   generated from def.add / def.mul.
+
+   Deltas are measured, not declared. Stats.recompute soft-compresses
+   fireDelay near its floor and gives damage penalties diminishing returns
+   past 0.45, so an item declaring mul.fireDelay 0.84 may deliver far less
+   than 16% on a fast build. snapshot() before and changes() after reports
+   what the player actually got.
+   ============================================================ */
+(function () {
+  const S = G.Stats;
+  const Dex = G.Itemdex = {};
+
+  /* =========================================================
+     THE FAMILIES
+     `rule` is the thing that is true of every member, and is what a player
+     is meant to internalise after a few runs — it is shown under the badge
+     the first few times a family is seen. `frame` is the shape UI draws
+     around the icon; families that behave alike share one.
+     ========================================================= */
+  const ARCH = Dex.ARCH = {
+    stat: { badge: 'PASSIVE', order: 1, frame: 'none',
+      rule: 'Always on. Changes your numbers.' },
+    shot: { badge: 'SHOT', order: 2, frame: 'chevron',
+      rule: 'Always on. Changes what your packets do.' },
+    active: { badge: 'ACTIVE', order: 3, frame: 'keycap',
+      rule: 'Press E when the bar is full.' },
+    familiar: { badge: 'FAMILIAR', order: 4, frame: 'orbit',
+      rule: 'A helper that fights beside you.' },
+    trinket: { badge: 'TRINKET', order: 5, frame: 'small',
+      rule: 'Always on. One small standing rule.' },
+    'weapon-driver': { badge: 'DRIVER', order: 6, frame: 'barrel',
+      rule: 'Replaces your firing pattern. Only the newest one is installed.' },
+    deployable: { badge: 'DEPLOY', order: 7, frame: 'ground',
+      rule: 'Press E to place it. Whatever you placed is gone when you leave the room.' },
+    'network-node': { badge: 'NODE', order: 8, frame: 'ground',
+      rule: 'Press E to place linked nodes. They are gone when you leave the room.' },
+    'enemy-attachment': { badge: 'ATTACH', order: 9, frame: 'barb',
+      rule: 'Installs itself on the processes you hit.' },
+    'execution-trigger': { badge: 'TRIGGER', order: 10, frame: 'bolt',
+      rule: 'Watches for a condition, then fires a payload.' },
+    countermeasure: { badge: 'WARD', order: 11, frame: 'shield',
+      rule: 'Reacts when something hits you.' },
+    ammunition: { badge: 'AMMO', order: 12, frame: 'magazine',
+      rule: 'A limited payload reserve that refills on its own rule.' },
+    pact: { badge: 'PACT', order: 13, frame: 'horns',
+      rule: 'Root deal. Burns system integrity, permanently.' },
+    blessing: { badge: 'SIGNED', order: 14, frame: 'halo',
+      rule: 'Signed code. Defensive, and it costs nothing.' },
+  };
+  const FALLBACK = ARCH.stat;
+
+  /* tag was the old, coarser vocabulary and still rides on every def, so it
+     is the fallback when an item predates its archetype. */
+  const BY_TAG = { active: 'active', trinket: 'trinket', familiar: 'familiar' };
+
+  Dex.archKey = function (def) {
+    if (!def) return 'stat';
+    if (def.archetype && ARCH[def.archetype]) return def.archetype;
+    if (def.devil) return 'pact';
+    if (def.angel) return 'blessing';
+    const byTag = BY_TAG[def.tag];
+    if (byTag) return byTag;
+    return (def.flags && def.flags.length) ? 'shot' : 'stat';
+  };
+  Dex.archOf = function (def) { return ARCH[Dex.archKey(def)] || FALLBACK; };
+  Dex.badge = function (def) { return Dex.archOf(def).badge; };
+  Dex.frame = function (def) { return Dex.archOf(def).frame; };
+  Dex.rule = function (def) { return Dex.archOf(def).rule; };
+
+  /* =========================================================
+     STAT ROWS — the panel's vocabulary
+     `lim` names the LIMITS entry that bounds this row; `invert` marks the
+     rows whose limit is good at the LOW end (fire delay), so "capped" means
+     the opposite edge. `dir` is which way is an improvement, 0 = neither.
+     ========================================================= */
+  /* `soft` is the range the BAR is drawn against. The hard LIMITS are the
+     extremes a stacked build can theoretically reach — damage caps at 240,
+     so a healthy 11 rendered as 4% of a bar, which taught the player
+     nothing. The bar reads against the range runs actually live in; CAP,
+     which is the decision-changing fact, still tests the real clamp. */
+  const ROWS = Dex.ROWS = [
+    { k: 'damage', label: 'DAMAGE', dp: 1, dir: 1, lim: 'damage', soft: [0, 40] },
+    { k: 'tearRate', label: 'RATE', dp: 2, dir: 1, lim: 'fireDelay', invert: 1, unit: '/s', soft: [0.12, 0.7] },
+    { k: 'shotCount', label: 'SHOTS', dp: 0, dir: 1, lim: 'shotCount', soft: [1, 8] },
+    { k: 'shotSpeed', label: 'SHOT SPD', dp: 0, dir: 1, lim: 'shotSpeed', soft: [90, 700] },
+    { k: 'range', label: 'RANGE', dp: 2, dir: 1, lim: 'range', soft: [0.3, 3] },
+    { k: 'speed', label: 'SPEED', dp: 0, dir: 1, lim: 'speed', soft: [45, 200] },
+    { k: 'luck', label: 'LUCK', dp: 0, dir: 1, lim: 'luck', soft: [-8, 20] },
+    { k: 'shotSize', label: 'SIZE', dp: 2, dir: 1, lim: 'shotSize', soft: [0.35, 2.4] },
+    { k: 'knockback', label: 'KNOCK', dp: 1, dir: 1, lim: 'knockback', soft: [0, 5] },
+    { k: 'critChance', label: 'CRIT', dp: 0, dir: 1, lim: 'critChance', pct: 1, soft: [0, 0.6] },
+    { k: 'critMult', label: 'CRIT X', dp: 1, dir: 1, lim: 'critMult', soft: [1, 5] },
+    { k: 'spread', label: 'SPREAD', dp: 2, dir: 0, lim: 'spread', soft: [0, 1] },
+  ];
+
+  function val(s, r) {
+    const v = s ? s[r.k] : undefined;
+    if (typeof v !== 'number' || !isFinite(v)) return 0;
+    return r.pct ? v * 100 : v;
+  }
+  function fmt(v, dp) {
+    const n = dp ? v.toFixed(dp) : String(Math.round(v));
+    return dp ? n.replace(/\.?0+$/, '') || '0' : n;
+  }
+  Dex.rowText = function (s, r) { return fmt(val(s, r), r.dp) + (r.unit || '') + (r.pct ? '%' : ''); };
+
+  /* A row is capped when the underlying stat has hit the clamp that helps it.
+     Worth saying out loud: a capped stat makes its own pickups dead, and the
+     player has no other way to find that out. */
+  Dex.capped = function (s, r) {
+    const lim = S.LIMITS && S.LIMITS[r.lim];
+    if (!lim || !s) return false;
+    const raw = s[r.lim];
+    if (typeof raw !== 'number' || !isFinite(raw)) return false;
+    const edge = r.invert ? lim[0] : lim[1];
+    const span = Math.abs(lim[1] - lim[0]) || 1;
+    return Math.abs(raw - edge) <= span * 0.001;
+  };
+  /* fraction of the row's readable range, for the bar */
+  Dex.fill = function (s, r) {
+    const range = r.soft || (S.LIMITS && S.LIMITS[r.lim]);
+    if (!range || !s) return 0;
+    const raw = s[r.lim];
+    if (typeof raw !== 'number' || !isFinite(raw)) return 0;
+    let k = (raw - range[0]) / ((range[1] - range[0]) || 1);
+    if (r.invert) k = 1 - k;
+    return k < 0 ? 0 : k > 1 ? 1 : k;
+  };
+
+  /* =========================================================
+     MEASURED DELTAS
+     ========================================================= */
+  /* A snapshot is taken EVERY frame, because the only honest way to report
+     what a pickup gave you is to diff the frame before it against the frame
+     after. So it must cost nothing: a fixed Float64Array indexed by row,
+     ping-ponged by the caller. The first version built a fresh object with
+     computed keys each frame — dictionary-mode, one allocation per frame —
+     and cost ~45% of an idle frame all by itself. */
+  const NROWS = ROWS.length;
+  Dex.newSnapshot = function () { return new Float64Array(NROWS); };
+  Dex.snapshotInto = function (p, out) {
+    const s = p && p.stats;
+    for (let i = 0; i < NROWS; i++) {
+      const v = s ? s[ROWS[i].k] : 0;
+      out[i] = (typeof v === 'number' && isFinite(v)) ? v : 0;
+    }
+    return out;
+  };
+
+  /* Rows that moved, as {row, from, to, good}. `good` is null for a row that
+     has no better direction (spread), so UI can colour it neutrally. This
+     allocates, and is meant to: it runs on a pickup, not on a frame. */
+  Dex.changesInto = function (before, after, out) {
+    out.length = 0;
+    for (let i = 0; i < NROWS; i++) {
+      const r = ROWS[i];
+      const a = r.pct ? before[i] * 100 : before[i];
+      const b = r.pct ? after[i] * 100 : after[i];
+      if (Math.abs(b - a) < 1e-6) continue;
+      out.push({ row: r, from: a, to: b, good: r.dir ? (b - a) * r.dir > 0 : null });
+    }
+    return out;
+  };
+  Dex.deltaText = function (ch) {
+    const d = ch.to - ch.from;
+    const s = fmt(Math.abs(d), ch.row.dp) + (ch.row.pct ? '%' : '');
+    return (d > 0 ? '+' : '-') + s;
+  };
+
+  /* =========================================================
+     EFFECT TEXT
+     Hand-written when the behaviour is code; generated when it is data.
+     ========================================================= */
+  const NAME = {
+    damage: 'damage', shotSpeed: 'shot speed', range: 'range', speed: 'speed',
+    luck: 'luck', shotSize: 'shot size', shotCount: 'shots', spread: 'spread',
+    knockback: 'knockback', critChance: 'crit chance', critMult: 'crit damage',
+  };
+  function pct(m) { return Math.round(Math.abs(m - 1) * 100) + '%'; }
+
+  function fromData(def) {
+    const parts = [];
+    const mul = def.mul, add = def.add;
+    /* fire delay is the one stat the player thinks about upside-down, so it
+       is always reported as rate: mul 0.84 is "+19% fire rate", not a delay. */
+    if (mul && typeof mul.fireDelay === 'number' && mul.fireDelay !== 1) {
+      const rate = 1 / mul.fireDelay;
+      parts.push((rate > 1 ? '+' : '-') + pct(rate) + ' fire rate');
+    }
+    if (add && typeof add.fireDelay === 'number' && add.fireDelay !== 0) {
+      parts.push((add.fireDelay < 0 ? 'faster' : 'slower') + ' by ' +
+        fmt(Math.abs(add.fireDelay), 2) + 's');
+    }
+    for (const k in NAME) {
+      if (add && typeof add[k] === 'number' && add[k] !== 0) {
+        parts.push((add[k] > 0 ? '+' : '-') + fmt(Math.abs(add[k]), 2) +
+          (k === 'critChance' ? '' : ' ') + NAME[k]);
+      }
+      if (mul && typeof mul[k] === 'number' && mul[k] !== 1) {
+        parts.push((mul[k] > 1 ? '+' : '-') + pct(mul[k]) + ' ' + NAME[k]);
+      }
+    }
+    return parts.join(', ');
+  }
+
+  /* Behaviour is authored, because no generator can read a hook. Numbers are
+     generated, because a hand-copied number drifts away from the data the
+     first time the item is balanced. They are separate lines so neither can
+     spoil the other. */
+  Dex.effect = function (def) { return (def && def.effect) || ''; };
+  Dex.statLine = function (def) { return def ? fromData(def) : ''; };
+
+  /* What a card should print, longest-lived first. An item with neither an
+     authored effect nor stat data falls back to its family rule rather than
+     printing nothing — but `described` still reports it as a content gap. */
+  Dex.lines = function (def) {
+    const out = [];
+    const e = Dex.effect(def); if (e) out.push(e);
+    const s = Dex.statLine(def); if (s) out.push(s);
+    if (!out.length) out.push(Dex.rule(def));
+    return out;
+  };
+  Dex.described = function (def) {
+    return !!(def && (def.effect || fromData(def)));
+  };
+
+  /* =========================================================
+     BUILD GROUPING
+     ========================================================= */
+  /* A driver that is no longer installed is dead weight the player cannot
+     see: weaponDriver holds only the newest id. */
+  Dex.dormant = function (p, def) {
+    if (!p || !def || def.archetype !== 'weapon-driver') return false;
+    return (p.mem && p.mem.weaponDriver) !== def.id;
+  };
+
+  /* items grouped by family, in ARCH order, for the pause and death grids */
+  Dex.groups = function (items) {
+    const by = Object.create(null);
+    for (let i = 0; i < (items ? items.length : 0); i++) {
+      const it = items[i]; if (!it) continue;
+      const k = Dex.archKey(it);
+      (by[k] || (by[k] = [])).push(it);
+    }
+    const out = [];
+    for (const k in by) out.push({ key: k, arch: ARCH[k], items: by[k] });
+    out.sort((a, b) => a.arch.order - b.arch.order);
+    return out;
+  };
 })();
 
 
@@ -29848,26 +30294,53 @@ G.Pool = function (factory, reset) {
      which has already been paid for. */
   function drawItemCard(c, d, alpha, rise, cost) {
     if (!d) return;
+    const Dex = G.Itemdex;
     c.globalAlpha = clamp(alpha, 0, 1);
-    const w = 236, tx = 28, textW = w - tx - 8;
-    const lines = wrap(d.desc, 5, textW, 2);
-    const h = 22 + Math.max(1, lines.length) * 9;
+    const w = 260, tx = 30, textW = w - tx - 8;
+    /* What it DOES leads. The flavour line is a bonus and is dropped whole
+       rather than shown truncated — half a sentence of mood is worse than
+       none, and it was cutting off mid-word to make room for itself. */
+    const eff = Dex ? Dex.lines(d) : [d.desc];
+    const lines = [];
+    for (let i = 0; i < eff.length && lines.length < 3; i++)
+      wrap(eff[i], 5, textW, 3 - lines.length).forEach(l => lines.push({ s: l, dim: false }));
+    if (lines.length <= 2 && d.desc) {
+      const fl = wrap('" ' + d.desc, 5, textW, 1);
+      if (fl.length === 1 && fl[0].indexOf('...') < 0) lines.push({ s: fl[0], dim: true });
+    }
+    /* an active is useless if you do not know it needs charging, so the tag
+       gets a line of its own instead of landing on the last one */
+    const charge = (d.tag === 'active' && d.charge) ? 'E  /  ' + d.charge + ' ROOMS' : '';
+    const h = 24 + Math.max(1, lines.length) * 9 + (charge ? 9 : 0);
     const x = (G.VW - w) / 2, y = G.VH - 18 - h + rise;
-    c.fillStyle = 'rgba(4,10,8,.88)';
+    c.fillStyle = 'rgba(4,10,8,.90)';
     rr(c, x, y, w, h, 4);
     c.strokeStyle = d.color || acc();
     c.strokeRect(x + 0.5, y + 0.5, w - 1, h - 1);
-    if (d.icon) { c.save(); c.translate(x + 6, y + 8); try { d.icon(c, 16, 16); } catch (e) { } c.restore(); }
-    else { c.fillStyle = d.color || acc(); rr(c, x + 8, y + 10, 12, 12, 2); }
-    /* the cost tag claims the top-right corner, so trim the name to what is
-       left rather than letting the two overlap */
-    const costW = cost ? tw(cost, 5) + 6 : 0;
+    if (UI.itemTile) UI.itemTile(c, d, x + 7, y + 9, 16, { bg: false });
+    else if (d.icon) { c.save(); c.translate(x + 7, y + 9); try { d.icon(c, 16, 16); } catch (e) { } c.restore(); }
+
+    /* the badge names the family, the cost tag claims the corner, and the
+       item name takes whatever is left */
+    const badge = Dex ? Dex.badge(d) : '';
+    const bw = badge ? tw(badge, 5) + 6 : 0;
+    const costW = cost ? tw(cost, 5) + 8 : 0;
     let nm = (d.name || d.id || '???').toUpperCase();
-    while (nm.length > 3 && tw(nm, 7) > textW - costW) nm = nm.slice(0, -1);
-    txt(c, nm, x + tx, y + 6, { size: 7, color: d.color || accLt() });
-    if (cost) txt(c, cost, x + w - 6, y + 7, { size: 5, color: '#ffd24a', align: 'right' });
+    while (nm.length > 3 && tw(nm, 7) > textW - costW - bw - 4) nm = nm.slice(0, -1);
+    txt(c, nm, x + tx, y + 5, { size: 7, color: d.color || accLt() });
+    if (badge) {
+      const bx = x + tx + tw(nm, 7) + 4;
+      c.fillStyle = 'rgba(255,255,255,.11)'; c.fillRect(bx | 0, (y + 6) | 0, bw, 8);
+      txt(c, badge, bx + 3, y + 7, { size: 5, color: 'rgba(220,245,235,.8)' });
+    }
+    if (cost) txt(c, cost, x + w - 6, y + 6, { size: 5, color: '#ffd24a', align: 'right' });
     for (let li = 0; li < lines.length; li++) {
-      txt(c, lines[li], x + tx, y + 17 + li * 9, { size: 5, color: 'rgba(200,230,220,.72)' });
+      txt(c, lines[li].s, x + tx, y + 17 + li * 9,
+        { size: 5, color: lines[li].dim ? 'rgba(160,200,190,.5)' : 'rgba(210,240,230,.85)' });
+    }
+    if (charge) {
+      txt(c, charge, x + w - 6, y + 17 + lines.length * 9,
+        { size: 5, align: 'right', color: 'rgba(190,225,215,.5)' });
     }
     c.globalAlpha = 1;
   }
@@ -30310,10 +30783,8 @@ G.Pool = function (factory, reset) {
       for (let i = 0; i < Math.min(passives.length, maxIcons); i++) {
         const it = passives[i];
         const ix = 268 + i * 14, iy = 40;
-        c.fillStyle = 'rgba(0,0,0,.4)';
-        rr(c, ix - 1, iy - 1, 13, 13, 2);
-        if (it.icon) { c.save(); c.translate(ix - 1, iy - 1); c.scale(12 / 16, 12 / 16); try { it.icon(c, 16, 16); } catch (e) { } c.restore(); }
-        else { c.fillStyle = it.color || accent; rr(c, ix + 1, iy + 1, 9, 9, 2); }
+        if (UI.itemTile) UI.itemTile(c, it, ix, iy, 12, { dim: G.Itemdex.dormant(p, it) });
+        else if (it.icon) { c.save(); c.translate(ix, iy); c.scale(12 / 16, 12 / 16); try { it.icon(c, 16, 16); } catch (e) { } c.restore(); }
       }
       if (passives.length > maxIcons) {
         txt(c, '+' + (passives.length - maxIcons), 268 + maxIcons * 14, 43, { size: 5, color: 'rgba(200,230,220,.6)' });
@@ -30476,7 +30947,9 @@ G.Pool = function (factory, reset) {
 
       /* ---- scale cells to fill the panel, leaving room for the key ---- */
       const KEYW = 96;
-      const availW = G.VW - 28 - KEYW, availH = G.VH - 120;
+      /* the build panel below the grid is inspectable now, so it needs real
+         height — the map gives it back rather than overlapping it */
+      const availW = G.VW - 28 - KEYW, availH = G.VH - 152;
       const GAP = 3;
       let CW = Math.floor(availW / cols) - GAP;
       let CH = Math.floor(availH / rows) - GAP;
@@ -30524,9 +30997,14 @@ G.Pool = function (factory, reset) {
       }
 
       /* ---- the key (REFERENCE 4.1) ---- */
-      UI.drawMapKey(c, G.VW - KEYW - 6, 44, present);
+      const keyH = UI.drawMapKey(c, G.VW - KEYW - 6, 44, present) || 0;
+      /* the legend for the item marks, directly under the room-type key */
+      if (UI.drawFamilyKey) {
+        const fy = 44 + keyH + 6;
+        UI.drawFamilyKey(c, G.VW - KEYW - 6, fy, G.Game && G.Game.player, 92, G.VH - 88 - fy);
+      }
       /* ---- what you are actually holding ---- */
-      UI.drawBuildStrip(c, G.Game && G.Game.player, 10, G.VH - 56, G.VW - 20);
+      UI.drawBuildStrip(c, G.Game && G.Game.player, 10, G.VH - 84, G.VW - 20);
     },
 
     /* The build is the run. The HUD only has room for nine icons, so the
@@ -30534,50 +31012,35 @@ G.Pool = function (factory, reset) {
        collection and its live combinations belong. */
     drawBuildStrip(c, p, x, y, w) {
       if (!p || !p.items) return;
-      const items = p.items;
-      c.fillStyle = 'rgba(2,7,10,.8)';
-      rr(c, x, y, w, 38, 3);
-      c.strokeStyle = 'rgba(150,230,210,.22)';
-      c.strokeRect(x + 0.5, y + 0.5, w - 1, 37);
-
-      txt(c, 'BUILD', x + 6, y + 4, { size: 5, color: acc() });
-      txt(c, items.length + ' items', x + 6, y + 14, { size: 5, color: 'rgba(200,230,220,.55)' });
-
-      const IW = 13, ix0 = x + 46, maxN = Math.floor((w - 56) / IW);
-      for (let i = 0; i < Math.min(items.length, maxN); i++) {
-        const it = items[i]; if (!it) continue;
-        const ix = ix0 + i * IW, iy = y + 4;
-        c.fillStyle = 'rgba(255,255,255,.05)';
-        rr(c, ix - 1, iy - 1, 13, 13, 2);
-        if (it.icon) {
-          c.save(); c.translate(ix - 1, iy - 1); c.scale(12 / 16, 12 / 16);
-          try { it.icon(c, 16, 16); } catch (e) { }
-          c.restore();
-        } else { c.fillStyle = it.color || acc(); rr(c, ix + 1, iy + 1, 9, 9, 2); }
-      }
-      if (items.length > maxN) {
-        txt(c, '+' + (items.length - maxN), ix0 + maxN * IW + 2, y + 6, { size: 5, color: 'rgba(200,230,220,.6)' });
-      }
+      const H = 68;
+      /* the grid, the families and the inspected item all come from 610 so
+         this reads identically to the pause and death screens */
+      UI.drawBuildPanel(c, p, x, y, w, H - 12, { title: 'BUILD' });
 
       /* live combinations, named */
       const syn = activeSynergies();
+      const sy = y + H - 10, ix0 = x + 52;
+      txt(c, 'STACKS', x + 6, sy, { size: 5, color: '#ff6ad0' });
+      txt(c, 'LEFT / RIGHT INSPECT', x + w - 6, sy,
+        { size: 5, align: 'right', color: 'rgba(190,225,215,.45)' });
       if (!syn.length) {
-        txt(c, 'no combinations live', ix0, y + 22, { size: 5, color: 'rgba(200,230,220,.35)' });
+        txt(c, 'no combinations live', ix0, sy, { size: 5, color: 'rgba(200,230,220,.35)' });
         return;
       }
       let sx = ix0;
-      const room = x + w - 8;
-      txt(c, 'STACKS', x + 6, y + 24, { size: 5, color: '#ff6ad0' });
+      /* the inspect hint owns the right end of this line, so the chips stop
+         short of it rather than running underneath */
+      const room = x + w - 14 - tw('LEFT / RIGHT INSPECT', 5);
       for (let i = 0; i < syn.length; i++) {
         const t = synTitle(syn[i]);
         const tWidth = tw(t, 5) + 10;
         if (sx + tWidth > room) {
-          txt(c, '+' + (syn.length - i), sx, y + 22, { size: 5, color: 'rgba(255,150,220,.7)' });
+          txt(c, '+' + (syn.length - i), sx, sy, { size: 5, color: 'rgba(255,150,220,.7)' });
           break;
         }
         c.fillStyle = 'rgba(255,106,208,.13)';
-        rr(c, sx - 2, y + 21, tWidth, 10, 2);
-        txt(c, t, sx + 2, y + 23, { size: 5, color: '#ffb0e4' });
+        rr(c, sx - 2, sy - 2, tWidth, 10, 2);
+        txt(c, t, sx + 2, sy, { size: 5, color: '#ffb0e4' });
         sx += tWidth + 3;
       }
     },
@@ -30622,6 +31085,8 @@ G.Pool = function (factory, reset) {
           txt(c, typeLabel(name, 58) || T.label, x + 25, ry + 1, { size: 5, color: tc });
         }
       }
+      /* the caller stacks the family key under this one */
+      return h;
     },
 
     /* =================== OVERLAYS =================== */
@@ -30826,6 +31291,440 @@ G.Pool = function (factory, reset) {
     const m = (t / 60) | 0, s = t % 60;
     return m + ':' + (s < 10 ? '0' : '') + s;
   }
+})();
+
+
+/* ===== 610_ui_marks.js ===== */
+/* ============================================================
+   BIND69 — UI: THE ITEM MARKS                          (owner: UI)
+
+   The visual language: an item's FAMILY drawn as a frame AROUND its icon
+   rather than into it. All 171 sprites stay untouched, and a family reads
+   the same on a pedestal, in the HUD strip, in a build grid and on the
+   death screen because every one of them calls itemTile.
+
+   Frames are pure fillRect at the tile's own scale — no rotation, no
+   curves, nothing that stops being legible at 12px. drawFamilyKey is the
+   legend that names them.
+   ============================================================ */
+(function () {
+  const UI = G.UI, Dex = G.Itemdex, R = G.Render;
+  const FX = G.Combat.FX;
+
+  function txt(c, s, x, y, o) { FX.text(c, s, x, y, o); }
+  function acc() { const t = R && R.theme && R.theme(); return (t && t.accent) || '#4af0b0'; }
+  function px(c, x, y, w, h) { c.fillRect(x | 0, y | 0, Math.max(1, w | 0), Math.max(1, h | 0)); }
+
+  /* =========================================================
+     FAMILY FRAMES
+     Each draws into a box of side `s` whose top-left is (x, y). Units are
+     sixteenths of the tile so a 12px HUD tile and a 16px grid tile carry
+     the same mark.
+     ========================================================= */
+  const FRAME = {
+    none() { },
+    /* shot — two chevrons on the trailing edge: the packet changed */
+    chevron(c, x, y, s, u) {
+      for (let i = 0; i < 2; i++) {
+        const bx = x + s - u * 2.5 + i * u * 1.6;
+        px(c, bx, y + u * 5, u, u * 2);
+        px(c, bx + u, y + u * 6.5, u, u * 3);
+        px(c, bx, y + u * 9, u, u * 2);
+      }
+    },
+    /* active — a keycap: something you press */
+    keycap(c, x, y, s, u) {
+      px(c, x, y, s, u); px(c, x, y + s - u, s, u);
+      px(c, x, y, u, u * 2); px(c, x + s - u, y, u, u * 2);
+      px(c, x, y + s - u * 2, u, u * 2); px(c, x + s - u, y + s - u * 2, u, u * 2);
+    },
+    /* familiar — a companion in orbit, actually orbiting */
+    orbit(c, x, y, s, u) {
+      const a = G.time * 2.2;
+      px(c, x + s / 2 + Math.cos(a) * (s / 2 + u), y + s / 2 + Math.sin(a) * (s / 2 + u) - u, u * 1.5, u * 1.5);
+      px(c, x + s / 2 + Math.cos(a + Math.PI) * (s / 2 + u), y + s / 2 + Math.sin(a + Math.PI) * (s / 2 + u) - u, u, u);
+    },
+    /* trinket — a plinth: small, permanent, sits under everything */
+    small(c, x, y, s, u) { px(c, x + u * 4, y + s - u, u * 8, u); },
+    /* weapon driver — a barrel out the front: this IS your gun now */
+    barrel(c, x, y, s, u) {
+      px(c, x + s - u, y + s / 2 - u, u * 3, u * 2);
+      px(c, x - u * 2, y + s / 2 - u * 2, u, u * 4);
+    },
+    /* deployable / node — feet on the ground: it stays where you put it */
+    ground(c, x, y, s, u) {
+      px(c, x, y + s, s, u);
+      px(c, x + u * 2, y + s + u, u, u * 1.5);
+      px(c, x + s - u * 3, y + s + u, u, u * 1.5);
+    },
+    /* attachment — a barb: it goes into something else */
+    barb(c, x, y, s, u) {
+      px(c, x + s - u, y - u * 2, u, u * 4);
+      px(c, x + s - u * 2.5, y - u * 2, u * 2, u);
+      px(c, x + s - u, y + u * 2, u * 2, u);
+    },
+    /* trigger — a bolt: it waits, then fires */
+    bolt(c, x, y, s, u) {
+      px(c, x + s - u * 2, y - u * 2, u, u * 2);
+      px(c, x + s - u * 3, y, u * 3, u);
+      px(c, x + s - u * 2, y + u, u, u * 2);
+    },
+    /* ward — a bracket that closes around you */
+    shield(c, x, y, s, u) {
+      px(c, x - u * 2, y + u, u, s - u * 2);
+      px(c, x - u * 2, y + u, u * 2.5, u);
+      px(c, x - u * 2, y + s - u * 2, u * 2.5, u);
+    },
+    /* ammo — rounds in a magazine, down the edge */
+    magazine(c, x, y, s, u) {
+      for (let i = 0; i < 3; i++) px(c, x + s + u * 0.5, y + u * 2 + i * u * 4, u * 1.5, u * 2.5);
+    },
+    /* pact — horns. The cost is the point. */
+    horns(c, x, y, s, u) {
+      px(c, x, y - u * 3, u, u * 3); px(c, x + u, y - u * 2, u, u);
+      px(c, x + s - u, y - u * 3, u, u * 3); px(c, x + s - u * 2, y - u * 2, u, u);
+    },
+    /* blessing — a halo */
+    halo(c, x, y, s, u) {
+      px(c, x + u * 3, y - u * 3, s - u * 6, u);
+      px(c, x + u * 2, y - u * 2, u, u); px(c, x + s - u * 3, y - u * 2, u, u);
+    },
+  };
+
+  /* exposed so a gate can prove every ARCH frame token has an implementation:
+     a typo here is a silently missing mark, not an error */
+  UI.frameNames = Object.keys(FRAME);
+
+  /* lighten() parses and reformats a hex string, and the HUD strip asks for
+     the same nine colours on every frame of the run. There are ~170 item
+     colours in total, so the cache is bounded by the catalogue. */
+  const litCache = Object.create(null);
+  function lit(col) {
+    let v = litCache[col];
+    if (v === undefined) v = litCache[col] = G.Stats.lighten ? G.Stats.lighten(col, 0.55) : col;
+    return v;
+  }
+
+  /* An icon in its family frame. `dim` greys a driver that is installed no
+     longer — the one build state the player could previously never see. */
+  UI.itemTile = function (c, def, x, y, s, o) {
+    if (!def) return;
+    o = o || {};
+    s = s || 16;
+    const u = Math.max(1, Math.round(s / 16));
+    const key = Dex.archKey(def);
+    const col = o.color || def.color || acc();
+    const dim = o.dim;
+
+    if (o.bg !== false) {
+      c.fillStyle = o.sel ? 'rgba(255,255,255,.16)' : 'rgba(255,255,255,.05)';
+      px(c, x - 1, y - 1, s + 2, s + 2);
+    }
+    c.save();
+    if (dim) c.globalAlpha = 0.32;
+    /* trinkets draw smaller inside the same cell, which is the size cue
+       Isaac uses and costs no extra space in a grid */
+    const inner = key === 'trinket' ? s * 0.74 : s;
+    const pad = (s - inner) / 2;
+    if (def.icon) {
+      c.save();
+      c.translate(x + pad, y + pad);
+      c.scale(inner / 16, inner / 16);
+      try { def.icon(c, 16, 16); } catch (e) { }
+      c.restore();
+    } else {
+      c.fillStyle = col;
+      px(c, x + pad + 2, y + pad + 2, inner - 4, inner - 4);
+    }
+    /* the frame carries meaning in its SHAPE, so it is lightened away from
+       the item colour: on a pedestal the icon sits inside a glow of its own
+       colour, and an unlightened frame disappeared into it */
+    c.fillStyle = o.frameColor || lit(col);
+    (FRAME[Dex.ARCH[key].frame] || FRAME.none)(c, x, y, s, u);
+    c.restore();
+    if (dim && o.mark !== false) {
+      c.fillStyle = '#ff6a8a';
+      px(c, x + s - u * 4, y + s - u * 3, u * 4, u * 2);
+    }
+  };
+
+  /* =========================================================
+     FAMILY KEY — the legend for the frames
+     A frame is a private language until something names it. This lists only
+     the families the player is actually carrying, the way the map key lists
+     only the room types this floor contains, so it stays short and every
+     line is one the player has a reason to read. Returns its own height.
+     ========================================================= */
+  UI.drawFamilyKey = function (c, x, y, p, w, maxH) {
+    const groups = Dex.groups((p && p.items) || []);
+    if (!groups.length) return 0;
+    w = w || 92;
+    /* a late run can hold all fourteen families, which is taller than the
+       column: keep ARCH order (so a family never moves once learned) and
+       tally the overflow instead of scrolling or reordering */
+    const ROW = 15;
+    let n = groups.length;
+    if (maxH) n = Math.max(1, Math.min(n, Math.floor((maxH - 14 - 9) / ROW)));
+    const more = groups.length - n;
+    const h = 14 + n * ROW + (more > 0 ? 9 : 0);
+    c.fillStyle = 'rgba(2,7,10,.85)';
+    c.fillRect(x, y, w, h);
+    c.strokeStyle = 'rgba(150,230,210,.28)';
+    c.strokeRect(x + 0.5, y + 0.5, w - 1, h - 1);
+    txt(c, 'MARKS', x + 8, y + 5, { size: 5, color: acc() });
+    if (more > 0) {
+      txt(c, '+' + more + ' MORE', x + w - 7, y + 15 + n * ROW,
+        { size: 5, align: 'right', color: 'rgba(190,225,215,.45)' });
+    }
+    for (let i = 0; i < n; i++) {
+      const gr = groups[i], ry = y + 15 + i * ROW;
+      /* a real item from the group, so the mark is shown exactly as it is
+         drawn everywhere else rather than as a special-cased sample */
+      UI.itemTile(c, gr.items[0], x + 10, ry, 12, { bg: false });
+      txt(c, gr.arch.badge, x + 30, ry + 3, { size: 5, color: 'rgba(220,240,235,.8)' });
+      txt(c, String(gr.items.length), x + w - 7, ry + 3,
+        { size: 5, align: 'right', color: 'rgba(190,225,215,.45)' });
+    }
+    return h;
+  };
+
+})();
+
+
+/* ===== 611_ui_build.js ===== */
+/* ============================================================
+   BIND69 — UI: THE BUILD READOUTS                      (owner: UI)
+
+   What the player is carrying and what it did to their numbers, drawn the
+   same way wherever it is asked for — the HUD toggle, the pause screen,
+   the map and the death dump all call these:
+
+     drawStatPanel   stats as bars, with CAP and the measured pickup delta
+     drawBuildPanel  the whole collection grouped by family, one inspected
+     drawInspectLine the inspected item: its mark, its family, what it does
+
+   The delta is measured, never declared: recompute compresses fireDelay
+   near its floor and taxes damage penalties, so the only honest number is
+   the difference between the frame before a pickup and the frame after.
+   ============================================================ */
+(function () {
+  const UI = G.UI, Dex = G.Itemdex, R = G.Render;
+  const FX = G.Combat.FX;
+
+  function txt(c, s, x, y, o) { FX.text(c, s, x, y, o); }
+  function tw(s, size) { return FX.textWidth(s, size); }
+  function acc() { const t = R && R.theme && R.theme(); return (t && t.accent) || '#4af0b0'; }
+  function px(c, x, y, w, h) { c.fillRect(x | 0, y | 0, Math.max(1, w | 0), Math.max(1, h | 0)); }
+  const clamp = G.clamp;
+
+  /* =========================================================
+     STAT PANEL
+     ========================================================= */
+  /* two fixed buffers, swapped each frame: prevSnap is always the frame
+     before curSnap, and neither is ever reallocated */
+  let prevSnap = Dex.newSnapshot(), curSnap = Dex.newSnapshot(), havePrev = false;
+  let flash = null, flashT = 0, seenItems = -1, seenRun = null;
+  let pinned = false, wasDown = false;
+
+  function statsUpdate(dt) {
+    const g = G.Game, p = g && g.player, run = g && g.run;
+    /* own edge detection: this runs from UI.update, which is not guaranteed
+       to see G.input.pressed before the state machine clears it */
+    const down = !!(G.input && G.input.down && G.input.down.stats);
+    if (down && !wasDown) { pinned = !pinned; FX.snd('uiMove', { vol: 0.4 }); }
+    wasDown = down;
+
+    if (!p || !run) { havePrev = false; seenItems = -1; return; }
+    if (run !== seenRun) { seenRun = run; havePrev = false; seenItems = -1; flash = null; flashT = 0; }
+    if (flashT > 0) flashT -= dt;
+
+    Dex.snapshotInto(p, curSnap);
+    if (seenItems !== p.items.length) {
+      /* prevSnap is last frame's stats, so on the frame a pickup lands it is
+         exactly the pre-pickup state — and it is MEASURED, which is the only
+         way to report what the compression in recompute actually allowed */
+      if (havePrev && seenItems >= 0) {
+        const ch = Dex.changesInto(prevSnap, curSnap, []);
+        if (ch.length) { flash = ch; flashT = 3.4; }
+      }
+      seenItems = p.items.length;
+    }
+    const t = prevSnap; prevSnap = curSnap; curSnap = t;
+    havePrev = true;
+  }
+
+  UI.statsPinned = function () { return pinned; };
+  UI.statsRevealing = function () { return flashT > 0; };
+  UI.statChanges = function () { return flashT > 0 ? flash : null; };
+
+  function changeFor(row) {
+    if (flashT <= 0 || !flash) return null;
+    for (let i = 0; i < flash.length; i++) if (flash[i].row === row) return flash[i];
+    return null;
+  }
+
+  UI.statPanelHeight = function (all) {
+    return 8 + (all ? Dex.ROWS.length : 7) * 9;
+  };
+
+  /* Bars are drawn against LIMITS, not against an arbitrary maximum, so a
+     full bar means the same thing as the CAP tag: more of this stat is a
+     dead pickup. That is a decision the player cannot otherwise make. */
+  UI.drawStatPanel = function (c, p, x, y, w, o) {
+    o = o || {};
+    if (!p || !p.stats) return;
+    const rows = o.all ? Dex.ROWS : Dex.ROWS.slice(0, 7);
+    const h = UI.statPanelHeight(o.all);
+    /* the death screen is red end to end; a panel that kept the floor accent
+       read as a leftover from the run rather than part of the dump */
+    const a = o.accent || acc();
+    if (o.panel !== false && R && R.panel) R.panel(c, x, y, w, h, { color: a, title: o.title || 'STATS' });
+
+    /* four fixed columns — label, value, bar, delta. The delta keeps its own
+       column instead of overprinting the bar, so a row stays readable in the
+       three seconds it actually matters. */
+    /* a screen with no pickup behind it (the death dump) has no deltas to
+       show, so it gets the column back as bar */
+    const labelW = 44, valW = 30, deltaW = o.delta === false ? 0 : 34;
+    const barX = x + 6 + labelW + valW;
+    const barW = Math.max(8, w - 12 - labelW - valW - deltaW);
+    const deltaR = x + w - 6;
+    for (let i = 0; i < rows.length; i++) {
+      const r = rows[i], ry = y + 5 + i * 9;
+      const ch = changeFor(r);
+      const capped = r.dir && Dex.capped(p.stats, r);
+      txt(c, r.label, x + 6, ry, { size: 5, color: ch ? '#ffffff' : 'rgba(190,225,215,.62)' });
+      txt(c, Dex.rowText(p.stats, r), x + 6 + labelW + valW - 2, ry,
+        { size: 5, align: 'right', color: capped ? '#ffd24a' : ch ? '#ffffff' : 'rgba(225,245,238,.9)' });
+
+      const k = Dex.fill(p.stats, r);
+      c.fillStyle = 'rgba(0,0,0,.5)'; px(c, barX, ry + 1, barW, 4);
+      c.fillStyle = capped ? '#ffd24a' : ch ? (ch.good === false ? '#ff5a6e' : '#ffffff') : a;
+      px(c, barX, ry + 1, barW * k, 4);
+
+      if (ch && deltaW) {
+        txt(c, Dex.deltaText(ch), deltaR, ry, {
+          size: 5, align: 'right',
+          color: ch.good === null ? '#cfe0ea' : ch.good ? '#8ef05a' : '#ff5a6e',
+        });
+      } else if (capped) {
+        /* CAP may have to sit on the bar when there is no delta column, so
+           it carries its own backing rather than becoming unreadable */
+        const cw = tw('CAP', 5) + 4;
+        c.fillStyle = 'rgba(0,0,0,.72)'; px(c, deltaR - cw, ry, cw, 7);
+        txt(c, 'CAP', deltaR - 2, ry, { size: 5, align: 'right', color: '#ffd24a' });
+      }
+    }
+  };
+
+  /* =========================================================
+     BUILD PANEL — every item, grouped, one inspected
+     ========================================================= */
+  let cursor = 0;
+  UI.inspectMove = function (d) { cursor += d; FX.snd('uiMove', { vol: 0.35 }); };
+  UI.inspectReset = function () { cursor = 0; };
+
+  /* flat order matches the grid draw order, so the cursor and the tiles
+     agree without either owning the layout */
+  function flatten(items) {
+    const groups = Dex.groups(items);
+    const out = [];
+    for (let i = 0; i < groups.length; i++)
+      for (let j = 0; j < groups[i].items.length; j++) out.push(groups[i].items[j]);
+    return out;
+  }
+
+  UI.drawBuildPanel = function (c, p, x, y, w, h, o) {
+    o = o || {};
+    const items = (p && p.items) || [];
+    const a = o.accent || acc();
+    if (o.panel !== false && R && R.panel)
+      R.panel(c, x, y, w, h, { color: a, title: (o.title || 'BUILD') + '  ' + items.length });
+
+    if (!items.length) {
+      txt(c, 'NO PROGRAMS ACQUIRED', x + w / 2, y + h / 2 - 3,
+        { size: 5, align: 'center', color: 'rgba(190,225,215,.45)' });
+      return;
+    }
+
+    const flat = flatten(items);
+    cursor = ((cursor % flat.length) + flat.length) % flat.length;
+    const sel = o.inspect === false ? null : flat[cursor];
+
+    /* the inspected card claims the bottom two lines; the grid gets the rest */
+    const cardH = o.inspect === false ? 0 : 20;
+    const gridH = h - 8 - cardH;
+    const S = 16, PITCH = 19;
+    const perRow = Math.max(1, Math.floor((w - 12) / PITCH));
+    const maxRows = Math.max(1, Math.floor(gridH / (PITCH + 1)));
+    const shown = Math.min(flat.length, perRow * maxRows);
+
+    for (let i = 0; i < shown; i++) {
+      const it = flat[i];
+      const tx = x + 6 + (i % perRow) * PITCH;
+      const ty = y + 6 + ((i / perRow) | 0) * (PITCH + 1);
+      UI.itemTile(c, it, tx, ty, S, { sel: it === sel, dim: Dex.dormant(p, it) });
+      if (it === sel) {
+        c.fillStyle = a;
+        px(c, tx - 2, ty - 2, 3, 1); px(c, tx - 2, ty - 2, 1, 3);
+        px(c, tx + S - 1, ty - 2, 3, 1); px(c, tx + S + 1, ty - 2, 1, 3);
+        px(c, tx - 2, ty + S + 1, 3, 1); px(c, tx - 2, ty + S - 1, 1, 3);
+        px(c, tx + S - 1, ty + S + 1, 3, 1); px(c, tx + S + 1, ty + S - 1, 1, 3);
+      }
+    }
+    if (flat.length > shown) {
+      txt(c, '+' + (flat.length - shown), x + w - 8, y + h - cardH - 12,
+        { size: 5, align: 'right', color: 'rgba(190,225,215,.6)' });
+    }
+
+    if (sel) UI.drawInspectLine(c, p, sel, x + 6, y + h - cardH - 2, w - 12);
+  };
+
+  /* The inspected item, blown up: its own tile, then the family badge, then
+     the name, then what it does. The tile sits beside the badge on purpose —
+     that adjacency is the only place the player is ever told which frame
+     means which word, and it is repeated on every screen this card appears
+     on until the mapping is learned. */
+  UI.drawInspectLine = function (c, p, def, x, y, w) {
+    const arch = Dex.archOf(def);
+    UI.itemTile(c, def, x + 1, y + 1, 16, { bg: false });
+    const tx = x + 22;
+    const bw = tw(arch.badge, 5) + 6;
+    c.fillStyle = 'rgba(255,255,255,.10)'; px(c, tx, y, bw, 8);
+    txt(c, arch.badge, tx + 3, y + 1, { size: 5, color: def.color || acc() });
+    let nm = String(def.name || def.id).toUpperCase();
+    const room = w - (tx - x) - bw - 10;
+    while (nm.length > 3 && tw(nm, 6) > room) nm = nm.slice(0, -1);
+    txt(c, nm, tx + bw + 5, y + 1, { size: 6, color: '#e9fff5' });
+    if (Dex.dormant(p, def)) {
+      txt(c, 'NOT INSTALLED', x + w, y + 1, { size: 5, align: 'right', color: '#ff6a8a' });
+    }
+    let s = Dex.lines(def).join('  -  ');
+    const lw = w - 22;
+    while (s.length > 4 && tw(s, 5) > lw) s = s.slice(0, -1);
+    txt(c, s, tx, y + 11, { size: 5, color: 'rgba(210,240,230,.82)' });
+  };
+
+  /* =========================================================
+     WIRING — decorate rather than edit, so 600_ui.js stays owned by
+     its own author and this file can be removed in one piece.
+     ========================================================= */
+  const origUpdate = UI.update;
+  UI.update = function (dt) { origUpdate.call(this, dt); statsUpdate(dt); };
+
+  const origHUD = UI.drawHUD;
+  UI.drawHUD = function (c, game) {
+    origHUD.call(this, c, game);
+    /* pause and map draw the room (and therefore the HUD) underneath their
+       own panels, and two stat readouts on one screen is worse than none */
+    if (G.stateName !== 'play') return;
+    if (!pinned && flashT <= 0) return;
+    const p = game && game.player; if (!p) return;
+    const w = 190, x = G.VW - w - 4, y = G.ROOM_Y + 4;
+    c.globalAlpha = pinned ? 0.94 : clamp(flashT / 0.5, 0, 1) * 0.94;
+    UI.drawStatPanel(c, p, x, y, w, { all: pinned });
+    c.globalAlpha = 1;
+  };
 })();
 
 
@@ -32333,11 +33232,18 @@ G.Pool = function (factory, reset) {
     c.fillStyle = def.color || '#4af0b0';
     c.beginPath(); c.arc(pd.x, pd.y - 18 + bob, 14, 0, TAU); c.fill();
     c.restore();
-    c.save();
-    c.translate(pd.x - 8, pd.y - 26 + bob);
-    if (def.icon) { try { def.icon(c, 16, 16); } catch (e) { fallbackIcon(c, def); } }
-    else fallbackIcon(c, def);
-    c.restore();
+    /* the family frame goes on the pedestal too: what KIND of thing this is
+       is the one thing worth knowing before you walk into it, and a pedestal
+       grabs on contact so there is no second chance to look */
+    if (G.UI && G.UI.itemTile) {
+      G.UI.itemTile(c, def, pd.x - 8, pd.y - 26 + bob, 16, { bg: false });
+    } else {
+      c.save();
+      c.translate(pd.x - 8, pd.y - 26 + bob);
+      if (def.icon) { try { def.icon(c, 16, 16); } catch (e) { fallbackIcon(c, def); } }
+      else fallbackIcon(c, def);
+      c.restore();
+    }
     if (pd.price > 0 && G.UI && G.UI.drawPrice) {
       G.UI.drawPrice(c, pd.x, pd.y + 10, pd.price, Game.run.coins >= pd.price);
     }
@@ -32598,6 +33504,13 @@ G.Pool = function (factory, reset) {
     update(dt) {
       globalKeys();
       const pr = G.input.pressed;
+      /* the map is where a run gets planned, so the build panel on it is
+         inspectable: left/right walk the collection one item at a time */
+      const U = G.UI;
+      if (U && U.inspectMove) {
+        if (pr.left || pr.fleft) U.inspectMove(-1);
+        if (pr.right || pr.fright) U.inspectMove(1);
+      }
       if (pr.map || pr.pause || pr.confirm || pr.back) { FX.snd('uiBack', { vol: 0.5 }); G.setState('play'); }
     },
     render(c) {
