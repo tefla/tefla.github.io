@@ -8904,9 +8904,17 @@ G.Pool = function (factory, reset) {
 
   /* returns an icon(c,w,h) that lazily bakes then blits */
   function mkIcon(rows, pal) {
-    let cv = null;
+    let cv = null, failed = false;
     return function (c) {
-      if (!cv) { try { cv = bakePx(rows, pal); } catch (e) { return; } }
+      /* A silent `return` here turned a broken sprite into a blank square that
+         never reached any of the five catch sites in 600_ui.js, and retried the
+         failing bake on every single frame. Report it once, loudly enough for a
+         gate to see, then stop trying. */
+      if (failed) return;
+      if (!cv) {
+        try { cv = bakePx(rows, pal); }
+        catch (e) { failed = true; console.error('item icon bake threw', e); return; }
+      }
       c.drawImage(cv, 0, 0);
     };
   }
@@ -18290,13 +18298,31 @@ G.Pool = function (factory, reset) {
 
   /* --- 17. bitrot — rots the floor into spikes behind it ---
      Question: "how long can you keep using this room?"             */
+  /* Four speckles inside the hull left this byte-identical to nullptr's slab
+     (0.997 IoU on the normalised mask) — the whole roster's worst collision.
+     It keeps the phantom, because a decaying process IS a slab being eaten,
+     but the eating is now in the OUTLINE: the body stops at the waist and what
+     hangs below it is a skirt far wider than the body, dropping in three
+     separate fangs. Narrow tower on a wide dripping base — nothing else in the
+     roster, and least of all nullptr, has that profile. */
   E('bitrot', {
     archetype: 'phantom', r: 12, color: '#a8c020', eye: '#1a2000', telegraph: 'zone',
     extra(x, S) {
-      const r = S.r;
-      for (let i = 0; i < 4; i++) {
-        const a = S.rng() * TAU, d = S.rng() * r * 0.8;
-        pr(x, S.cx + Math.cos(a) * d - 1, S.cy + Math.sin(a) * d - 1, 3, 3, S.p.out);
+      const r = S.r, cut = S.cy + r * 0.52;
+      x.globalCompositeOperation = 'destination-out';
+      /* a bite out of one shoulder: the hull itself is going */
+      pr(x, S.cx + r * 0.18, S.cy - r * 0.95, r * 0.46, r * 0.44, '#000');
+      /* everything below the waist has already rotted off */
+      pr(x, 0, cut, S.w, S.h, '#000');
+      x.globalCompositeOperation = 'source-over';
+      /* the rot itself: a wide shelf and three hanging fangs with real
+         daylight between them */
+      pr(x, S.cx - r * 1.14, cut - r * 0.30, r * 2.28, r * 0.40, S.p.dk);
+      const len = [1.00, 0.62, 0.88];
+      for (let i = 0; i < 3; i++) {
+        const fx = S.cx - r * 1.14 + i * r * 0.95;
+        pr(x, fx, cut + r * 0.06, r * 0.42, r * len[i], S.p.mid);
+        pr(x, fx, cut + r * 0.06 + r * len[i] - 2, r * 0.42, 2, S.p.glow);
       }
     },
   }, {
@@ -18661,10 +18687,23 @@ G.Pool = function (factory, reset) {
 
   /* --- 24. raidmirror — splits into copies; only one is real ---
      Question: "can you work out which one matters?"                */
+  /* It was a phantom at r13, i.e. nullptr's slab again (0.98 IoU), and the
+     "mirror seam" was a 2px highlight INSIDE the hull — invisible in a
+     silhouette. A vstack is a stack of platters, which is what a RAID mirror
+     is, and the seam is now cut clean through the sprite: two columns with
+     daylight between them, offset in height so neither half is the other's
+     translation. That is the mechanic drawn as an outline. */
   E('raidmirror', {
-    archetype: 'phantom', r: 13, color: '#c0c8d8', eye: '#202838', telegraph: 'ring',
+    archetype: 'vstack', r: 13, color: '#c0c8d8', eye: '#202838', telegraph: 'ring',
     extra(x, S) {
-      pr(x, S.cx - 1, S.cy - S.r * 1.3, 2, S.r * 2.6, S.p.hi);       /* mirror seam */
+      const r = S.r;
+      /* the mirror split, cut all the way through. The stack's own frames are
+         offset to the right, so the two sides come out of it uneven — a full
+         column on one side, three floating plates on the other — which is the
+         point: the copies are not the original. */
+      x.globalCompositeOperation = 'destination-out';
+      pr(x, S.cx - r * 0.30, 0, r * 0.54, S.h, '#000');
+      x.globalCompositeOperation = 'source-over';
     },
   }, {
     floors: [6, 8], weight: 8, hp: 24, r: 13, speed: 70, contactDmg: 1, mass: 1.2,
@@ -18977,11 +19016,31 @@ G.Pool = function (factory, reset) {
 
   /* --- 31. spectre — charges THROUGH walls ---
      Question: "your cover is not cover."                          */
+  /* It was a phantom at r14: the same plain vertical slab as nullptr (0.97 IoU
+     on the normalised mask), bitrot (0.97) and raidmirror (0.96). Three
+     scanlines across the chest are interior decoration and change no outline,
+     which is exactly why four enemies shipped sharing one shape on floors 7-8.
+     A charger says the mechanic in the outline — an arrowhead points where it
+     is about to go, and this thing's whole read is "it is coming, and the wall
+     will not stop it". The hull is then cut back to a nose and a spine so what
+     you see is only the part that is out of the wall; nothing else in the
+     roster is a wedge with its body missing, and the detached blade riding
+     above the spine cannot be mistaken for scanner's or segfault's solid
+     chevrons. */
   E('spectre', {
-    archetype: 'phantom', r: 14, color: '#6ae0ff', eye: '#04202a', telegraph: 'lance',
+    archetype: 'charger', r: 14, color: '#6ae0ff', eye: '#04202a', telegraph: 'lance',
     extra(x, S) {
       const r = S.r;
-      for (let i = 0; i < 3; i++) pr(x, S.cx - r * 0.6, S.cy - r * 0.9 + i * 7, r * 1.2, 2, S.p.hi);
+      x.globalCompositeOperation = 'destination-out';
+      /* everything behind the leading edge is still inside the wall */
+      pr(x, 0, 0, S.cx - r * 0.28, S.cy - r * 0.24, '#000');
+      pr(x, 0, S.cy + r * 0.24, S.cx - r * 0.28, S.h, '#000');
+      /* a phase bite out of the upper leading face, so the wedge is not symmetric */
+      pr(x, S.cx - r * 0.28, S.cy - r * 0.92, r * 0.52, r * 0.46, '#000');
+      x.globalCompositeOperation = 'source-over';
+      /* the half that is still passing through: a detached blade, not touching
+         the hull, with real daylight under it */
+      pr(x, S.cx - r * 1.30, S.cy - r * 1.00, r * 1.05, r * 0.28, S.p.lt);
     },
   }, {
     floors: [7, 8], weight: 12, hp: 30, speed: 56, contactDmg: 1, mass: 1.6,
@@ -19019,12 +19078,21 @@ G.Pool = function (factory, reset) {
 
   /* --- 32. bitflip — swaps places with you ---
      Question: "where you are standing is not a safe answer."       */
+  /* Two highlight bars inside the hull are not a silhouette: this read as
+     nullptr / bitrot / spectre / raidmirror at 0.86-0.88 IoU. The flip is now
+     the outline — the top half sits a hard step to the left of the bottom
+     half, so the body has a visible offset across its waist and the two halves
+     only just meet. No other actor in the roster is sheared. */
   E('bitflip', {
     archetype: 'phantom', r: 9, color: '#ff8ae0', eye: '#2a0620', telegraph: 'ring',
     extra(x, S) {
-      const r = S.r;
-      pr(x, S.cx - r * 0.7, S.cy - r * 0.5, r * 0.6, 3, S.p.hi);
-      pr(x, S.cx + r * 0.1, S.cy + r * 0.2, r * 0.6, 3, S.p.hi);
+      const r = S.r, W = r * 0.58, H = r * 1.34, sh = r * 0.45;
+      x.globalCompositeOperation = 'destination-out';
+      pr(x, S.cx + W - sh, S.cy - H - 2, sh + 2, H + 2, '#000');   /* top-right off */
+      pr(x, S.cx - W - 2, S.cy, sh + 2, H + 2, '#000');            /* bottom-left off */
+      x.globalCompositeOperation = 'source-over';
+      pr(x, S.cx - W - sh, S.cy - H, sh + 1, H, S.p.mid);          /* top slides left */
+      pr(x, S.cx + W - 1, S.cy, sh + 1, H, S.p.dk);                /* bottom slides right */
     },
   }, {
     floors: [7, 8], weight: 10, hp: 22, speed: 40, contactDmg: 1, mass: 1,
@@ -19161,16 +19229,31 @@ G.Pool = function (factory, reset) {
 
   /* --- 33. etchant — rooted; corrodes the floor outward from itself ---
      Question: "the room is being eaten. how long can you leave it?"  */
+  /* It was a turret at r13 — polld's shape exactly, down to the 8-way barrel.
+     Worse, the barrel was a lie: etchant never sets e.aim and never fires, so
+     it wore a "this line is about to become dangerous" promise it could not
+     keep, frozen pointing east. A mass has no barrel to mislead with, its
+     three-lobed cleft outline is nothing like the turret's smooth trapezoid,
+     and the drips below it point at what it actually does — eat the floor. */
   E('etchant', {
-    archetype: 'turret', r: 13, color: '#b4f04a', eye: '#0a2a00', telegraph: 'zone',
+    archetype: 'mass', r: 13, color: '#b4f04a', eye: '#0a2a00', telegraph: 'zone',
     extra(x, S) {
       const r = S.r;
-      /* dripping nozzles along the base */
-      for (let i = 0; i < 3; i++) {
-        pr(x, S.cx - r * 0.7 + i * r * 0.7 - 1, S.cy + r * 0.45, 3, r * 0.45, S.p.dk);
-        pr(x, S.cx - r * 0.7 + i * r * 0.7 - 1, S.cy + r * 0.9, 3, 3, '#d8ff6a');
+      /* a flared spout on the crown says "this pours" — the one thing a lobed
+         body would otherwise be read as (a splitter, like forkbomb) that this
+         enemy is not */
+      pp(x, [[S.cx - r * 0.20, S.cy - r * 1.05], [S.cx + r * 0.20, S.cy - r * 1.05],
+      [S.cx + r * 0.42, S.cy - r * 1.38], [S.cx - r * 0.42, S.cy - r * 1.38]], S.p.lt);
+      pe(x, S.cx, S.cy - r * 1.34, r * 0.32, r * 0.10, '#0a2a00');
+      /* acid hanging off the underside: an irregular ragged bottom edge that
+         nothing else in the roster has. Offsets dodge the centre so the mass
+         cleft stays open. */
+      const at = [[-0.90, 0.42, 0.72], [-0.30, 0.30, 0.55], [0.58, 0.36, 0.88]];
+      for (let i = 0; i < at.length; i++) {
+        const dx = S.cx + at[i][0] * r, y0 = S.cy + at[i][1] * r, len = at[i][2] * r;
+        pp(x, [[dx - r * 0.18, y0], [dx + r * 0.18, y0], [dx, y0 + len]], S.p.dk);
+        pr(x, dx - 1, y0 + len - 3, 3, 3, '#d8ff6a');
       }
-      pe(x, S.cx, S.cy - r * 0.35, r * 0.42, r * 0.34, '#0a2a00');
     },
   }, {
     floors: [7, 8], weight: 9, hp: 34, r: 13, speed: 0, contactDmg: 1, mass: 6, noKnockback: true,
@@ -19220,12 +19303,32 @@ G.Pool = function (factory, reset) {
 
   /* --- 34. vsync — backs away and fires a ring with one hole in it ---
      Question: "the safe direction is toward it."                     */
+  /* It was a drifter at r11, which is watchdog's shape to the pixel — same
+     wings, same horns, same eye band, different paint. Interior decoration is
+     not silhouette, so on floor 8 the two were one enemy in two palettes.
+     A shell inverts the outline (2.2x2.8 tall against the drifter's 3.2x2.3
+     wide) and its wind-up pose splits the body open, which is the pose a ring
+     caster should hold: something is about to come OUT of this. The mast is
+     what separates it from the other shells, and it is an outline feature, not
+     a decal — mutex and firewalld are plain rhombi. */
   E('vsync', {
-    archetype: 'drifter', r: 11, color: '#4ad8ff', eye: '#04202a', telegraph: 'ring',
+    archetype: 'shell', r: 11, flying: true, color: '#4ad8ff', eye: '#04202a', telegraph: 'ring',
     extra(x, S) {
-      const r = S.r;
-      /* scanline bars */
-      for (let i = 0; i < 3; i++) pr(x, S.cx - r * 0.85, S.cy - r * 0.6 + i * 5, r * 1.7, 2, S.p.hi);
+      const r = S.r, RY = r * 1.32;
+      /* vertical-sync mast: an aerial T with dropped tips. mutex and firewalld
+         are plain rhombi, so this is what separates them at a glance. */
+      const my = S.cy - RY - r * 0.24;
+      pr(x, S.cx - 1, my, 3, r * 0.66, S.p.hi);
+      pr(x, S.cx - r * 0.66, my, r * 1.32, 3, S.p.lt);
+      pr(x, S.cx - r * 0.66, my, 3, r * 0.30, S.p.lt);
+      pr(x, S.cx + r * 0.66 - 3, my, 3, r * 0.30, S.p.lt);
+      /* hsync foot under the bottom apex: the outline is broken at both ends */
+      pr(x, S.cx - r * 0.40, S.cy + RY - 2, r * 0.80, r * 0.30, S.p.lt);
+      /* raster bands, clipped to the hull so they stay interior detail */
+      x.save();
+      x.globalCompositeOperation = 'source-atop';
+      for (let i = 0; i < 3; i++) pr(x, 0, S.cy - r * 0.62 + i * r * 0.42, S.w, 2, S.p.hi);
+      x.restore();
     },
   }, {
     floors: [8, 8], weight: 10, hp: 26, r: 11, speed: 88, contactDmg: 1, mass: 0.9,
@@ -31681,8 +31784,19 @@ G.Pool = function (factory, reset) {
         } else if (e.mem.freeze > 0) {
           e.vx *= Math.pow(0.8, dt * 60); e.vy *= Math.pow(0.8, dt * 60);
           C.moveBox(e, dt, true);
-        } else if (e.def.update) {
-          try { e.def.update(e, dt, ctx); } catch (err) { console.warn('enemy update', err); e.def.update = null; }
+        } else if (e.def.update && !e.updateFailed) {
+          /* Disable the INSTANCE, never the definition. This used to do
+             `e.def.update = null`, which mutates the shared def object: one bad
+             frame on one worm turned every worm in the session into a
+             stationary prop, on every future floor, with only a console.warn
+             nobody reads. console.error so the gates can see it — they detect
+             breakage through pageerror/console.error, and warn is invisible
+             to them. */
+          try { e.def.update(e, dt, ctx); }
+          catch (err) {
+            e.updateFailed = true;
+            console.error('enemy update threw: ' + (e.def.id || '?'), err);
+          }
         } else {
           const a = Math.atan2(p.y - e.y, p.x - e.x);
           e.vx += Math.cos(a) * 200 * dt; e.vy += Math.sin(a) * 200 * dt;
