@@ -759,22 +759,25 @@ G.Pool = function (factory, reset) {
 
 /* ===== 100_audio.js ===== */
 /* ============================================================
-   BIND69 — AUDIO
-   Procedural WebAudio engine. Zero samples, zero assets.
-
-   Everything is synthesised: filtered noise bursts, FM/AM operators,
-   Karplus-Strong plucks, bit-crushed chip blips, ring modulation,
-   granular stutter, and a convolution reverb built from a generated
-   impulse response.
+   BIND69 — AUDIO :: SYNTHESIS CHASSIS
+   Procedural WebAudio. Zero samples, zero assets. Everything is
+   synthesised: filtered noise bursts, FM/AM operators, Karplus-Strong
+   plucks, bit-crushed chip blips, ring modulation, granular stutter, and
+   a convolution reverb built from a generated impulse response.
 
    Bus architecture
      voices -> [panner] -> sfxBus  ---\
      notes  -> layers   -> musicBus ---+-> master -> limiter -> destination
      sends  -> convolver -> spaceOut --/
 
-   The whole engine is context-agnostic: createEnv(ctx) builds the graph
-   in ANY BaseAudioContext, so critic/audio.js can render every sound
-   offline through an OfflineAudioContext and measure it for real.
+   Context-agnostic by design: createEnv(ctx) builds the graph in ANY
+   BaseAudioContext, so critic/audio.js renders every sound offline
+   through an OfflineAudioContext and measures it for real.
+
+   This file is the chassis — how to make a sound. It knows nothing about
+   which sounds the game has, what the music is, or when anything plays.
+   Everything it publishes leaves through G.audioLib, and that object is
+   the only seam the rest of the audio module crosses.
    ============================================================ */
 (function () {
 
@@ -817,8 +820,15 @@ G.Pool = function (factory, reset) {
   }
 
   /* ================= error bookkeeping ================= */
-  let errCount = 0, lastErr = null;
-  function oops(e) { errCount++; lastErr = (e && e.message) ? e.message : String(e); if (Audio.debugLog) console.warn('[audio]', e); }
+  /* The flag lives here rather than on the public Audio object so that error
+     bookkeeping never has to reach forward into the engine that owns it;
+     G.Audio.debugLog is an accessor onto these. */
+  let errCount = 0, lastErr = null, debugLog = false;
+  function oops(e) { errCount++; lastErr = (e && e.message) ? e.message : String(e); if (debugLog) console.warn('[audio]', e); }
+  function errorsOf() { return { count: errCount, last: lastErr }; }
+  function resetErrors() { errCount = 0; lastErr = null; }
+  function setDebugLog(b) { debugLog = !!b; }
+  function getDebugLog() { return debugLog; }
 
   /* ================= generated buffers ================= */
   function getBuf(env, key, gen) {
@@ -1473,6 +1483,10 @@ G.Pool = function (factory, reset) {
   function mkInst(sub) {
     return function (env, dest, t, o) {
       o = o || {};
+      /* newVoice falls back to the sfx bus when dest is missing, which for a
+         music voice is silently wrong twice over: 0.9 gain instead of 0.34,
+         and outside both the player's crossfade and the duck. Say so. */
+      if (!dest) throw new Error('music instrument called with no destination');
       const B = newVoice(env, {
         t: t, dest: dest, gain: 1, music: true,
         pan: o.pan == null ? null : clamp(o.pan, -1, 1),
@@ -1488,6 +1502,30 @@ G.Pool = function (factory, reset) {
     iFM = mkInst(subFM), iRing = mkInst(subRing), iSweep = mkInst(subNoiseSweep),
     iGrain = mkInst(subGrain), iMetal = mkInst(subMetal), iDrone = mkInst(subDrone),
     iBlip = mkInst(subChipBlip);
+
+
+  G.audioLib = {
+    MAX_SFX_VOICES, PUMP_MS, LOOKAHEAD, LOOKAHEAD_HIDDEN, SWEEP_EVERY, LS_MUTE, LS_VOL,
+    clamp, mtof, lsGet, lsSet, hrnd, P, oops, errorsOf, resetErrors, setDebugLog,
+    getDebugLog, curveDist, curveCrush, createEnv, resolvePan, newVoice, disposeVoice,
+    finishVoice, sweepVoices, stealOldest, subPluck, subFM, subRing, subNoiseSweep,
+    subGrain, subMetal, subChipBlip, iKick, iSnare, iHat, iSub, iSaw, iPluck, iFM, iRing,
+    iSweep, iGrain, iMetal, iDrone, iBlip,
+  };
+})();
+
+
+/* ===== 102_audio_sfx.js ===== */
+/* ============================================================
+   BIND69 — AUDIO :: SFX REGISTRY
+   Every sound the game makes for an event, and nothing about how sound
+   is synthesised — that is the chassis in 100_audio.js, arriving through
+   G.audioLib. Registers into A.SFX; the engine plays from there.
+   ============================================================ */
+(function () {
+  const A = G.audioLib;
+  const { hrnd, curveDist, curveCrush, subPluck, subFM, subRing, subNoiseSweep, subGrain,
+    subMetal, subChipBlip } = A;
 
   /* ================= SFX registry ================= */
   const SFX = Object.create(null);
@@ -2338,601 +2376,178 @@ G.Pool = function (factory, reset) {
   'shoot shootAlt laser tear step dash playerHurt charge bomb heal activeUse pickup coin key splash'
     .split(' ').forEach(function (n) { if (SFX[n]) SFX[n].follow = 'player'; });
 
+
+  A.SFX = SFX;
+})();
+
+
+/* ===== 104_audio_music.js ===== */
+/* ============================================================
+   BIND69 — AUDIO :: MUSIC MACHINERY
+   The stem cube, the track registry and the player that runs one.
+
+   Three sliders — momentum, depth, power — each with anchors A/B/C at 0,
+   0.5 and 1. A track names its stems, then says for each of the 27
+   corners which of them sound there at full volume. Everything else is
+   interpolation.
+
+   No track is defined here. The tracks live in 105/106/107 and register
+   themselves through A.track().
+   ============================================================ */
+(function () {
+  const A = G.audioLib;
+  const { clamp, mtof, oops, iDrone } = A;
+
   /* ================= MUSIC ================= */
   const TRACKS = Object.create(null);
-  function track(key, o) { o.key = key; TRACKS[key] = o; }
+  function track(key, o) { o.key = key; compileCube(o); TRACKS[key] = o; }
 
   /* helpers available on the player object M */
   function chordOf(M, bar) { const p = M.tr.prog; return p[bar % p.length]; }
 
-  /* ---- 1. USERLAND — calm phosphor-terminal ambience ---- */
-  track('userland', {
-    name: 'phosphor', bpm: 92, bars: 4, swing: 0.06, tier: 0,
-    prog: [
-      { r: 45, c: [57, 60, 64, 67] },   // Am7
-      { r: 41, c: [53, 57, 60, 65] },   // Fmaj7
-      { r: 36, c: [52, 55, 60, 64] },   // Cmaj7
-      { r: 43, c: [50, 55, 59, 62] },   // G6
-    ],
-    bed: { gain: 0.15, cut: 240, oct: -12, voices: 2, detune: 6, lfo: 0.9, lfoAmt: 0.1 },
-    step(M, s, t) {
-      const i = s % M.len, bar = i >> 4, k = i & 15, ch = chordOf(M, bar);
-      const R = (n) => hrnd(i, n);   // loop-relative: loops repeat exactly
-      if (k === 0 || k === 10) iKick(M.env, M.base, t, { gain: 0.5, f0: 120, f1: 42, dur: 0.26, click: 0.12 });
-      if (k % 4 === 2) iHat(M.env, M.base, t, { gain: 0.16 + R(1) * 0.06, dur: 0.03, cut: 8000 });
-      /* terminal ticks */
-      if (R(3) > 0.72) iBlip(M.env, M.base, t, {
-        key: 'utick', f0: 2400, f1: 2200, dur: 0.02, duty: 0.2, decay: 2, gain: 0.1,
-        bits: 3, crush: 9000, pan: R(4) * 1.4 - 0.7,
-      });
-      /* warm sub */
-      if (k === 0) iSub(M.env, M.base, t, { f: mtof(ch.r - 12), len: M.spb * 16, rel: M.spb * 2.4, gain: 0.5, harm: 0.22, a: 0.02 });
-      /* arpeggio, 8ths */
-      if (k % 2 === 0) {
-        const idx = (k >> 1) % 4;
-        const oct = ((k >> 3) & 1) ? 12 : 0;
-        iPluck(M.env, M.base, t, {
-          f: mtof(ch.c[idx] + oct), dur: 0.55, damp: 0.9915, bright: 0.55,
-          gain: 0.3, cut: 3600, pan: (idx - 1.5) * 0.28, space: 0.3,
-        });
+  /* ================= STEM CUBE =================
+     Three sliders — momentum, depth, power — each with anchors A, B and C
+     sitting at 0, 0.5 and 1. A track names its stems, then says for each of
+     the 27 corners which stems sound there at full volume. A real slider
+     position lands between anchors, so a corner's weight is the product of its
+     three axis weights, and those always sum to 1 across the whole cube: a
+     stem's gain is simply the summed weight of every corner it appears in.
+
+     Only the (at most two) non-zero anchors per axis are ever visited, so no
+     more than 8 of the 27 corners are touched — and a slider resting exactly on
+     an anchor drops that to 4, then 2, then 1. A zero-weight corner is skipped
+     whole, and a zero-weight stem never has step() called, so it costs no
+     oscillators, no filters, no gain nodes. That is where the saving is in a
+     synthesised engine: not a decode avoided, a graph never built.
+
+     What the cube cannot do is change tempo or harmony — every stem shares the
+     track's bpm and progression. Those remain a track switch and a crossfade. */
+
+  const ANCHORS = 'ABC';
+  const CUBE_EPS = 1e-4;    // below this a corner contributes nothing audible
+  const STEM_ON = 0.03;     // weight at which a stem counts as arriving...
+  const STEM_OFF = 0.015;   // ...and as leaving. The gap is deliberate: on a
+                            // single threshold a slider parked on the boundary
+                            // re-fires enter/exit on every pump.
+
+  function cornerIndex(name) {
+    if (typeof name !== 'string' || name.length !== 3) return -1;
+    const m = ANCHORS.indexOf(name[0]), d = ANCHORS.indexOf(name[1]), p = ANCHORS.indexOf(name[2]);
+    return (m < 0 || d < 0 || p < 0) ? -1 : m * 9 + d * 3 + p;
+  }
+
+  function cornerName(i) {
+    return ANCHORS[(i / 9) | 0] + ANCHORS[((i / 3) | 0) % 3] + ANCHORS[i % 3];
+  }
+
+  /* Flatten { stems, cube } into fixed-order arrays once, at load. A 27-row
+     table is written by hand, so a missing corner or a misspelt stem name is
+     exactly the failure worth catching loudly at boot — not as silence in some
+     obscure corner of the cube nobody visits until the day they do. */
+  function compileCube(tr) {
+    if (!tr.stems || !tr.cube) throw new Error('track ' + tr.key + ': every track needs stems and a 27-corner cube');
+    const names = Object.keys(tr.stems);
+    const idxOf = Object.create(null);
+    for (let i = 0; i < names.length; i++) idxOf[names[i]] = i;
+    const corners = new Array(27);
+    for (const key in tr.cube) {
+      const ci = cornerIndex(key);
+      if (ci < 0) throw new Error('track ' + tr.key + ': "' + key + '" is not a cube corner');
+      const want = tr.cube[key], list = [];
+      for (let i = 0; i < want.length; i++) {
+        const si = idxOf[want[i]];
+        if (si == null) throw new Error('track ' + tr.key + ': corner ' + key + ' names unknown stem "' + want[i] + '"');
+        list.push(si);
       }
-      /* pad on bar starts */
-      if (k === 0) {
-        for (let j = 0; j < 3; j++) {
-          iSaw(M.env, M.base, t, {
-            f: mtof(ch.c[j] - 12), len: M.spb * 16, gain: 0.13, cut: 620, q: 1.2,
-            detune: 8, voices: 2, a: 0.25, rel: M.spb * 2.6, space: 0.25,
-          });
+      corners[ci] = list;
+    }
+    for (let i = 0; i < 27; i++) {
+      if (!corners[i]) throw new Error('track ' + tr.key + ': corner ' + cornerName(i) + ' is missing');
+    }
+    tr.stemNames = names;
+    tr.stemList = names.map(function (n) { return tr.stems[n]; });
+    tr.corners = corners;
+  }
+
+  /* Per-axis anchor spread. At most two anchors are ever non-zero, so this
+     writes into fixed scratch rather than allocating on every pump. */
+  const mIdx = [0, 0], mVal = [0, 0], dIdx = [0, 0], dVal = [0, 0], pIdx = [0, 0], pVal = [0, 0];
+  function axisSpread(v, idx, val) {
+    v = clamp(v, 0, 1);
+    const lo = v < 0.5 ? 0 : 1;
+    const f = v < 0.5 ? v * 2 : (v - 0.5) * 2;
+    let n = 0;
+    if (1 - f > CUBE_EPS) { idx[n] = lo; val[n] = 1 - f; n++; }
+    if (f > CUBE_EPS) { idx[n] = lo + 1; val[n] = f; n++; }
+    return n;
+  }
+
+  function cubeWeights(p) {
+    const w = p.stemW;
+    for (let i = 0; i < w.length; i++) w[i] = 0;
+    const nm = axisSpread(p.mom, mIdx, mVal);
+    const nd = axisSpread(p.dep, dIdx, dVal);
+    const np = axisSpread(p.pow, pIdx, pVal);
+    const corners = p.tr.corners;
+    for (let a = 0; a < nm; a++) {
+      const wm = mVal[a], bm = mIdx[a] * 9;
+      for (let b = 0; b < nd; b++) {
+        const wmd = wm * dVal[b];
+        if (wmd <= CUBE_EPS) continue;
+        const bd = bm + dIdx[b] * 3;
+        for (let c = 0; c < np; c++) {
+          const g = wmd * pVal[c];
+          if (g <= CUBE_EPS) continue;
+          const list = corners[bd + pIdx[c]];
+          for (let i = 0; i < list.length; i++) w[list[i]] += g;
         }
       }
-      /* combat layer: driving hats + snare + doubled bass */
-      if (k % 2 === 1) iHat(M.env, M.combat, t, { gain: 0.2, dur: 0.028, cut: 9000 });
-      if (k === 4 || k === 12) iSnare(M.env, M.combat, t, { gain: 0.5, dur: 0.14, tone: 2100, body: 190 });
-      if (k % 4 === 0) iSub(M.env, M.combat, t, { f: mtof(ch.r), len: M.spb * 2, gain: 0.34, wave: 'triangle' });
-    },
-  });
+    }
+  }
 
-  /* ---- 2. NETWORK — packet-switched dub ---- */
-  track('network', {
-    name: 'packet', bpm: 104, bars: 4, swing: 0.12, tier: 1,
-    prog: [
-      { r: 38, c: [50, 53, 57, 60] },   // Dm7
-      { r: 34, c: [46, 50, 53, 57] },   // Bbmaj7
-      { r: 41, c: [53, 57, 60, 64] },   // Fmaj7
-      { r: 36, c: [48, 52, 55, 59] },   // Cmaj7
-    ],
-    bed: { gain: 0.5, cut: 300, oct: -12, voices: 3, detune: 9, lfo: 1.4, lfoAmt: 0.1 },
-    step(M, s, t) {
-      const i = s % M.len, bar = i >> 4, k = i & 15, ch = chordOf(M, bar);
-      const R = (n) => hrnd(i, n);   // loop-relative: loops repeat exactly
-      if (P('x.......x..x....', k)) iKick(M.env, M.base, t, { gain: 0.7, f0: 145, f1: 44, dur: 0.28, click: 0.25 });
-      if (P('....x.......x...', k)) iSnare(M.env, M.base, t, { gain: 0.5, dur: 0.15, tone: 2000, body: 200 });
-      const hv = P('4.6.4.7.4.6.4.7.', k);
-      if (hv) iHat(M.env, M.base, t, { gain: hv * 0.3, dur: 0.032, cut: 7600, metal: 0.6 });
-      /* offbeat dub bass */
-      if (k % 4 === 2) iSaw(M.env, M.base, t, {
-        f: mtof(ch.r), len: M.spb * 1.4, gain: 0.5, cut: 420, q: 5, fenv: 2.6, fdur: 0.12,
-        detune: 10, voices: 2, rel: 0.1,
-      });
-      /* gated 16th plucks, ping-ponging */
-      if (P('x.xx.x.xx.x.xx.x', k)) {
-        const n = ch.c[(k * 3 + bar) % ch.c.length] + (R(9) > 0.75 ? 12 : 0);
-        iPluck(M.env, M.base, t, {
-          f: mtof(n), dur: 0.35, damp: 0.988, bright: 0.68, gain: 0.24,
-          cut: 5200, pan: (k % 4 < 2 ? -0.55 : 0.55), space: 0.3,
-        });
-      }
-      /* packet pings */
-      if (k === 6 && bar % 2 === 1) iFM(M.env, M.base, t, {
-        f: mtof(ch.c[3] + 12), len: 0.4, ratio: 3.5, index: 700, idxEnd: 0.03, gain: 0.24, pan: 0.6, space: 0.5,
-      });
-      if (k === 0 && bar === 3) iSweep(M.env, M.base, t, { dur: M.spb * 12, f0: 400, f1: 5000, q: 2, gain: 0.18 });
-      /* airy chord pad: keeps the sparse dub arrangement off the noise floor */
-      if (k === 0) {
-        for (let j = 0; j < 3; j++) iSaw(M.env, M.base, t, {
-          f: mtof(ch.c[j]), len: M.spb * 16, rel: M.spb * 2.6, gain: 0.1, cut: 780, q: 1.3,
-          detune: 7, voices: 2, a: 0.2, space: 0.3,
-        });
-      }
-      /* combat */
-      if (P('..x...x...x...x.', k)) iHat(M.env, M.combat, t, { gain: 0.24, dur: 0.06, cut: 6500, metal: 1 });
-      if (k % 2 === 0) iSaw(M.env, M.combat, t, {
-        f: mtof(ch.r - 12), len: M.spb * 0.8, gain: 0.36, cut: 300, q: 4, dist: 3, voices: 2,
-      });
-      if (k === 14) iSnare(M.env, M.combat, t, { gain: 0.4, dur: 0.1, tone: 2600, body: 240 });
-    },
-  });
+  /* The live corners and their weights — the same walk as cubeWeights, but
+     reporting instead of accumulating. Only the debug overlay wants this;
+     the mix itself never needs to know which corners it came from. */
+  function cornerWeights(p) {
+    const out = [];
+    const nm = axisSpread(p.mom, mIdx, mVal);
+    const nd = axisSpread(p.dep, dIdx, dVal);
+    const np = axisSpread(p.pow, pIdx, pVal);
+    for (let a = 0; a < nm; a++) for (let b = 0; b < nd; b++) for (let c = 0; c < np; c++) {
+      const g = mVal[a] * dVal[b] * pVal[c];
+      if (g <= CUBE_EPS) continue;
+      out.push({ name: ANCHORS[mIdx[a]] + ANCHORS[dIdx[b]] + ANCHORS[pIdx[c]], w: g });
+    }
+    out.sort(function (x, y) { return y.w - x.w; });
+    return out;
+  }
 
-  /* ---- 3. FILESYSTEM — mechanical rotation ---- */
-  track('filesystem', {
-    name: 'spindle', bpm: 114, bars: 4, swing: 0, tier: 2,
-    prog: [
-      { r: 38, c: [50, 53, 57, 62] },   // Dm add11
-      { r: 38, c: [50, 55, 57, 60] },
-      { r: 43, c: [48, 55, 58, 62] },   // Gm-ish
-      { r: 36, c: [48, 51, 55, 58] },
-    ],
-    bed: { gain: 0.16, cut: 230, oct: -12, voices: 2, detune: 10 },
-    step(M, s, t) {
-      const i = s % M.len, bar = i >> 4, k = i & 15, ch = chordOf(M, bar);
-      const R = (n) => hrnd(i, n);   // loop-relative: loops repeat exactly
-      if (P('x.....x...x.....', k)) iKick(M.env, M.base, t, { gain: 0.72, f0: 135, f1: 40, dur: 0.3, click: 0.3, body: 0.2 });
-      if (P('....x.......x...', k)) iSnare(M.env, M.base, t, { gain: 0.55, dur: 0.17, tone: 1700, body: 170, q: 0.6 });
-      /* disk-seek clicks — dense, panned by head position */
-      if (R(2) > 0.42) {
-        iBlip(M.env, M.base, t + R(5) * M.spb * 0.4, {
-          key: 'seek', f0: 3200, f1: 1800, dur: 0.018, duty: 0.15, decay: 2.4,
-          gain: 0.13 + R(6) * 0.08, bits: 3, crush: 8000, pan: Math.sin(i * 0.7) * 0.75,
-        });
-      }
-      /* churning drone */
-      if (k === 0) iDrone(M.env, M.base, t, {
-        f: mtof(ch.r - 12), len: M.spb * 16, gain: 0.42, cut: 260, q: 3.5,
-        detune: 11, voices: 3, lfo: 2.6, lfoAmt: 0.18, a: 0.1, rel: M.spb * 2.4,
-      });
-      /* dorian arp */
-      if (k % 2 === 0) {
-        const seq = [0, 2, 1, 3, 2, 1, 3, 0];
-        const n = ch.c[seq[(k >> 1) % 8]];
-        iBlip(M.env, M.base, t, {
-          key: 'fsarp', f0: mtof(n + 12), f1: mtof(n + 12), dur: 0.13, duty: 0.35,
-          decay: 1.6, gain: 0.16, bits: 4, crush: 13000, cut: 4000,
-          rate: 1, pan: (k % 8 < 4 ? -0.35 : 0.35),
-        });
-      }
-      if (k === 8) iMetal(M.env, M.base, t, { f: 210, dur: 0.22, gain: 0.16, cut: 3000, q: 2, space: 0.35 });
-      /* combat */
-      if (k % 2 === 0) iHat(M.env, M.combat, t, { gain: 0.22, dur: 0.035, cut: 8200 });
-      if (P('x.x.xx..x.x.x.x.', k)) iSaw(M.env, M.combat, t, {
-        f: mtof(ch.r), len: M.spb * 0.7, gain: 0.4, cut: 520, q: 6, dist: 4, fenv: 2, voices: 2,
-      });
-    },
-  });
+  function applyStemGains(p, now) {
+    const w = p.stemW, cur = p.stemCur, nodes = p.stemGain;
+    for (let i = 0; i < w.length; i++) {
+      if (Math.abs(w[i] - cur[i]) < 0.002) continue;
+      cur[i] = w[i];
+      try { nodes[i].gain.setTargetAtTime(w[i], now, 0.08); } catch (e) { }
+    }
+  }
 
-  /* ---- 4. KERNEL — driving industrial ---- */
-  track('kernel', {
-    name: 'ring0', bpm: 126, bars: 4, swing: 0, tier: 3,
-    prog: [
-      { r: 40, c: [52, 55, 59, 62] },   // Em7
-      { r: 40, c: [52, 55, 59, 64] },
-      { r: 36, c: [48, 52, 55, 59] },   // Cmaj7
-      { r: 35, c: [47, 51, 54, 59] },   // B
-    ],
-    bed: { gain: 0.2, cut: 200, oct: -12, voices: 2, detune: 8 },
-    step(M, s, t) {
-      const i = s % M.len, bar = i >> 4, k = i & 15, ch = chordOf(M, bar);
-      const R = (n) => hrnd(i, n);   // loop-relative: loops repeat exactly
-      if (k % 4 === 0) iKick(M.env, M.base, t, { gain: 1.0, f0: 160, f1: 43, dur: 0.3, click: 0.4, body: 0.25 });
-      if (k === 4 || k === 12) {
-        iSnare(M.env, M.base, t, { gain: 0.62, dur: 0.16, tone: 2400, body: 210, wave: 'square' });
-        iMetal(M.env, M.base, t, { f: 340, dur: 0.14, gain: 0.14, cut: 4200, q: 2 });
+  /* The intro/ending half of the idea. A stem's gain follows the slider
+     continuously — that is the whole point — but its one-shot arrival and
+     departure gestures fire only on a bar line. A stem that begins or ends
+     mid-phrase reads as a yanked fader however smooth its gain envelope is. */
+  function stemTransitions(p, s, t) {
+    if ((s & 15) !== 0) return;
+    const list = p.tr.stemList, w = p.stemW, on = p.stemOn;
+    for (let i = 0; i < list.length; i++) {
+      if (!on[i] && w[i] > STEM_ON) {
+        on[i] = 1;
+        if (list[i].enter) list[i].enter(p, t, p.stemGain[i]);
+      } else if (on[i] && w[i] < STEM_OFF) {
+        on[i] = 0;
+        if (list[i].exit) list[i].exit(p, t, p.stemGain[i]);
       }
-      if (k % 2 === 1) iHat(M.env, M.base, t, { gain: 0.26, dur: 0.03, cut: 8600, metal: 0.5 });
-      if (k === 14) iHat(M.env, M.base, t, { gain: 0.3, dur: 0.14, cut: 7000, metal: 1.1 });
-      /* 16th distorted saw bass */
-      if (P('x.xxx.x.xx.x.xx.', k)) {
-        const oct = (k === 6 || k === 13) ? 12 : 0;
-        iSaw(M.env, M.base, t, {
-          f: mtof(ch.r - 12 + oct), len: M.spb * 0.85, gain: 0.62, cut: 360, q: 7,
-          fenv: 3.2, fdur: 0.07, dist: 6, detune: 14, voices: 3, rel: 0.04,
-        });
-      }
-      /* aggressive arp */
-      if (k % 2 === 0) {
-        const seq = [0, 3, 1, 2, 0, 3, 2, 1];
-        const n = ch.c[seq[(k >> 1) % 8]] + 12;
-        iBlip(M.env, M.base, t, {
-          key: 'kar', f0: mtof(n), f1: mtof(n), dur: 0.11, duty: 0.25, decay: 1.3,
-          gain: 0.2, bits: 4, crush: 11000, cut: 5200, pan: (R(8) - 0.5) * 0.5,
-        });
-      }
-      if (k === 0) iDrone(M.env, M.base, t, {
-        f: mtof(ch.r - 24), len: M.spb * 16, gain: 0.4, cut: 180, q: 2, voices: 2, detune: 6, a: 0.05, rel: M.spb * 2.4,
-      });
-      /* combat: siren lead + double kick + octave lead */
-      if (P('..x.......x...x.', k)) iKick(M.env, M.combat, t, { gain: 1.0, f0: 155, f1: 45, dur: 0.22, click: 0.35 });
-      if (k % 4 === 0) {
-        iRing(M.env, M.combat, t, {
-          f: mtof(ch.c[0] + 12), mf: 137, len: M.spb * 3, gain: 0.55, fslide: 1.02, wave: 'sawtooth', space: 0.2,
-        });
-      }
-      if (P('.x.x.x.x.x.x.x.x', k)) iHat(M.env, M.combat, t, { gain: 0.3, dur: 0.025, cut: 10000 });
-      if (P('x..x..x.x..x..x.', k)) iSaw(M.env, M.combat, t, {
-        f: mtof(ch.c[2] + 12), len: M.spb * 1.2, gain: 0.34, cut: 2200, q: 3,
-        fenv: 2, fdur: 0.1, dist: 4, detune: 20, voices: 2, a: 0.006, rel: 0.06,
-      });
-      if (k === 6 || k === 14) iSnare(M.env, M.combat, t, { gain: 0.42, dur: 0.09, tone: 3400, body: 300 });
-    },
-  });
-
-  /* ---- 5. DRIVERS — jittery broken electro ---- */
-  track('drivers', {
-    name: 'irq', bpm: 136, bars: 4, swing: 0.05, tier: 4,
-    prog: [
-      { r: 39, c: [51, 54, 58, 61] },   // Ebm
-      { r: 34, c: [46, 49, 53, 58] },
-      { r: 37, c: [49, 52, 56, 59] },
-      { r: 32, c: [44, 47, 51, 56] },
-    ],
-    bed: { gain: 0.24, cut: 210, oct: -12, voices: 3, detune: 11, lfo: 2.1, lfoAmt: 0.12 },
-    step(M, s, t) {
-      const i = s % M.len, bar = i >> 4, k = i & 15, ch = chordOf(M, bar);
-      const R = (n) => hrnd(i, n);   // loop-relative: loops repeat exactly
-      if (P('x..x..x...x.x...', k)) iKick(M.env, M.base, t, { gain: 0.92, f0: 170, f1: 46, dur: 0.24, click: 0.45 });
-      if (P('....x..x....x...', k)) iSnare(M.env, M.base, t, { gain: 0.55, dur: 0.12, tone: 2800, body: 230, wave: 'square' });
-      const hv = P('7.4.7.47.4.47.4.', k);
-      if (hv) iHat(M.env, M.base, t, { gain: hv * 0.28, dur: 0.026, cut: 9200, metal: 0.4 });
-      /* syncopated bass */
-      if (P('x..xx..x.x.x..x.', k)) iSaw(M.env, M.base, t, {
-        f: mtof(ch.r - 12), len: M.spb * 0.7, gain: 0.55, cut: 420, q: 8,
-        fenv: 2.6, fdur: 0.06, dist: 5, voices: 2, rel: 0.03,
-      });
-      /* ring-mod stabs */
-      if (P('..x.....x.....x.', k)) iRing(M.env, M.base, t, {
-        f: mtof(ch.c[1]), mf: 91 + R(2) * 40, len: M.spb * 1.2, gain: 0.26,
-        fslide: 0.94, wave: 'square', pan: (R(3) - 0.5) * 1.2, space: 0.2,
-      });
-      /* glitch grains sprinkled */
-      if (R(4) > 0.86) iGrain(M.env, M.base, t, { n: 4, span: M.spb * 1.2, gain: 0.14, bits: 3, seed: i });
-      if (k === 0) iSub(M.env, M.base, t, { f: mtof(ch.r - 24), len: M.spb * 16, rel: M.spb * 2.4, gain: 0.42, a: 0.03 });
-      /* combat */
-      if (k % 2 === 0) iBlip(M.env, M.combat, t, {
-        key: 'drarp', f0: mtof(ch.c[(k >> 1) % 4] + 12), f1: mtof(ch.c[(k >> 1) % 4] + 12),
-        dur: 0.09, duty: 0.18, decay: 1.2, gain: 0.5, bits: 3, crush: 9000, cut: 6000,
-      });
-      if (P('x.x.x.x.x.x.x.x.', k)) iHat(M.env, M.combat, t, { gain: 0.3, dur: 0.02, cut: 11000 });
-      if (P('..x..x....x..x..', k)) iRing(M.env, M.combat, t, {
-        f: mtof(ch.c[3] + 12), mf: 167, len: M.spb * 1.1, gain: 0.42, fslide: 0.92, wave: 'sawtooth',
-      });
-      if (P('....x.......x...', k)) iKick(M.env, M.combat, t, { gain: 0.85, f0: 165, f1: 46, dur: 0.2, click: 0.4 });
-    },
-  });
-
-  /* ---- 6. FIRMWARE — ominous half-time ---- */
-  track('firmware', {
-    name: 'rom', bpm: 146, bars: 4, swing: 0, tier: 5,
-    prog: [
-      { r: 33, c: [45, 48, 52, 56] },   // Am(maj7)-ish
-      { r: 33, c: [45, 49, 52, 55] },
-      { r: 31, c: [43, 46, 50, 53] },
-      { r: 30, c: [42, 45, 49, 54] },
-    ],
-    bed: { gain: 0.24, cut: 190, oct: -12, voices: 3, detune: 9 },
-    step(M, s, t) {
-      const i = s % M.len, bar = i >> 4, k = i & 15, ch = chordOf(M, bar);
-      const R = (n) => hrnd(i, n);   // loop-relative: loops repeat exactly
-      if (P('x.........x.....', k)) iKick(M.env, M.base, t, { gain: 0.88, f0: 190, f1: 36, dur: 0.42, click: 0.35, body: 0.3 });
-      if (k === 8) {
-        iSnare(M.env, M.base, t, { gain: 0.7, dur: 0.26, tone: 1500, body: 160, q: 0.5 });
-        iSweep(M.env, M.base, t, { dur: 0.4, f0: 900, f1: 300, q: 1.2, gain: 0.16, dark: true, space: 0.4 });
-      }
-      if (P('....x.......x..x', k)) iHat(M.env, M.base, t, { gain: 0.16, dur: 0.09, cut: 6800, metal: 0.8 });
-      /* deep sub, long */
-      if (k === 0) iSub(M.env, M.base, t, { f: mtof(ch.r - 12), len: M.spb * 16, rel: M.spb * 2.4, gain: 0.44, harm: 0.3, a: 0.04, sus: 0.85 });
-      /* detuned brass stabs */
-      if (P('x.......x...x...', k)) {
-        for (let j = 0; j < 3; j++) {
-          iSaw(M.env, M.base, t, {
-            f: mtof(ch.c[j]), len: M.spb * 2.2, gain: 0.16, cut: 1100, q: 2,
-            fenv: 2.2, fdur: 0.3, detune: 16, voices: 2, a: 0.02, rel: 0.2, space: 0.25,
-          });
-        }
-      }
-      /* dissonant bell every other bar */
-      if (k === 12 && bar % 2 === 1) iFM(M.env, M.base, t, {
-        f: mtof(ch.c[3] + 12), len: 0.9, ratio: 1.41, index: 900, idxEnd: 0.05, idxDur: 0.4,
-        gain: 0.2, space: 0.5, pan: R(1) - 0.5,
-      });
-      if (R(7) > 0.9) iGrain(M.env, M.base, t, { n: 3, span: M.spb, gain: 0.1, bits: 4, seed: i + 5 });
-      /* combat: the half-time bed doubles into a real beat */
-      if (P('..x...x...x...x.', k)) iKick(M.env, M.combat, t, { gain: 0.9, f0: 155, f1: 48, dur: 0.16, click: 0.3 });
-      if (k % 2 === 1) iHat(M.env, M.combat, t, { gain: 0.3, dur: 0.03, cut: 9500, metal: 0.5 });
-      if (k % 4 === 2) iSaw(M.env, M.combat, t, {
-        f: mtof(ch.r), len: M.spb * 1.2, gain: 0.6, cut: 600, q: 6, dist: 6, voices: 2,
-      });
-      if (k === 4 || k === 12) iSnare(M.env, M.combat, t, { gain: 0.55, dur: 0.12, tone: 2600, body: 220, wave: 'square' });
-      if (k % 2 === 0) iBlip(M.env, M.combat, t, {
-        key: 'fwarp', f0: mtof(ch.c[(k >> 1) % 4] + 24), f1: mtof(ch.c[(k >> 1) % 4] + 24),
-        dur: 0.08, duty: 0.22, decay: 1.2, gain: 0.3, bits: 4, crush: 10000, cut: 6500,
-        pan: (k % 4 ? 0.4 : -0.4),
-      });
-    },
-  });
-
-  /* ---- 7. MICROCODE — frantic ---- */
-  track('microcode', {
-    name: 'uop', bpm: 156, bars: 4, swing: 0, tier: 6,
-    prog: [
-      { r: 37, c: [49, 52, 55, 58] },   // dim7 -- maximum unrest
-      { r: 38, c: [50, 53, 56, 59] },
-      { r: 36, c: [48, 51, 54, 58] },
-      { r: 35, c: [47, 50, 53, 56] },
-    ],
-    bed: { gain: 0.2, cut: 210, oct: -12, voices: 2, detune: 12 },
-    step(M, s, t) {
-      const i = s % M.len, bar = i >> 4, k = i & 15, ch = chordOf(M, bar);
-      const R = (n) => hrnd(i, n);   // loop-relative: loops repeat exactly
-      if (P('x..x..x.x..x..x.', k)) iKick(M.env, M.base, t, { gain: 0.95, f0: 175, f1: 47, dur: 0.2, click: 0.45 });
-      if (k === 4 || k === 12) iSnare(M.env, M.base, t, { gain: 0.6, dur: 0.1, tone: 3100, body: 250, wave: 'square' });
-      iHat(M.env, M.base, t, { gain: (k % 2 ? 0.13 : 0.22) + R(1) * 0.04, dur: 0.02, cut: 10500 });
-      /* rapid arp — every 16th */
-      const seq = [0, 1, 2, 3, 2, 1, 3, 0, 1, 3, 2, 0, 3, 1, 0, 2];
-      const n = ch.c[seq[k]] + ((k % 4 === 3) ? 12 : 0);
-      iBlip(M.env, M.base, t, {
-        key: 'ucarp', f0: mtof(n + 12), f1: mtof(n + 12), dur: 0.07, duty: 0.2, decay: 1.1,
-        gain: 0.18, bits: 3, crush: 9500, cut: 6800, pan: (k % 2 ? 0.4 : -0.4),
-      });
-      /* churning bass */
-      if (P('xx.xx.xx.xx.xx.x', k)) iSaw(M.env, M.base, t, {
-        f: mtof(ch.r - 12), len: M.spb * 0.6, gain: 0.5, cut: 380, q: 7,
-        fenv: 2.4, fdur: 0.05, dist: 7, voices: 2, rel: 0.02,
-      });
-      if (R(9) > 0.82) iGrain(M.env, M.base, t, { n: 5, span: M.spb * 1.5, gain: 0.16, bits: 2, seed: i * 3 });
-      if (k === 0) iDrone(M.env, M.base, t, {
-        f: mtof(ch.r - 24), len: M.spb * 16, gain: 0.34, cut: 200, q: 2, voices: 2, a: 0.03, rel: M.spb * 2.4,
-      });
-      /* combat */
-      if (P('..x...x...x...x.', k)) iRing(M.env, M.combat, t, {
-        f: mtof(ch.c[2] + 12), mf: 211, len: M.spb * 1.4, gain: 0.5, fslide: 0.9, wave: 'square', space: 0.2,
-      });
-      if (k % 4 === 0) iSnare(M.env, M.combat, t, { gain: 0.5, dur: 0.07, tone: 3600, body: 320 });
-      if (P('x.xx..x.x.xx..x.', k)) iKick(M.env, M.combat, t, { gain: 0.8, f0: 180, f1: 48, dur: 0.16, click: 0.4 });
-      if (k % 2 === 1) iSaw(M.env, M.combat, t, {
-        f: mtof(ch.r), len: M.spb * 0.5, gain: 0.5, cut: 900, q: 6, dist: 8, voices: 2, rel: 0.02,
-      });
-    },
-  });
-
-  /* ---- 8. SILICON — oppressive sub drone ---- */
-  track('silicon', {
-    name: 'substrate', bpm: 68, bars: 4, swing: 0, tier: 7,
-    prog: [
-      { r: 29, c: [41, 44, 48, 54] },   // #11 over the root
-      { r: 29, c: [41, 45, 48, 52] },
-      { r: 28, c: [40, 43, 47, 53] },
-      { r: 27, c: [39, 42, 46, 52] },
-    ],
-    bed: { gain: 0.26, cut: 170, oct: -12, voices: 3, detune: 6, lfo: 0.6, lfoAmt: 0.14 },
-    step(M, s, t) {
-      const i = s % M.len, bar = i >> 4, k = i & 15, ch = chordOf(M, bar);
-      const R = (n) => hrnd(i, n);   // loop-relative: loops repeat exactly
-      /* continuous sub drone, one long note per bar (overlapping tails) */
-      if (k === 0) {
-        iSub(M.env, M.base, t, { f: mtof(ch.r - 12), len: M.spb * 16, gain: 0.5, a: 0.35, d: 0.4, sus: 0.9, rel: M.spb * 2.6, harm: 0.14 });
-        iDrone(M.env, M.base, t, {
-          f: mtof(ch.r), len: M.spb * 16, gain: 0.24, cut: 150, q: 2.5,
-          voices: 3, detune: 5, lfo: 0.7, lfoAmt: 0.2, a: 0.5, rel: M.spb * 2.6,
-        });
-      }
-      /* enormous kick every 8 beats */
-      if (k === 0 && bar % 2 === 0) iKick(M.env, M.base, t, { gain: 1.1, f0: 210, f1: 28, dur: 0.7, pdur: 0.2, click: 0.3, body: 0.35 });
-      /* sparse metallic hits */
-      if (P('..........x.....', k) || (k === 6 && bar % 2 === 1)) {
-        iMetal(M.env, M.base, t, {
-          f: 118 + R(1) * 40, dur: 0.9, gain: 0.2, cut: 2400, q: 1.6,
-          pan: (R(2) - 0.5) * 1.4, space: 0.6,
-        });
-      }
-      /* tolling bell every 2 bars */
-      if (k === 0 && bar % 2 === 1) iFM(M.env, M.base, t, {
-        f: mtof(ch.c[0]), len: 2.4, ratio: 1.73, index: 800, idxEnd: 0.02, idxDur: 0.9,
-        gain: 0.24, space: 0.65,
-      });
-      /* deep rumble bed */
-      if (k === 0) iSweep(M.env, M.base, t, {
-        dur: M.spb * 15.4, f0: 90, f1: 190, q: 1.1, gain: 0.2, dark: true, a: 0.6, type: 'lowpass',
-      });
-      if (R(11) > 0.93) iGrain(M.env, M.base, t, { n: 3, span: M.spb * 2, gain: 0.09, bits: 3, seed: i + 71 });
-      /* combat: the drone grows a pulse and a slab of industrial percussion */
-      if (k % 2 === 0) iSub(M.env, M.combat, t, { f: mtof(ch.r), len: M.spb * 0.9, gain: 0.75, wave: 'triangle', a: 0.008 });
-      if (k % 4 === 2) iHat(M.env, M.combat, t, { gain: 0.34, dur: 0.07, cut: 5200, metal: 1.2 });
-      if (k === 8) iSnare(M.env, M.combat, t, { gain: 0.7, dur: 0.3, tone: 1400, body: 140, q: 0.5 });
-      if (P('x.......x...x...', k)) iKick(M.env, M.combat, t, { gain: 0.95, f0: 190, f1: 40, dur: 0.34, click: 0.3 });
-      if (P('....x.......x...', k)) iMetal(M.env, M.combat, t, { f: 150, dur: 0.4, gain: 0.3, cut: 2600, q: 1.6, space: 0.3 });
-    },
-  });
-
-  /* ---- BOSS VARIANTS ---- */
-  track('bossA', {
-    name: 'segfault', bpm: 144, bars: 4, swing: 0, boss: true,
-    prog: [
-      { r: 40, c: [52, 55, 59, 62] },
-      { r: 38, c: [50, 53, 57, 60] },
-      { r: 36, c: [48, 51, 55, 58] },
-      { r: 35, c: [47, 50, 54, 59] },
-    ],
-    bed: { gain: 0.18, cut: 220, oct: -12, voices: 2, detune: 10 },
-    step(M, s, t) {
-      const i = s % M.len, bar = i >> 4, k = i & 15, ch = chordOf(M, bar);
-      const R = (n) => hrnd(i, n);   // loop-relative: loops repeat exactly
-      if (k % 4 === 0) iKick(M.env, M.base, t, { gain: 1.1, f0: 175, f1: 44, dur: 0.28, click: 0.5, body: 0.3 });
-      if (k === 4 || k === 12) {
-        iSnare(M.env, M.base, t, { gain: 0.7, dur: 0.16, tone: 2600, body: 210, wave: 'square' });
-        iMetal(M.env, M.base, t, { f: 380, dur: 0.16, gain: 0.16, cut: 4600, q: 2 });
-      }
-      if (k % 2 === 1) iHat(M.env, M.base, t, { gain: 0.24, dur: 0.028, cut: 9000, metal: 0.6 });
-      /* double-time bass */
-      iSaw(M.env, M.base, t, {
-        f: mtof(ch.r - 12), len: M.spb * 0.55, gain: 0.6, cut: 340, q: 7,
-        fenv: 3, fdur: 0.05, dist: 7, voices: 3, detune: 15, rel: 0.02,
-      });
-      /* brass stabs */
-      if (P('x...x..x..x.x...', k)) {
-        for (let j = 0; j < 3; j++) iSaw(M.env, M.base, t, {
-          f: mtof(ch.c[j] + 12), len: M.spb * 1.1, gain: 0.16, cut: 1600, q: 2.5,
-          fenv: 2.4, fdur: 0.12, detune: 18, voices: 2, a: 0.008, rel: 0.08, space: 0.2,
-        });
-      }
-      /* siren lead */
-      if (k === 0) iRing(M.env, M.base, t, {
-        f: mtof(ch.c[0] + 24), mf: 173, len: M.spb * 3.5, gain: 0.22, fslide: 0.86, mslide: 1.3, wave: 'sawtooth', space: 0.25,
-      });
-      if (R(3) > 0.9) iGrain(M.env, M.base, t, { n: 4, span: M.spb, gain: 0.12, bits: 3, seed: i });
-      if (k % 2 === 0) iBlip(M.env, M.combat, t, {
-        key: 'bAarp', f0: mtof(ch.c[(k >> 1) % 4] + 24), f1: mtof(ch.c[(k >> 1) % 4] + 24),
-        dur: 0.08, duty: 0.22, decay: 1.2, gain: 0.2, bits: 4, crush: 10000, cut: 7000,
-      });
-    },
-  });
-
-  track('bossB', {
-    name: 'panic', bpm: 156, bars: 4, swing: 0, boss: true,
-    prog: [
-      { r: 34, c: [46, 49, 53, 56] },
-      { r: 34, c: [46, 50, 53, 57] },
-      { r: 33, c: [45, 48, 52, 55] },
-      { r: 32, c: [44, 47, 51, 56] },
-    ],
-    bed: { gain: 0.18, cut: 210, oct: -12, voices: 2, detune: 12 },
-    step(M, s, t) {
-      const i = s % M.len, bar = i >> 4, k = i & 15, ch = chordOf(M, bar);
-      const R = (n) => hrnd(i, n);   // loop-relative: loops repeat exactly
-      if (P('x.x.x.x.x.x.x.x.', k)) iKick(M.env, M.base, t, { gain: 1.0, f0: 185, f1: 42, dur: 0.2, click: 0.5 });
-      if (P('..x...x...x...x.', k)) iSnare(M.env, M.base, t, { gain: 0.62, dur: 0.11, tone: 3000, body: 240, wave: 'square' });
-      iHat(M.env, M.base, t, { gain: 0.16, dur: 0.018, cut: 11000 });
-      iSaw(M.env, M.base, t, {
-        f: mtof(ch.r - 12), len: M.spb * 0.5, gain: 0.62, cut: 300, q: 8,
-        fenv: 3.4, fdur: 0.04, dist: 9, voices: 3, detune: 20, rel: 0.02,
-      });
-      if (k % 4 === 0) {
-        for (let j = 0; j < 4; j++) iSaw(M.env, M.base, t, {
-          f: mtof(ch.c[j]), len: M.spb * 1.6, gain: 0.13, cut: 1300, q: 3,
-          fenv: 2.6, fdur: 0.18, detune: 22, voices: 2, a: 0.006, rel: 0.1, space: 0.25,
-        });
-      }
-      if (R(2) > 0.72) iGrain(M.env, M.base, t, { n: 5, span: M.spb * 1.2, gain: 0.16, bits: 2, seed: i * 7 });
-      if (k === 8) iRing(M.env, M.base, t, {
-        f: mtof(ch.c[3] + 12), mf: 233, len: M.spb * 2, gain: 0.24, fslide: 0.8, wave: 'square', space: 0.3,
-      });
-      if (k % 2 === 0) iBlip(M.env, M.combat, t, {
-        key: 'bBarp', f0: mtof(ch.c[(k >> 1) % 4] + 24), f1: mtof(ch.c[(k >> 1) % 4] + 24),
-        dur: 0.06, duty: 0.16, decay: 1.1, gain: 0.2, bits: 3, crush: 9000, cut: 8000,
-      });
-    },
-  });
-
-  track('bossFinal', {
-    name: 'halt', bpm: 160, bars: 4, swing: 0, boss: true,
-    prog: [
-      { r: 29, c: [41, 44, 48, 53] },
-      { r: 29, c: [41, 45, 48, 52] },
-      { r: 27, c: [39, 42, 46, 51] },
-      { r: 30, c: [42, 46, 49, 54] },
-    ],
-    bed: { gain: 0.2, cut: 200, oct: -12, voices: 3, detune: 14 },
-    step(M, s, t) {
-      const i = s % M.len, bar = i >> 4, k = i & 15, ch = chordOf(M, bar);
-      const R = (n) => hrnd(i, n);   // loop-relative: loops repeat exactly
-      if (P('x.xxx.x.x.xxx.x.', k)) iKick(M.env, M.base, t, { gain: 1.05, f0: 200, f1: 38, dur: 0.24, click: 0.5, body: 0.3 });
-      if (k === 4 || k === 12 || k === 14) iSnare(M.env, M.base, t, { gain: 0.68, dur: 0.13, tone: 2800, body: 220, wave: 'square' });
-      iHat(M.env, M.base, t, { gain: k % 2 ? 0.12 : 0.2, dur: 0.02, cut: 10500, metal: k % 4 === 2 ? 0.7 : 0 });
-      iSaw(M.env, M.base, t, {
-        f: mtof(ch.r), len: M.spb * 0.5, gain: 0.6, cut: 320, q: 8,
-        fenv: 3.6, fdur: 0.04, dist: 10, voices: 3, detune: 24, rel: 0.02,
-      });
-      if (k === 0) {
-        iSub(M.env, M.base, t, { f: mtof(ch.r - 12), len: M.spb * 16, rel: M.spb * 2.4, gain: 0.6, a: 0.02, sus: 0.85 });
-        for (let j = 0; j < 4; j++) iDrone(M.env, M.base, t, {
-          f: mtof(ch.c[j]), len: M.spb * 16, gain: 0.1, cut: 1500, q: 1.5,
-          voices: 2, detune: 12, a: 0.15, rel: M.spb * 2.6, lfo: 3.1, lfoAmt: 0.12, space: 0.4,
-        });
-      }
-      const seq = [0, 3, 2, 1, 3, 0, 1, 2];
-      if (k % 2 === 0) iBlip(M.env, M.base, t, {
-        key: 'bFarp', f0: mtof(ch.c[seq[(k >> 1) % 8]] + 24), f1: mtof(ch.c[seq[(k >> 1) % 8]] + 24),
-        dur: 0.07, duty: 0.2, decay: 1.1, gain: 0.2, bits: 3, crush: 9000, cut: 8000,
-        pan: (k % 4 ? 0.45 : -0.45),
-      });
-      if (R(5) > 0.78) iGrain(M.env, M.base, t, { n: 6, span: M.spb * 1.4, gain: 0.17, bits: 2, seed: i * 11 });
-      if (k === 8) iMetal(M.env, M.combat, t, { f: 90, dur: 0.6, gain: 0.2, cut: 1800, q: 1.4, space: 0.4 });
-    },
-  });
-
-  /* ---- GAME OVER — the run is over. Slow, resigned, no pulse. ---- */
-  track('gameover', {
-    name: 'core dumped', bpm: 60, bars: 4, swing: 0,
-    prog: [
-      { r: 45, c: [57, 60, 64, 67] },   // Am
-      { r: 43, c: [55, 59, 62, 67] },   // G
-      { r: 41, c: [53, 57, 60, 65] },   // F
-      { r: 40, c: [52, 56, 59, 64] },   // E  (andalusian descent)
-    ],
-    bed: { gain: 0.3, cut: 190, oct: -12, voices: 3, detune: 5, lfo: 0.5, lfoAmt: 0.12, a: 0.4 },
-    step(M, s, t) {
-      const i = s % M.len, bar = i >> 4, k = i & 15, ch = chordOf(M, bar);
-      const R = (n) => hrnd(i, n);
-      if (k === 0) {
-        iSub(M.env, M.base, t, { f: mtof(ch.r - 12), len: M.spb * 16, rel: M.spb * 2.6, gain: 0.5, a: 0.25, sus: 0.9 });
-        for (let j = 0; j < 3; j++) iSaw(M.env, M.base, t, {
-          f: mtof(ch.c[j]), len: M.spb * 16, rel: M.spb * 2.8, gain: 0.13, cut: 640, q: 1.2,
-          detune: 6, voices: 2, a: 0.5, space: 0.45,
-        });
-      }
-      /* a lone descending figure, wide and slow */
-      if (k === 0 || k === 6 || k === 11) {
-        const n = ch.c[k === 0 ? 2 : (k === 6 ? 1 : 0)];
-        iPluck(M.env, M.base, t, {
-          f: mtof(n), dur: 1.6, damp: 0.9965, bright: 0.45, gain: 0.26,
-          cut: 2600, pan: (R(3) - 0.5) * 0.7, space: 0.6,
-        });
-      }
-      /* slow tolling bell on the turnaround */
-      if (k === 0 && bar === 3) iFM(M.env, M.base, t, {
-        f: mtof(ch.r + 12), len: 2.6, ratio: 1.41, index: 700, idxEnd: 0.02, idxDur: 1.0,
-        gain: 0.2, space: 0.7,
-      });
-      /* one soft heartbeat per bar, fading */
-      if (k === 0) iKick(M.env, M.base, t, { gain: 0.4, f0: 120, f1: 36, dur: 0.5, pdur: 0.18, click: 0 });
-      if (R(8) > 0.94) iGrain(M.env, M.base, t, { n: 2, span: M.spb * 2, gain: 0.07, bits: 3, seed: i });
-    },
-  });
-
-  /* ---- VICTORY — you got out. Bright, major, triumphant. ---- */
-  track('victory', {
-    name: 'exit 0', bpm: 128, bars: 4, swing: 0,
-    prog: [
-      { r: 36, c: [48, 52, 55, 59] },   // Cmaj7
-      { r: 43, c: [47, 50, 55, 62] },   // G
-      { r: 45, c: [45, 52, 57, 60] },   // Am
-      { r: 41, c: [41, 48, 53, 57] },   // F
-    ],
-    bed: { gain: 0.16, cut: 260, oct: -12, voices: 2, detune: 7 },
-    step(M, s, t) {
-      const i = s % M.len, bar = i >> 4, k = i & 15, ch = chordOf(M, bar);
-      const R = (n) => hrnd(i, n);
-      if (k % 4 === 0) iKick(M.env, M.base, t, { gain: 1.0, f0: 160, f1: 44, dur: 0.28, click: 0.4, body: 0.25 });
-      if (k === 4 || k === 12) iSnare(M.env, M.base, t, { gain: 0.62, dur: 0.15, tone: 2400, body: 210 });
-      if (k % 2 === 1) iHat(M.env, M.base, t, { gain: 0.26, dur: 0.03, cut: 9000, metal: 0.5 });
-      if (k === 14) iHat(M.env, M.base, t, { gain: 0.32, dur: 0.14, cut: 7000, metal: 1.1 });
-      /* bassline */
-      if (P('x..x..x.x..x..x.', k)) iSaw(M.env, M.base, t, {
-        f: mtof(ch.r), len: M.spb * 0.9, gain: 0.5, cut: 520, q: 5,
-        fenv: 2.6, fdur: 0.07, detune: 10, voices: 2, rel: 0.05,
-      });
-      /* fanfare stabs */
-      if (P('x...x...x.x.x...', k)) {
-        for (let j = 0; j < 4; j++) iSaw(M.env, M.base, t, {
-          f: mtof(ch.c[j] + 12), len: M.spb * 1.4, gain: 0.15, cut: 2200, q: 2,
-          fenv: 2.2, fdur: 0.12, detune: 14, voices: 2, a: 0.008, rel: 0.1, space: 0.3,
-        });
-      }
-      /* bright ascending arp */
-      if (k % 2 === 0) {
-        const seq = [0, 1, 2, 3, 2, 3, 1, 2];
-        const n = ch.c[seq[(k >> 1) % 8]] + 12;
-        iBlip(M.env, M.base, t, {
-          key: 'vicarp', f0: mtof(n), f1: mtof(n), dur: 0.12, duty: 0.42, decay: 1.2,
-          gain: 0.2, bits: 5, crush: 16000, cut: 7000, pan: (k % 4 ? 0.4 : -0.4),
-        });
-      }
-      /* shimmering bell on the downbeat of each bar */
-      if (k === 0) iFM(M.env, M.base, t, {
-        f: mtof(ch.c[3] + 12), len: 0.9, ratio: 3.01, index: 500, idxEnd: 0.03,
-        gain: 0.18, space: 0.5,
-      });
-      if (k === 0 && bar === 3) iSweep(M.env, M.base, t, { dur: M.spb * 14, f0: 600, f1: 6000, q: 2, gain: 0.14 });
-    },
-  });
+    }
+  }
 
   /* theme key -> track resolution */
   const TRACK_ORDER = ['userland', 'network', 'filesystem', 'kernel', 'drivers', 'firmware', 'microcode', 'silicon'];
@@ -2976,14 +2591,37 @@ G.Pool = function (factory, reset) {
     const ctx = env.ctx;
     const gain = ctx.createGain(); gain.gain.value = o.gain == null ? 1 : o.gain;
     gain.connect(env.music);
-    const base = ctx.createGain(); base.gain.value = 1; base.connect(gain);
-    const combat = ctx.createGain(); combat.gain.value = o.intensity == null ? 0 : o.intensity; combat.connect(gain);
-    return {
-      key: key, tr: tr, env: env, gain: gain, base: base, combat: combat,
+    const p = {
+      key: key, tr: tr, env: env, gain: gain,
       spb: 60 / tr.bpm / 4,
       len: tr.bars * 16,
       startTime: o.startTime, step: 0, dead: false, stopAt: Infinity,
+      /* the old single intensity control is now the momentum slider, so
+         intensity: n still means exactly what it always meant */
+      mom: tr.boss ? 1 : clamp(o.intensity == null ? 0 : o.intensity, 0, 1),
+      /* the caller passes the slider positions in; a constructor that reached
+         for live engine state could not be rendered offline reproducibly */
+      dep: clamp(o.depth == null ? 0.5 : o.depth, 0, 1),
+      pow: clamp(o.power == null ? 0.5 : o.power, 0, 1),
     };
+    const n = tr.stemList.length;
+    p.stemW = new Float32Array(n);
+    p.stemCur = new Float32Array(n);
+    p.stemOn = new Uint8Array(n);
+    p.stemGain = new Array(n);
+    for (let i = 0; i < n; i++) {
+      const g = ctx.createGain(); g.gain.value = 0; g.connect(gain);
+      p.stemGain[i] = g;
+    }
+    /* seed the mix directly rather than ramping to it: an offline render is
+       never pumped, so whatever is set here is what it plays throughout */
+    cubeWeights(p);
+    for (let i = 0; i < n; i++) {
+      p.stemGain[i].gain.value = p.stemW[i];
+      p.stemCur[i] = p.stemW[i];
+      p.stemOn[i] = p.stemW[i] > STEM_ON ? 1 : 0;
+    }
+    return p;
   }
 
   /* Every track gets a continuous harmonic bed, fired here rather than in the
@@ -2999,7 +2637,9 @@ G.Pool = function (factory, reset) {
     const bar = ((s % p.len) >> 4) % prog.length;
     const ch = prog[bar];
     const spb = p.spb;
-    iDrone(p.env, p.base, t, {
+    /* Straight to the player gain, not into the cube: the bed is the floor
+       under every arrangement, not a stem any slider can silence. */
+    iDrone(p.env, p.gain, t, {
       f: mtof(ch.r + (bed.oct == null ? -12 : bed.oct)),
       len: spb * 16, rel: spb * (bed.rel == null ? 2.5 : bed.rel),
       gain: bed.gain == null ? 0.22 : bed.gain,
@@ -3023,16 +2663,2241 @@ G.Pool = function (factory, reset) {
       let t = p.startTime + s * spb;
       if (p.tr.swing && (s & 1)) t += p.tr.swing * spb;
       if (t >= p.stopAt) { p.step++; continue; }
-      try { scheduleBed(p, s, t); p.tr.step(p, s, t); }
+      try {
+        scheduleBed(p, s, t);
+        stemTransitions(p, s, t);
+        const list = p.tr.stemList, w = p.stemW;
+        for (let i = 0; i < list.length; i++) {
+          /* the optimisation: a stem at zero builds no graph at all */
+          if (w[i] > CUBE_EPS) list[i].step(p, s, t, p.stemGain[i]);
+        }
+      }
       catch (e) { oops(e); p.dead = true; return; }
       p.step++;
     }
   }
 
   function destroyPlayer(p) {
-    try { p.base.disconnect(); p.combat.disconnect(); p.gain.disconnect(); } catch (e) { }
+    try {
+      for (let i = 0; i < p.stemGain.length; i++) p.stemGain[i].disconnect();
+      p.gain.disconnect();
+    } catch (e) { }
     p.dead = true;
   }
+
+
+  Object.assign(A, {
+    TRACKS, track, chordOf, cornerName, cornerWeights, cubeWeights, applyStemGains,
+    resolveTrack, makePlayer, schedulePlayer, destroyPlayer,
+  });
+})();
+
+
+/* ===== 105_audio_tracks_a.js ===== */
+/* ============================================================
+   BIND69 — AUDIO :: TRACKS — FLOORS 1-4
+   userland, network, filesystem, kernel.
+
+   Arrangement only. The cube machinery, the scheduler and the instrument
+   vocabulary all arrive through G.audioLib; nothing else crosses.
+   ============================================================ */
+(function () {
+  const A = G.audioLib;
+  const { mtof, hrnd, P, iKick, iSnare, iHat, iSub, iSaw, iPluck, iFM, iRing, iSweep, iMetal,
+    iDrone, iBlip, track, chordOf } = A;
+
+  /* ---- 1. USERLAND — calm phosphor-terminal ambience ---- */
+  track('userland', {
+    name: 'phosphor', bpm: 92, bars: 4, swing: 0.06, tier: 0,
+    prog: [
+      { r: 45, c: [57, 60, 64, 67] },   // Am7
+      { r: 41, c: [53, 57, 60, 65] },   // Fmaj7
+      { r: 36, c: [52, 55, 60, 64] },   // Cmaj7
+      { r: 43, c: [50, 55, 59, 62] },   // G6
+    ],
+    bed: { gain: 0.15, cut: 240, oct: -12, voices: 2, detune: 6, lfo: 0.9, lfoAmt: 0.1 },
+
+    /* First track on the cube. Momentum carries the rhythm section, depth the
+       harmonic colour (safe → bells, cornered → a tritone drone that refuses to
+       resolve), power the low end and the melody. `ticks` sits at all 27
+       corners: it is the phosphor-terminal signature, not a layer. */
+    stems: {
+      /* --- always --- */
+      ticks: {
+        step(M, s, t, out) {
+          const i = s % M.len;
+          if (hrnd(i, 3) > 0.72) iBlip(M.env, out, t, {
+            key: 'utick', f0: 2400, f1: 2200, dur: 0.02, duty: 0.2, decay: 2, gain: 0.1,
+            bits: 3, crush: 9000, pan: hrnd(i, 4) * 1.4 - 0.7,
+          });
+        },
+      },
+
+      /* --- momentum: what is happening right now --- */
+      kick: {
+        step(M, s, t, out) {
+          const k = (s % M.len) & 15;
+          if (k === 0 || k === 10) iKick(M.env, out, t, { gain: 0.5, f0: 120, f1: 42, dur: 0.26, click: 0.12 });
+        },
+      },
+      hat: {
+        step(M, s, t, out) {
+          const i = s % M.len;
+          if ((i & 15) % 4 === 2) iHat(M.env, out, t, { gain: 0.16 + hrnd(i, 1) * 0.06, dur: 0.03, cut: 8000 });
+        },
+      },
+      hatDrive: {
+        step(M, s, t, out) {
+          if (((s % M.len) & 15) % 2 === 1) iHat(M.env, out, t, { gain: 0.2, dur: 0.028, cut: 9000 });
+        },
+      },
+      snare: {
+        step(M, s, t, out) {
+          const k = (s % M.len) & 15;
+          if (k === 4 || k === 12) iSnare(M.env, out, t, { gain: 0.5, dur: 0.14, tone: 2100, body: 190 });
+        },
+        /* a backbeat this loud appearing on a bare downbeat is a slap — the
+           sweep opens across the bar so the snare arrives inside something */
+        enter(M, t, out) {
+          iSweep(M.env, out, t, { dur: M.spb * 4, f0: 700, f1: 5200, q: 1.6, gain: 0.13 });
+        },
+        exit(M, t, out) {
+          iMetal(M.env, out, t, { f: 300, dur: 0.55, gain: 0.09, cut: 5200, q: 1.4, space: 0.55 });
+        },
+      },
+      /* Momentum is otherwise all percussion, and percussion is transient —
+         it changes the onset rate far more than the level. This is the axis's
+         sustained half: an eighth-note bassline rather than a quarter-note
+         pulse, so winding momentum up reads as drive and not just clatter. */
+      bassPulse: {
+        step(M, s, t, out) {
+          const i = s % M.len, k = i & 15, ch = chordOf(M, i >> 4);
+          if (k % 2) return;
+          const oct = (k === 6 || k === 14) ? 12 : 0;
+          iSub(M.env, out, t, { f: mtof(ch.r + oct), len: M.spb * 1.5, gain: 0.34, wave: 'triangle' });
+        },
+      },
+
+      /* --- depth: how much trouble you are in --- */
+      pad: {
+        step(M, s, t, out) {
+          const i = s % M.len, ch = chordOf(M, i >> 4);
+          if ((i & 15) !== 0) return;
+          for (let j = 0; j < 3; j++) {
+            iSaw(M.env, out, t, {
+              f: mtof(ch.c[j] - 12), len: M.spb * 16, gain: 0.13, cut: 620, q: 1.2,
+              detune: 8, voices: 2, a: 0.25, rel: M.spb * 2.6, space: 0.25,
+            });
+          }
+        },
+      },
+      bells: {
+        step(M, s, t, out) {
+          const i = s % M.len, k = i & 15, ch = chordOf(M, i >> 4);
+          if (k !== 0 && k !== 6) return;
+          iPluck(M.env, out, t, {
+            f: mtof(ch.c[3] + 24), dur: 1.4, damp: 0.9975, bright: 0.3,
+            gain: 0.12, cut: 6000, pan: k === 0 ? -0.4 : 0.45, space: 0.6,
+          });
+        },
+      },
+      drift: {
+        /* a tritone over the root, detuned hard and swelling slowly: the
+           progression stops resolving and the room stops feeling safe */
+        step(M, s, t, out) {
+          const i = s % M.len, ch = chordOf(M, i >> 4);
+          if ((i & 15) !== 0) return;
+          iDrone(M.env, out, t, {
+            f: mtof(ch.r + 6), len: M.spb * 16, gain: 0.15, cut: 620, q: 4,
+            detune: 24, voices: 3, lfo: 0.17, lfoAmt: 0.3, a: 0.7, rel: M.spb * 3,
+          });
+        },
+      },
+
+      /* --- power: how strong your build is --- */
+      arp: {
+        step(M, s, t, out) {
+          const i = s % M.len, k = i & 15, ch = chordOf(M, i >> 4);
+          if (k % 2) return;
+          const idx = (k >> 1) % 4;
+          const oct = ((k >> 3) & 1) ? 12 : 0;
+          iPluck(M.env, out, t, {
+            f: mtof(ch.c[idx] + oct), dur: 0.55, damp: 0.9915, bright: 0.55,
+            gain: 0.3, cut: 3600, pan: (idx - 1.5) * 0.28, space: 0.3,
+          });
+        },
+      },
+      sub: {
+        step(M, s, t, out) {
+          const i = s % M.len, ch = chordOf(M, i >> 4);
+          if ((i & 15) !== 0) return;
+          iSub(M.env, out, t, { f: mtof(ch.r - 12), len: M.spb * 16, rel: M.spb * 2.4, gain: 0.5, harm: 0.22, a: 0.02 });
+        },
+      },
+      subOct: {
+        step(M, s, t, out) {
+          const i = s % M.len, k = i & 15, ch = chordOf(M, i >> 4);
+          if (k !== 0 && k !== 8) return;
+          iSaw(M.env, out, t, {
+            f: mtof(ch.r - 24), len: M.spb * 8, gain: 0.28, cut: 190, q: 2,
+            detune: 5, voices: 2, a: 0.03, rel: M.spb * 1.6,
+          });
+        },
+      },
+      lead: {
+        /* chord-tone indices, never absolute intervals — the progression walks
+           through four different qualities and a fixed shape would fight it */
+        step(M, s, t, out) {
+          const i = s % M.len, bar = i >> 4, k = i & 15, ch = chordOf(M, bar);
+          if (k % 2) return;
+          const j = (k >> 1) % 8;
+          if (j === 3 && (bar & 1) === 0) return;   // a hole, so the line phrases
+          const seq = [0, 2, 3, 2, 1, 3, 2, 0];
+          iFM(M.env, out, t, {
+            f: mtof(ch.c[seq[j]] + 12), len: M.spb * 1.6, ratio: 2, index: 220, idxEnd: 0.04,
+            gain: 0.17, pan: 0.2, space: 0.45,
+          });
+        },
+        enter(M, t, out) {
+          iBlip(M.env, out, t, {
+            key: 'ulead', f0: 700, f1: 2600, dur: 0.28, duty: 0.4, decay: 1.4,
+            gain: 0.15, bits: 5, crush: 14000,
+          });
+        },
+      },
+    },
+
+    /* momentum, depth, power.
+
+       `ticks` and `sub` are at all 27 corners. Neither is a layer: one is the
+       track's signature and the other is its root, and a slider that can
+       remove the bass entirely leaves whole faces of the cube with nothing
+       under them — which is exactly what the first draft of this table did.
+       Power escalates weight and melody (subOct, lead), not whether there is
+       any low end at all.
+
+       Most corners are the union of what each axis contributes alone; the
+       three that are not are why the table is worth writing longhand. */
+    cube: {
+      /* --- still --- */
+      AAA: ['ticks', 'sub', 'bells', 'pad'],
+      AAB: ['ticks', 'sub', 'bells', 'pad', 'arp'],
+      AAC: ['ticks', 'sub', 'bells', 'pad', 'arp', 'subOct', 'lead'],
+      ABA: ['ticks', 'sub', 'pad'],
+      ABB: ['ticks', 'sub', 'pad', 'arp'],
+      ABC: ['ticks', 'sub', 'pad', 'arp', 'subOct', 'lead'],
+      ACA: ['ticks', 'sub', 'pad', 'drift'],
+      ACB: ['ticks', 'sub', 'pad', 'drift', 'arp'],
+      ACC: ['ticks', 'sub', 'pad', 'drift', 'subOct', 'lead'],              // menacing calm: held, not busy
+
+      /* --- moving --- */
+      BAA: ['ticks', 'sub', 'bells', 'pad', 'kick', 'hat'],
+      BAB: ['ticks', 'sub', 'bells', 'pad', 'arp', 'kick', 'hat'],
+      BAC: ['ticks', 'sub', 'bells', 'pad', 'arp', 'subOct', 'lead', 'kick', 'hat'],
+      BBA: ['ticks', 'sub', 'pad', 'kick', 'hat'],
+      BBB: ['ticks', 'sub', 'pad', 'arp', 'kick', 'hat'],
+      BBC: ['ticks', 'sub', 'pad', 'arp', 'subOct', 'lead', 'kick', 'hat'],
+      BCA: ['ticks', 'sub', 'pad', 'drift', 'kick', 'hat'],
+      BCB: ['ticks', 'sub', 'pad', 'drift', 'arp', 'kick', 'hat'],
+      BCC: ['ticks', 'sub', 'pad', 'drift', 'arp', 'subOct', 'lead', 'kick', 'hat'],
+
+      /* --- frantic --- */
+      CAA: ['ticks', 'sub', 'bells', 'pad', 'kick', 'hatDrive', 'bassPulse'],   // trash room, safe: no backbeat
+      CAB: ['ticks', 'sub', 'bells', 'pad', 'arp', 'kick', 'hatDrive', 'snare', 'bassPulse'],
+      CAC: ['ticks', 'sub', 'bells', 'pad', 'arp', 'subOct', 'lead', 'kick', 'hatDrive', 'snare', 'bassPulse'],
+      CBA: ['ticks', 'sub', 'pad', 'kick', 'hatDrive', 'snare', 'bassPulse'],
+      CBB: ['ticks', 'sub', 'pad', 'arp', 'kick', 'hatDrive', 'snare', 'bassPulse'],
+      CBC: ['ticks', 'sub', 'pad', 'arp', 'subOct', 'lead', 'kick', 'hatDrive', 'snare', 'bassPulse'],
+      CCA: ['ticks', 'sub', 'drift', 'kick', 'hatDrive', 'snare', 'bassPulse'],  // about to die: no comfort
+      CCB: ['ticks', 'sub', 'pad', 'drift', 'arp', 'kick', 'hatDrive', 'snare', 'bassPulse'],
+      CCC: ['ticks', 'sub', 'pad', 'drift', 'arp', 'subOct', 'lead', 'kick', 'hatDrive', 'snare', 'bassPulse'],
+    },
+  });
+
+  /* ---- 2. NETWORK — packet-switched dub ---- */
+  track('network', {
+    name: 'packet', bpm: 104, bars: 4, swing: 0.12, tier: 1,
+    prog: [
+      { r: 38, c: [50, 53, 57, 60] },   // Dm7
+      { r: 34, c: [46, 50, 53, 57] },   // Bbmaj7
+      { r: 41, c: [53, 57, 60, 64] },   // Fmaj7
+      { r: 36, c: [48, 52, 55, 59] },   // Cmaj7
+    ],
+    bed: { gain: 0.5, cut: 300, oct: -12, voices: 3, detune: 9, lfo: 1.4, lfoAmt: 0.1 },
+    stems: {
+      /* --- always: the packet chatter and the dub root --- */
+      plucks: {
+        step(M, s, t, out) {
+          const i = s % M.len, bar = i >> 4, k = i & 15, ch = chordOf(M, bar);
+          if (!P('x.xx.x.xx.x.xx.x', k)) return;
+          const n = ch.c[(k * 3 + bar) % ch.c.length] + (hrnd(i, 9) > 0.75 ? 12 : 0);
+          iPluck(M.env, out, t, {
+            f: mtof(n), dur: 0.35, damp: 0.988, bright: 0.68, gain: 0.24,
+            cut: 5200, pan: (k % 4 < 2 ? -0.55 : 0.55), space: 0.3,
+          });
+        },
+      },
+      dubBass: {
+        step(M, s, t, out) {
+          const i = s % M.len, ch = chordOf(M, i >> 4);
+          if ((i & 15) % 4 !== 2) return;
+          iSaw(M.env, out, t, {
+            f: mtof(ch.r), len: M.spb * 1.4, gain: 0.5, cut: 420, q: 5, fenv: 2.6, fdur: 0.12,
+            detune: 10, voices: 2, rel: 0.1,
+          });
+        },
+      },
+
+      /* --- momentum --- */
+      kick: {
+        step(M, s, t, out) {
+          if (P('x.......x..x....', (s % M.len) & 15))
+            iKick(M.env, out, t, { gain: 0.7, f0: 145, f1: 44, dur: 0.28, click: 0.25 });
+        },
+      },
+      hats: {
+        step(M, s, t, out) {
+          const hv = P('4.6.4.7.4.6.4.7.', (s % M.len) & 15);
+          if (hv) iHat(M.env, out, t, { gain: hv * 0.3, dur: 0.032, cut: 7600, metal: 0.6 });
+        },
+      },
+      hatsDub: {
+        step(M, s, t, out) {
+          if (P('..x...x...x...x.', (s % M.len) & 15))
+            iHat(M.env, out, t, { gain: 0.24, dur: 0.06, cut: 6500, metal: 1 });
+        },
+      },
+      snare: {
+        step(M, s, t, out) {
+          if (P('....x.......x...', (s % M.len) & 15))
+            iSnare(M.env, out, t, { gain: 0.5, dur: 0.15, tone: 2000, body: 200 });
+        },
+      },
+      snareGhost: {
+        step(M, s, t, out) {
+          if (((s % M.len) & 15) === 14)
+            iSnare(M.env, out, t, { gain: 0.4, dur: 0.1, tone: 2600, body: 240 });
+        },
+        /* the riser the arrangement used to fire once a phrase, now spent on
+           the moment the rhythm section actually doubles up */
+        enter(M, t, out) {
+          iSweep(M.env, out, t, { dur: M.spb * 8, f0: 400, f1: 5000, q: 2, gain: 0.18 });
+        },
+      },
+      bassDouble: {
+        step(M, s, t, out) {
+          const i = s % M.len, ch = chordOf(M, i >> 4);
+          if ((i & 15) % 2) return;
+          iSaw(M.env, out, t, {
+            f: mtof(ch.r - 12), len: M.spb * 0.8, gain: 0.36, cut: 300, q: 4, dist: 3, voices: 2,
+          });
+        },
+      },
+
+      /* --- depth --- */
+      pad: {
+        step(M, s, t, out) {
+          const i = s % M.len, ch = chordOf(M, i >> 4);
+          if ((i & 15) !== 0) return;
+          for (let j = 0; j < 3; j++) iSaw(M.env, out, t, {
+            f: mtof(ch.c[j]), len: M.spb * 16, rel: M.spb * 2.6, gain: 0.1, cut: 780, q: 1.3,
+            detune: 7, voices: 2, a: 0.2, space: 0.3,
+          });
+        },
+      },
+      pings: {
+        step(M, s, t, out) {
+          const i = s % M.len, bar = i >> 4;
+          if ((i & 15) !== 6 || bar % 2 !== 1) return;
+          iFM(M.env, out, t, {
+            f: mtof(chordOf(M, bar).c[3] + 12), len: 0.4, ratio: 3.5, index: 700,
+            idxEnd: 0.03, gain: 0.24, pan: 0.6, space: 0.5,
+          });
+        },
+      },
+      drift: {
+        step(M, s, t, out) {
+          const i = s % M.len, ch = chordOf(M, i >> 4);
+          if ((i & 15) !== 0) return;
+          iDrone(M.env, out, t, {
+            f: mtof(ch.r + 6), len: M.spb * 16, gain: 0.16, cut: 700, q: 4,
+            detune: 22, voices: 3, lfo: 0.21, lfoAmt: 0.3, a: 0.7, rel: M.spb * 3,
+          });
+        },
+      },
+
+      /* --- power --- */
+      stab: {
+        step(M, s, t, out) {
+          const i = s % M.len, k = i & 15, ch = chordOf(M, i >> 4);
+          if (k !== 6 && k !== 10) return;
+          for (let j = 1; j < 4; j++) iSaw(M.env, out, t, {
+            f: mtof(ch.c[j]), len: M.spb * 1.1, gain: 0.13, cut: 1900, q: 3,
+            fenv: 1.8, fdur: 0.09, detune: 12, voices: 2, a: 0.004, rel: 0.08, pan: -0.25,
+          });
+        },
+      },
+      subOct: {
+        step(M, s, t, out) {
+          const i = s % M.len, k = i & 15, ch = chordOf(M, i >> 4);
+          if (k !== 0 && k !== 8) return;
+          iSub(M.env, out, t, { f: mtof(ch.r - 24), len: M.spb * 7, gain: 0.34, harm: 0.18, a: 0.02 });
+        },
+      },
+      lead: {
+        step(M, s, t, out) {
+          const i = s % M.len, bar = i >> 4, k = i & 15, ch = chordOf(M, bar);
+          if (k % 4 !== 0) return;
+          const seq = [3, 2, 3, 1];
+          iFM(M.env, out, t, {
+            f: mtof(ch.c[seq[(k >> 2) % 4]] + 12), len: M.spb * 3, ratio: 1.5, index: 320,
+            idxEnd: 0.05, gain: 0.16, pan: 0.3, space: 0.5,
+          });
+        },
+        enter(M, t, out) {
+          iFM(M.env, out, t, {
+            f: 900, len: 0.5, ratio: 2.5, index: 500, idxEnd: 0.02, gain: 0.13, space: 0.6,
+          });
+        },
+      },
+    },
+    cube: {
+      AAA: ['plucks', 'dubBass', 'pad', 'pings'],
+      AAB: ['plucks', 'dubBass', 'pad', 'pings', 'stab'],
+      AAC: ['plucks', 'dubBass', 'pad', 'pings', 'stab', 'subOct', 'lead'],
+      ABA: ['plucks', 'dubBass', 'pad'],
+      ABB: ['plucks', 'dubBass', 'pad', 'stab'],
+      ABC: ['plucks', 'dubBass', 'pad', 'stab', 'subOct', 'lead'],
+      ACA: ['plucks', 'dubBass', 'pad', 'drift'],
+      ACB: ['plucks', 'dubBass', 'pad', 'drift', 'stab'],
+      ACC: ['plucks', 'dubBass', 'pad', 'drift', 'subOct', 'lead'],           // held, not busy
+
+      BAA: ['plucks', 'dubBass', 'pad', 'pings', 'kick', 'hats', 'snare'],
+      BAB: ['plucks', 'dubBass', 'pad', 'pings', 'stab', 'kick', 'hats', 'snare'],
+      BAC: ['plucks', 'dubBass', 'pad', 'pings', 'stab', 'subOct', 'lead', 'kick', 'hats', 'snare'],
+      BBA: ['plucks', 'dubBass', 'pad', 'kick', 'hats', 'snare'],
+      BBB: ['plucks', 'dubBass', 'pad', 'stab', 'kick', 'hats', 'snare'],
+      BBC: ['plucks', 'dubBass', 'pad', 'stab', 'subOct', 'lead', 'kick', 'hats', 'snare'],
+      BCA: ['plucks', 'dubBass', 'pad', 'drift', 'kick', 'hats', 'snare'],
+      BCB: ['plucks', 'dubBass', 'pad', 'drift', 'stab', 'kick', 'hats', 'snare'],
+      BCC: ['plucks', 'dubBass', 'pad', 'drift', 'stab', 'subOct', 'lead', 'kick', 'hats', 'snare'],
+
+      CAA: ['plucks', 'dubBass', 'pad', 'pings', 'kick', 'hatsDub', 'snare', 'bassDouble'],   // safe: no ghost
+      CAB: ['plucks', 'dubBass', 'pad', 'pings', 'stab', 'kick', 'hatsDub', 'snare', 'snareGhost', 'bassDouble'],
+      CAC: ['plucks', 'dubBass', 'pad', 'pings', 'stab', 'subOct', 'lead', 'kick', 'hatsDub', 'snare', 'snareGhost', 'bassDouble'],
+      CBA: ['plucks', 'dubBass', 'pad', 'kick', 'hatsDub', 'snare', 'snareGhost', 'bassDouble'],
+      CBB: ['plucks', 'dubBass', 'pad', 'stab', 'kick', 'hatsDub', 'snare', 'snareGhost', 'bassDouble'],
+      CBC: ['plucks', 'dubBass', 'pad', 'stab', 'subOct', 'lead', 'kick', 'hatsDub', 'snare', 'snareGhost', 'bassDouble'],
+      CCA: ['plucks', 'dubBass', 'drift', 'kick', 'hatsDub', 'snare', 'snareGhost', 'bassDouble'],   // no comfort
+      CCB: ['plucks', 'dubBass', 'pad', 'drift', 'stab', 'kick', 'hatsDub', 'snare', 'snareGhost', 'bassDouble'],
+      CCC: ['plucks', 'dubBass', 'pad', 'drift', 'stab', 'subOct', 'lead', 'kick', 'hatsDub', 'snare', 'snareGhost', 'bassDouble'],
+    },
+  });
+
+  /* ---- 3. FILESYSTEM — mechanical rotation ---- */
+  track('filesystem', {
+    name: 'spindle', bpm: 114, bars: 4, swing: 0, tier: 2,
+    prog: [
+      { r: 38, c: [50, 53, 57, 62] },   // Dm add11
+      { r: 38, c: [50, 55, 57, 60] },
+      { r: 43, c: [48, 55, 58, 62] },   // Gm-ish
+      { r: 36, c: [48, 51, 55, 58] },
+    ],
+    bed: { gain: 0.16, cut: 230, oct: -12, voices: 2, detune: 10 },
+    stems: {
+      /* --- always: the head chatter and the spindle itself --- */
+      seek: {
+        step(M, s, t, out) {
+          const i = s % M.len;
+          if (hrnd(i, 2) <= 0.42) return;
+          iBlip(M.env, out, t + hrnd(i, 5) * M.spb * 0.4, {
+            key: 'seek', f0: 3200, f1: 1800, dur: 0.018, duty: 0.15, decay: 2.4,
+            gain: 0.13 + hrnd(i, 6) * 0.08, bits: 3, crush: 8000, pan: Math.sin(i * 0.7) * 0.75,
+          });
+        },
+      },
+      churn: {
+        step(M, s, t, out) {
+          const i = s % M.len, ch = chordOf(M, i >> 4);
+          if ((i & 15) !== 0) return;
+          iDrone(M.env, out, t, {
+            f: mtof(ch.r - 12), len: M.spb * 16, gain: 0.42, cut: 260, q: 3.5,
+            detune: 11, voices: 3, lfo: 2.6, lfoAmt: 0.18, a: 0.1, rel: M.spb * 2.4,
+          });
+        },
+      },
+
+      /* --- momentum --- */
+      kick: {
+        step(M, s, t, out) {
+          if (P('x.....x...x.....', (s % M.len) & 15))
+            iKick(M.env, out, t, { gain: 0.72, f0: 135, f1: 40, dur: 0.3, click: 0.3, body: 0.2 });
+        },
+      },
+      snare: {
+        step(M, s, t, out) {
+          if (P('....x.......x...', (s % M.len) & 15))
+            iSnare(M.env, out, t, { gain: 0.55, dur: 0.17, tone: 1700, body: 170, q: 0.6 });
+        },
+      },
+      hats: {
+        step(M, s, t, out) {
+          if (((s % M.len) & 15) % 2 === 0)
+            iHat(M.env, out, t, { gain: 0.22, dur: 0.035, cut: 8200 });
+        },
+      },
+      grind: {
+        step(M, s, t, out) {
+          const i = s % M.len, ch = chordOf(M, i >> 4);
+          if (!P('x.x.xx..x.x.x.x.', i & 15)) return;
+          iSaw(M.env, out, t, {
+            f: mtof(ch.r), len: M.spb * 0.7, gain: 0.4, cut: 520, q: 6, dist: 4, fenv: 2, voices: 2,
+          });
+        },
+        enter(M, t, out) {
+          iMetal(M.env, out, t, { f: 150, dur: 0.6, gain: 0.14, cut: 3400, q: 1.6, space: 0.4 });
+        },
+      },
+
+      /* --- depth --- */
+      platter: {
+        /* the mechanical clank that says the machine is still healthy */
+        step(M, s, t, out) {
+          if (((s % M.len) & 15) === 8)
+            iMetal(M.env, out, t, { f: 210, dur: 0.22, gain: 0.16, cut: 3000, q: 2, space: 0.35 });
+        },
+      },
+      pad: {
+        step(M, s, t, out) {
+          const i = s % M.len, ch = chordOf(M, i >> 4);
+          if ((i & 15) !== 0) return;
+          for (let j = 0; j < 3; j++) iSaw(M.env, out, t, {
+            f: mtof(ch.c[j]), len: M.spb * 16, rel: M.spb * 2.4, gain: 0.09, cut: 720, q: 1.4,
+            detune: 9, voices: 2, a: 0.22, space: 0.3,
+          });
+        },
+      },
+      drift: {
+        step(M, s, t, out) {
+          const i = s % M.len, ch = chordOf(M, i >> 4);
+          if ((i & 15) !== 0) return;
+          iDrone(M.env, out, t, {
+            f: mtof(ch.r + 6), len: M.spb * 16, gain: 0.15, cut: 640, q: 4,
+            detune: 25, voices: 3, lfo: 0.19, lfoAmt: 0.32, a: 0.7, rel: M.spb * 3,
+          });
+        },
+      },
+
+      /* --- power --- */
+      arp: {
+        step(M, s, t, out) {
+          const i = s % M.len, k = i & 15, ch = chordOf(M, i >> 4);
+          if (k % 2) return;
+          const seq = [0, 2, 1, 3, 2, 1, 3, 0];
+          const n = ch.c[seq[(k >> 1) % 8]];
+          iBlip(M.env, out, t, {
+            key: 'fsarp', f0: mtof(n + 12), f1: mtof(n + 12), dur: 0.13, duty: 0.35,
+            decay: 1.6, gain: 0.16, bits: 4, crush: 13000, cut: 4000,
+            rate: 1, pan: (k % 8 < 4 ? -0.35 : 0.35),
+          });
+        },
+      },
+      subOct: {
+        step(M, s, t, out) {
+          const i = s % M.len, k = i & 15, ch = chordOf(M, i >> 4);
+          if (k !== 0 && k !== 8) return;
+          iSub(M.env, out, t, { f: mtof(ch.r - 24), len: M.spb * 7, gain: 0.32, harm: 0.2, a: 0.02 });
+        },
+      },
+      lead: {
+        step(M, s, t, out) {
+          const i = s % M.len, bar = i >> 4, k = i & 15, ch = chordOf(M, bar);
+          if (k % 4 !== 2) return;
+          const seq = [2, 3, 1, 3];
+          iPluck(M.env, out, t, {
+            f: mtof(ch.c[seq[(k >> 2) % 4]] + 12), dur: 0.7, damp: 0.993, bright: 0.5,
+            gain: 0.22, cut: 4200, pan: 0.3, space: 0.45,
+          });
+        },
+      },
+    },
+    cube: {
+      AAA: ['seek', 'churn', 'pad', 'platter'],
+      AAB: ['seek', 'churn', 'pad', 'platter', 'arp'],
+      AAC: ['seek', 'churn', 'pad', 'platter', 'arp', 'subOct', 'lead'],
+      ABA: ['seek', 'churn', 'pad'],
+      ABB: ['seek', 'churn', 'pad', 'arp'],
+      ABC: ['seek', 'churn', 'pad', 'arp', 'subOct', 'lead'],
+      ACA: ['seek', 'churn', 'pad', 'drift'],
+      ACB: ['seek', 'churn', 'pad', 'drift', 'arp'],
+      ACC: ['seek', 'churn', 'pad', 'drift', 'subOct', 'lead'],               // held, not busy
+
+      BAA: ['seek', 'churn', 'pad', 'platter', 'kick', 'snare'],
+      BAB: ['seek', 'churn', 'pad', 'platter', 'arp', 'kick', 'snare'],
+      BAC: ['seek', 'churn', 'pad', 'platter', 'arp', 'subOct', 'lead', 'kick', 'snare'],
+      BBA: ['seek', 'churn', 'pad', 'kick', 'snare'],
+      BBB: ['seek', 'churn', 'pad', 'arp', 'kick', 'snare'],
+      BBC: ['seek', 'churn', 'pad', 'arp', 'subOct', 'lead', 'kick', 'snare'],
+      BCA: ['seek', 'churn', 'pad', 'drift', 'kick', 'snare'],
+      BCB: ['seek', 'churn', 'pad', 'drift', 'arp', 'kick', 'snare'],
+      BCC: ['seek', 'churn', 'pad', 'drift', 'arp', 'subOct', 'lead', 'kick', 'snare'],
+
+      CAA: ['seek', 'churn', 'pad', 'platter', 'kick', 'snare', 'hats'],       // safe: spindle spins, no grind
+      CAB: ['seek', 'churn', 'pad', 'platter', 'arp', 'kick', 'snare', 'hats', 'grind'],
+      CAC: ['seek', 'churn', 'pad', 'platter', 'arp', 'subOct', 'lead', 'kick', 'snare', 'hats', 'grind'],
+      CBA: ['seek', 'churn', 'pad', 'kick', 'snare', 'hats', 'grind'],
+      CBB: ['seek', 'churn', 'pad', 'arp', 'kick', 'snare', 'hats', 'grind'],
+      CBC: ['seek', 'churn', 'pad', 'arp', 'subOct', 'lead', 'kick', 'snare', 'hats', 'grind'],
+      CCA: ['seek', 'churn', 'drift', 'kick', 'snare', 'hats', 'grind'],       // no comfort
+      CCB: ['seek', 'churn', 'pad', 'drift', 'arp', 'kick', 'snare', 'hats', 'grind'],
+      CCC: ['seek', 'churn', 'pad', 'drift', 'arp', 'subOct', 'lead', 'kick', 'snare', 'hats', 'grind'],
+    },
+  });
+
+  /* ---- 4. KERNEL — driving industrial ---- */
+  track('kernel', {
+    name: 'ring0', bpm: 126, bars: 4, swing: 0, tier: 3,
+    prog: [
+      { r: 40, c: [52, 55, 59, 62] },   // Em7
+      { r: 40, c: [52, 55, 59, 64] },
+      { r: 36, c: [48, 52, 55, 59] },   // Cmaj7
+      { r: 35, c: [47, 51, 54, 59] },   // B
+    ],
+    bed: { gain: 0.2, cut: 200, oct: -12, voices: 2, detune: 8 },
+    stems: {
+      /* --- always: the ring-0 sub and the 16th bass engine --- */
+      subDrone: {
+        step(M, s, t, out) {
+          const i = s % M.len, ch = chordOf(M, i >> 4);
+          if ((i & 15) !== 0) return;
+          iDrone(M.env, out, t, {
+            f: mtof(ch.r - 24), len: M.spb * 16, gain: 0.4, cut: 180, q: 2,
+            voices: 2, detune: 6, a: 0.05, rel: M.spb * 2.4,
+          });
+        },
+      },
+      bass: {
+        step(M, s, t, out) {
+          const i = s % M.len, k = i & 15, ch = chordOf(M, i >> 4);
+          if (!P('x.xxx.x.xx.x.xx.', k)) return;
+          const oct = (k === 6 || k === 13) ? 12 : 0;
+          iSaw(M.env, out, t, {
+            f: mtof(ch.r - 12 + oct), len: M.spb * 0.85, gain: 0.62, cut: 360, q: 7,
+            fenv: 3.2, fdur: 0.07, dist: 6, detune: 14, voices: 3, rel: 0.04,
+          });
+        },
+      },
+
+      /* --- momentum --- */
+      kick: {
+        step(M, s, t, out) {
+          if (((s % M.len) & 15) % 4 === 0)
+            iKick(M.env, out, t, { gain: 1.0, f0: 160, f1: 43, dur: 0.3, click: 0.4, body: 0.25 });
+        },
+      },
+      snare: {
+        step(M, s, t, out) {
+          const k = (s % M.len) & 15;
+          if (k !== 4 && k !== 12) return;
+          iSnare(M.env, out, t, { gain: 0.62, dur: 0.16, tone: 2400, body: 210, wave: 'square' });
+          iMetal(M.env, out, t, { f: 340, dur: 0.14, gain: 0.14, cut: 4200, q: 2 });
+        },
+      },
+      hats: {
+        step(M, s, t, out) {
+          const k = (s % M.len) & 15;
+          if (k === 14) iHat(M.env, out, t, { gain: 0.3, dur: 0.14, cut: 7000, metal: 1.1 });
+          else if (k % 2 === 1) iHat(M.env, out, t, { gain: 0.26, dur: 0.03, cut: 8600, metal: 0.5 });
+        },
+      },
+      kickDouble: {
+        step(M, s, t, out) {
+          if (P('..x.......x...x.', (s % M.len) & 15))
+            iKick(M.env, out, t, { gain: 1.0, f0: 155, f1: 45, dur: 0.22, click: 0.35 });
+        },
+      },
+      hats16: {
+        step(M, s, t, out) {
+          if (P('.x.x.x.x.x.x.x.x', (s % M.len) & 15))
+            iHat(M.env, out, t, { gain: 0.3, dur: 0.025, cut: 10000 });
+        },
+      },
+      snareGhost: {
+        step(M, s, t, out) {
+          const k = (s % M.len) & 15;
+          if (k === 6 || k === 14) iSnare(M.env, out, t, { gain: 0.42, dur: 0.09, tone: 3400, body: 300 });
+        },
+      },
+
+      /* --- depth --- */
+      pad: {
+        step(M, s, t, out) {
+          const i = s % M.len, ch = chordOf(M, i >> 4);
+          if ((i & 15) !== 0) return;
+          for (let j = 1; j < 4; j++) iSaw(M.env, out, t, {
+            f: mtof(ch.c[j]), len: M.spb * 16, rel: M.spb * 2.4, gain: 0.085, cut: 900, q: 1.4,
+            detune: 10, voices: 2, a: 0.2, space: 0.32,
+          });
+        },
+      },
+      chime: {
+        step(M, s, t, out) {
+          const i = s % M.len, k = i & 15, ch = chordOf(M, i >> 4);
+          if (k !== 2 && k !== 10) return;
+          iPluck(M.env, out, t, {
+            f: mtof(ch.c[3] + 24), dur: 1.1, damp: 0.9965, bright: 0.35,
+            gain: 0.1, cut: 6500, pan: k === 2 ? -0.45 : 0.45, space: 0.6,
+          });
+        },
+      },
+      siren: {
+        /* the ring-modulated alarm the combat layer used to open with — here
+           it is what "you are in trouble" sounds like, not what "busy" does */
+        step(M, s, t, out) {
+          const i = s % M.len, ch = chordOf(M, i >> 4);
+          if ((i & 15) % 4) return;
+          iRing(M.env, out, t, {
+            f: mtof(ch.c[0] + 12), mf: 137, len: M.spb * 3, gain: 0.55,
+            fslide: 1.02, wave: 'sawtooth', space: 0.2,
+          });
+        },
+        enter(M, t, out) {
+          iSweep(M.env, out, t, { dur: M.spb * 6, f0: 900, f1: 260, q: 3, gain: 0.16 });
+        },
+      },
+
+      /* --- power --- */
+      arp: {
+        step(M, s, t, out) {
+          const i = s % M.len, k = i & 15, ch = chordOf(M, i >> 4);
+          if (k % 2) return;
+          const seq = [0, 3, 1, 2, 0, 3, 2, 1];
+          const n = ch.c[seq[(k >> 1) % 8]] + 12;
+          iBlip(M.env, out, t, {
+            key: 'kar', f0: mtof(n), f1: mtof(n), dur: 0.11, duty: 0.25, decay: 1.3,
+            gain: 0.2, bits: 4, crush: 11000, cut: 5200, pan: (hrnd(i, 8) - 0.5) * 0.5,
+          });
+        },
+      },
+      subOct: {
+        step(M, s, t, out) {
+          const i = s % M.len, k = i & 15, ch = chordOf(M, i >> 4);
+          if (k !== 0 && k !== 8) return;
+          iSub(M.env, out, t, { f: mtof(ch.r - 24), len: M.spb * 7, gain: 0.3, harm: 0.22, a: 0.02 });
+        },
+      },
+      lead: {
+        step(M, s, t, out) {
+          const i = s % M.len, ch = chordOf(M, i >> 4);
+          if (!P('x..x..x.x..x..x.', i & 15)) return;
+          iSaw(M.env, out, t, {
+            f: mtof(ch.c[2] + 12), len: M.spb * 1.2, gain: 0.34, cut: 2200, q: 3,
+            fenv: 2, fdur: 0.1, dist: 4, detune: 20, voices: 2, a: 0.006, rel: 0.06,
+          });
+        },
+      },
+    },
+    cube: {
+      AAA: ['subDrone', 'bass', 'pad', 'chime'],
+      AAB: ['subDrone', 'bass', 'pad', 'chime', 'arp'],
+      AAC: ['subDrone', 'bass', 'pad', 'chime', 'arp', 'subOct', 'lead'],
+      ABA: ['subDrone', 'bass', 'pad'],
+      ABB: ['subDrone', 'bass', 'pad', 'arp'],
+      ABC: ['subDrone', 'bass', 'pad', 'arp', 'subOct', 'lead'],
+      ACA: ['subDrone', 'bass', 'pad', 'siren'],
+      ACB: ['subDrone', 'bass', 'pad', 'siren', 'arp'],
+      ACC: ['subDrone', 'bass', 'pad', 'siren', 'subOct', 'lead'],            // held, not busy
+
+      BAA: ['subDrone', 'bass', 'pad', 'chime', 'kick', 'snare', 'hats'],
+      BAB: ['subDrone', 'bass', 'pad', 'chime', 'arp', 'kick', 'snare', 'hats'],
+      BAC: ['subDrone', 'bass', 'pad', 'chime', 'arp', 'subOct', 'lead', 'kick', 'snare', 'hats'],
+      BBA: ['subDrone', 'bass', 'pad', 'kick', 'snare', 'hats'],
+      BBB: ['subDrone', 'bass', 'pad', 'arp', 'kick', 'snare', 'hats'],
+      BBC: ['subDrone', 'bass', 'pad', 'arp', 'subOct', 'lead', 'kick', 'snare', 'hats'],
+      BCA: ['subDrone', 'bass', 'pad', 'siren', 'kick', 'snare', 'hats'],
+      BCB: ['subDrone', 'bass', 'pad', 'siren', 'arp', 'kick', 'snare', 'hats'],
+      BCC: ['subDrone', 'bass', 'pad', 'siren', 'arp', 'subOct', 'lead', 'kick', 'snare', 'hats'],
+
+      CAA: ['subDrone', 'bass', 'pad', 'chime', 'kick', 'snare', 'hats16', 'kickDouble'],   // safe: no ghost snare
+      CAB: ['subDrone', 'bass', 'pad', 'chime', 'arp', 'kick', 'snare', 'hats16', 'kickDouble', 'snareGhost'],
+      CAC: ['subDrone', 'bass', 'pad', 'chime', 'arp', 'subOct', 'lead', 'kick', 'snare', 'hats16', 'kickDouble', 'snareGhost'],
+      CBA: ['subDrone', 'bass', 'pad', 'kick', 'snare', 'hats16', 'kickDouble', 'snareGhost'],
+      CBB: ['subDrone', 'bass', 'pad', 'arp', 'kick', 'snare', 'hats16', 'kickDouble', 'snareGhost'],
+      CBC: ['subDrone', 'bass', 'pad', 'arp', 'subOct', 'lead', 'kick', 'snare', 'hats16', 'kickDouble', 'snareGhost'],
+      CCA: ['subDrone', 'bass', 'siren', 'kick', 'snare', 'hats16', 'kickDouble', 'snareGhost'],   // no comfort
+      CCB: ['subDrone', 'bass', 'pad', 'siren', 'arp', 'kick', 'snare', 'hats16', 'kickDouble', 'snareGhost'],
+      CCC: ['subDrone', 'bass', 'pad', 'siren', 'arp', 'subOct', 'lead', 'kick', 'snare', 'hats16', 'kickDouble', 'snareGhost'],
+    },
+  });
+
+})();
+
+
+/* ===== 106_audio_tracks_b.js ===== */
+/* ============================================================
+   BIND69 — AUDIO :: TRACKS — FLOORS 5-8
+   drivers, firmware, microcode, silicon.
+
+   Arrangement only. The cube machinery, the scheduler and the instrument
+   vocabulary all arrive through G.audioLib; nothing else crosses.
+   ============================================================ */
+(function () {
+  const A = G.audioLib;
+  const { mtof, hrnd, P, iKick, iSnare, iHat, iSub, iSaw, iPluck, iFM, iRing, iSweep, iGrain,
+    iMetal, iDrone, iBlip, track, chordOf } = A;
+
+  /* ---- 5. DRIVERS — jittery broken electro ---- */
+  track('drivers', {
+    name: 'irq', bpm: 136, bars: 4, swing: 0.05, tier: 4,
+    prog: [
+      { r: 39, c: [51, 54, 58, 61] },   // Ebm
+      { r: 34, c: [46, 49, 53, 58] },
+      { r: 37, c: [49, 52, 56, 59] },
+      { r: 32, c: [44, 47, 51, 56] },
+    ],
+    bed: { gain: 0.24, cut: 210, oct: -12, voices: 3, detune: 11, lfo: 2.1, lfoAmt: 0.12 },
+    stems: {
+      /* --- always: the interrupt jitter and the root --- */
+      glitch: {
+        step(M, s, t, out) {
+          const i = s % M.len;
+          if (hrnd(i, 4) > 0.86) iGrain(M.env, out, t, { n: 4, span: M.spb * 1.2, gain: 0.14, bits: 3, seed: i });
+        },
+      },
+      sub: {
+        step(M, s, t, out) {
+          const i = s % M.len, ch = chordOf(M, i >> 4);
+          if ((i & 15) !== 0) return;
+          iSub(M.env, out, t, { f: mtof(ch.r - 24), len: M.spb * 16, rel: M.spb * 2.4, gain: 0.42, a: 0.03 });
+        },
+      },
+
+      /* --- momentum --- */
+      kick: {
+        step(M, s, t, out) {
+          if (P('x..x..x...x.x...', (s % M.len) & 15))
+            iKick(M.env, out, t, { gain: 0.92, f0: 170, f1: 46, dur: 0.24, click: 0.45 });
+        },
+      },
+      snare: {
+        step(M, s, t, out) {
+          if (P('....x..x....x...', (s % M.len) & 15))
+            iSnare(M.env, out, t, { gain: 0.55, dur: 0.12, tone: 2800, body: 230, wave: 'square' });
+        },
+      },
+      hats: {
+        step(M, s, t, out) {
+          const hv = P('7.4.7.47.4.47.4.', (s % M.len) & 15);
+          if (hv) iHat(M.env, out, t, { gain: hv * 0.28, dur: 0.026, cut: 9200, metal: 0.4 });
+        },
+      },
+      bass: {
+        step(M, s, t, out) {
+          const i = s % M.len, ch = chordOf(M, i >> 4);
+          if (!P('x..xx..x.x.x..x.', i & 15)) return;
+          iSaw(M.env, out, t, {
+            f: mtof(ch.r - 12), len: M.spb * 0.7, gain: 0.55, cut: 420, q: 8,
+            fenv: 2.6, fdur: 0.06, dist: 5, voices: 2, rel: 0.03,
+          });
+        },
+      },
+      hats16: {
+        step(M, s, t, out) {
+          if (P('x.x.x.x.x.x.x.x.', (s % M.len) & 15))
+            iHat(M.env, out, t, { gain: 0.3, dur: 0.02, cut: 11000 });
+        },
+      },
+      kickDouble: {
+        step(M, s, t, out) {
+          if (P('....x.......x...', (s % M.len) & 15))
+            iKick(M.env, out, t, { gain: 0.85, f0: 165, f1: 46, dur: 0.2, click: 0.4 });
+        },
+      },
+
+      /* --- depth --- */
+      stabs: {
+        step(M, s, t, out) {
+          const i = s % M.len, ch = chordOf(M, i >> 4);
+          if (!P('..x.....x.....x.', i & 15)) return;
+          iRing(M.env, out, t, {
+            f: mtof(ch.c[1]), mf: 91 + hrnd(i, 2) * 40, len: M.spb * 1.2, gain: 0.26,
+            fslide: 0.94, wave: 'square', pan: (hrnd(i, 3) - 0.5) * 1.2, space: 0.2,
+          });
+        },
+      },
+      chime: {
+        step(M, s, t, out) {
+          const i = s % M.len, bar = i >> 4, k = i & 15;
+          if (k !== 6 || bar % 2 !== 0) return;
+          iPluck(M.env, out, t, {
+            f: mtof(chordOf(M, bar).c[3] + 24), dur: 1.0, damp: 0.996, bright: 0.4,
+            gain: 0.12, cut: 6800, pan: -0.4, space: 0.6,
+          });
+        },
+      },
+      alarm: {
+        step(M, s, t, out) {
+          const i = s % M.len, ch = chordOf(M, i >> 4);
+          if (!P('..x..x....x..x..', i & 15)) return;
+          iRing(M.env, out, t, {
+            f: mtof(ch.c[3] + 12), mf: 167, len: M.spb * 1.1, gain: 0.42, fslide: 0.92, wave: 'sawtooth',
+          });
+        },
+        enter(M, t, out) {
+          iSweep(M.env, out, t, { dur: M.spb * 6, f0: 1200, f1: 300, q: 2.6, gain: 0.15 });
+        },
+      },
+
+      /* --- power --- */
+      arp: {
+        step(M, s, t, out) {
+          const i = s % M.len, k = i & 15, ch = chordOf(M, i >> 4);
+          if (k % 2) return;
+          const n = mtof(ch.c[(k >> 1) % 4] + 12);
+          iBlip(M.env, out, t, {
+            key: 'drarp', f0: n, f1: n, dur: 0.09, duty: 0.18, decay: 1.2,
+            gain: 0.5, bits: 3, crush: 9000, cut: 6000,
+          });
+        },
+      },
+      subOct: {
+        step(M, s, t, out) {
+          const i = s % M.len, k = i & 15, ch = chordOf(M, i >> 4);
+          if (k !== 0 && k !== 8) return;
+          iSub(M.env, out, t, { f: mtof(ch.r - 36), len: M.spb * 7, gain: 0.3, harm: 0.2, a: 0.02 });
+        },
+      },
+      lead: {
+        step(M, s, t, out) {
+          const i = s % M.len, k = i & 15, ch = chordOf(M, i >> 4);
+          if (k % 4 !== 0) return;
+          const seq = [2, 3, 1, 3];
+          iSaw(M.env, out, t, {
+            f: mtof(ch.c[seq[(k >> 2) % 4]] + 12), len: M.spb * 2.4, gain: 0.2, cut: 2600, q: 3,
+            fenv: 1.8, fdur: 0.14, dist: 3, detune: 18, voices: 2, a: 0.01, rel: 0.12, space: 0.3,
+          });
+        },
+      },
+    },
+    cube: {
+      AAA: ['glitch', 'sub', 'stabs', 'chime'],
+      AAB: ['glitch', 'sub', 'stabs', 'chime', 'arp'],
+      AAC: ['glitch', 'sub', 'stabs', 'chime', 'arp', 'subOct', 'lead'],
+      ABA: ['glitch', 'sub', 'stabs'],
+      ABB: ['glitch', 'sub', 'stabs', 'arp'],
+      ABC: ['glitch', 'sub', 'stabs', 'arp', 'subOct', 'lead'],
+      ACA: ['glitch', 'sub', 'stabs', 'alarm'],
+      ACB: ['glitch', 'sub', 'stabs', 'alarm', 'arp'],
+      ACC: ['glitch', 'sub', 'stabs', 'alarm', 'subOct', 'lead'],             // held, not busy
+
+      BAA: ['glitch', 'sub', 'stabs', 'chime', 'kick', 'snare', 'hats', 'bass'],
+      BAB: ['glitch', 'sub', 'stabs', 'chime', 'arp', 'kick', 'snare', 'hats', 'bass'],
+      BAC: ['glitch', 'sub', 'stabs', 'chime', 'arp', 'subOct', 'lead', 'kick', 'snare', 'hats', 'bass'],
+      BBA: ['glitch', 'sub', 'stabs', 'kick', 'snare', 'hats', 'bass'],
+      BBB: ['glitch', 'sub', 'stabs', 'arp', 'kick', 'snare', 'hats', 'bass'],
+      BBC: ['glitch', 'sub', 'stabs', 'arp', 'subOct', 'lead', 'kick', 'snare', 'hats', 'bass'],
+      BCA: ['glitch', 'sub', 'stabs', 'alarm', 'kick', 'snare', 'hats', 'bass'],
+      BCB: ['glitch', 'sub', 'stabs', 'alarm', 'arp', 'kick', 'snare', 'hats', 'bass'],
+      BCC: ['glitch', 'sub', 'stabs', 'alarm', 'arp', 'subOct', 'lead', 'kick', 'snare', 'hats', 'bass'],
+
+      CAA: ['glitch', 'sub', 'stabs', 'chime', 'kick', 'snare', 'hats16', 'bass'],   // safe: no double kick
+      CAB: ['glitch', 'sub', 'stabs', 'chime', 'arp', 'kick', 'snare', 'hats16', 'bass', 'kickDouble'],
+      CAC: ['glitch', 'sub', 'stabs', 'chime', 'arp', 'subOct', 'lead', 'kick', 'snare', 'hats16', 'bass', 'kickDouble'],
+      CBA: ['glitch', 'sub', 'stabs', 'kick', 'snare', 'hats16', 'bass', 'kickDouble'],
+      CBB: ['glitch', 'sub', 'stabs', 'arp', 'kick', 'snare', 'hats16', 'bass', 'kickDouble'],
+      CBC: ['glitch', 'sub', 'stabs', 'arp', 'subOct', 'lead', 'kick', 'snare', 'hats16', 'bass', 'kickDouble'],
+      CCA: ['glitch', 'sub', 'alarm', 'kick', 'snare', 'hats16', 'bass', 'kickDouble'],   // no comfort
+      CCB: ['glitch', 'sub', 'stabs', 'alarm', 'arp', 'kick', 'snare', 'hats16', 'bass', 'kickDouble'],
+      CCC: ['glitch', 'sub', 'stabs', 'alarm', 'arp', 'subOct', 'lead', 'kick', 'snare', 'hats16', 'bass', 'kickDouble'],
+    },
+  });
+
+  /* ---- 6. FIRMWARE — ominous half-time ---- */
+  track('firmware', {
+    name: 'rom', bpm: 146, bars: 4, swing: 0, tier: 5,
+    prog: [
+      { r: 33, c: [45, 48, 52, 56] },   // Am(maj7)-ish
+      { r: 33, c: [45, 49, 52, 55] },
+      { r: 31, c: [43, 46, 50, 53] },
+      { r: 30, c: [42, 45, 49, 54] },
+    ],
+    bed: { gain: 0.24, cut: 190, oct: -12, voices: 3, detune: 9 },
+    stems: {
+      /* --- always: the deep sub and the rom crackle --- */
+      sub: {
+        step(M, s, t, out) {
+          const i = s % M.len, ch = chordOf(M, i >> 4);
+          if ((i & 15) !== 0) return;
+          iSub(M.env, out, t, {
+            f: mtof(ch.r - 12), len: M.spb * 16, rel: M.spb * 2.4, gain: 0.44,
+            harm: 0.3, a: 0.04, sus: 0.85,
+          });
+        },
+      },
+      crackle: {
+        step(M, s, t, out) {
+          const i = s % M.len;
+          if (hrnd(i, 7) > 0.9) iGrain(M.env, out, t, { n: 3, span: M.spb, gain: 0.1, bits: 4, seed: i + 5 });
+        },
+      },
+
+      /* --- momentum --- */
+      kick: {
+        step(M, s, t, out) {
+          if (P('x.........x.....', (s % M.len) & 15))
+            iKick(M.env, out, t, { gain: 0.88, f0: 190, f1: 36, dur: 0.42, click: 0.35, body: 0.3 });
+        },
+      },
+      snare: {
+        step(M, s, t, out) {
+          if (((s % M.len) & 15) !== 8) return;
+          iSnare(M.env, out, t, { gain: 0.7, dur: 0.26, tone: 1500, body: 160, q: 0.5 });
+          iSweep(M.env, out, t, { dur: 0.4, f0: 900, f1: 300, q: 1.2, gain: 0.16, dark: true, space: 0.4 });
+        },
+      },
+      hats: {
+        step(M, s, t, out) {
+          if (P('....x.......x..x', (s % M.len) & 15))
+            iHat(M.env, out, t, { gain: 0.16, dur: 0.09, cut: 6800, metal: 0.8 });
+        },
+      },
+      kickDouble: {
+        step(M, s, t, out) {
+          if (P('..x...x...x...x.', (s % M.len) & 15))
+            iKick(M.env, out, t, { gain: 0.9, f0: 155, f1: 48, dur: 0.16, click: 0.3 });
+        },
+      },
+      hats8: {
+        step(M, s, t, out) {
+          if (((s % M.len) & 15) % 2 === 1)
+            iHat(M.env, out, t, { gain: 0.3, dur: 0.03, cut: 9500, metal: 0.5 });
+        },
+      },
+      bassDrive: {
+        step(M, s, t, out) {
+          const i = s % M.len, ch = chordOf(M, i >> 4);
+          if ((i & 15) % 4 !== 2) return;
+          iSaw(M.env, out, t, {
+            f: mtof(ch.r), len: M.spb * 1.2, gain: 0.6, cut: 600, q: 6, dist: 6, voices: 2,
+          });
+        },
+      },
+      snareBack: {
+        step(M, s, t, out) {
+          const k = (s % M.len) & 15;
+          if (k === 4 || k === 12)
+            iSnare(M.env, out, t, { gain: 0.55, dur: 0.12, tone: 2600, body: 220, wave: 'square' });
+        },
+      },
+
+      /* --- depth --- */
+      brass: {
+        step(M, s, t, out) {
+          const i = s % M.len, ch = chordOf(M, i >> 4);
+          if (!P('x.......x...x...', i & 15)) return;
+          for (let j = 0; j < 3; j++) iSaw(M.env, out, t, {
+            f: mtof(ch.c[j]), len: M.spb * 2.2, gain: 0.16, cut: 1100, q: 2,
+            fenv: 2.2, fdur: 0.3, detune: 16, voices: 2, a: 0.02, rel: 0.2, space: 0.25,
+          });
+        },
+      },
+      chime: {
+        step(M, s, t, out) {
+          const i = s % M.len, bar = i >> 4, k = i & 15;
+          if (k !== 4 || bar % 2 !== 0) return;
+          iPluck(M.env, out, t, {
+            f: mtof(chordOf(M, bar).c[3] + 24), dur: 1.3, damp: 0.997, bright: 0.32,
+            gain: 0.11, cut: 6200, pan: -0.35, space: 0.6,
+          });
+        },
+      },
+      bell: {
+        /* the 1.41 ratio is a tritone in disguise — it never resolves */
+        step(M, s, t, out) {
+          const i = s % M.len, bar = i >> 4, k = i & 15;
+          if (k !== 12 || bar % 2 !== 1) return;
+          iFM(M.env, out, t, {
+            f: mtof(chordOf(M, bar).c[3] + 12), len: 0.9, ratio: 1.41, index: 900,
+            idxEnd: 0.05, idxDur: 0.4, gain: 0.2, space: 0.5, pan: hrnd(i, 1) - 0.5,
+          });
+        },
+      },
+
+      /* --- power --- */
+      arp: {
+        step(M, s, t, out) {
+          const i = s % M.len, k = i & 15, ch = chordOf(M, i >> 4);
+          if (k % 2) return;
+          const n = mtof(ch.c[(k >> 1) % 4] + 24);
+          iBlip(M.env, out, t, {
+            key: 'fwarp', f0: n, f1: n, dur: 0.08, duty: 0.22, decay: 1.2,
+            gain: 0.3, bits: 4, crush: 10000, cut: 6500, pan: (k % 4 ? 0.4 : -0.4),
+          });
+        },
+      },
+      subOct: {
+        step(M, s, t, out) {
+          const i = s % M.len, k = i & 15, ch = chordOf(M, i >> 4);
+          if (k !== 0 && k !== 8) return;
+          iSub(M.env, out, t, { f: mtof(ch.r - 24), len: M.spb * 7, gain: 0.3, harm: 0.22, a: 0.02 });
+        },
+      },
+      lead: {
+        step(M, s, t, out) {
+          const i = s % M.len, k = i & 15, ch = chordOf(M, i >> 4);
+          if (k % 8 !== 0) return;
+          iFM(M.env, out, t, {
+            f: mtof(ch.c[2] + 12), len: M.spb * 5, ratio: 2, index: 300, idxEnd: 0.06,
+            idxDur: 0.5, gain: 0.18, pan: 0.3, space: 0.5,
+          });
+        },
+      },
+    },
+    cube: {
+      AAA: ['sub', 'crackle', 'brass', 'chime'],
+      AAB: ['sub', 'crackle', 'brass', 'chime', 'arp'],
+      AAC: ['sub', 'crackle', 'brass', 'chime', 'arp', 'subOct', 'lead'],
+      ABA: ['sub', 'crackle', 'brass'],
+      ABB: ['sub', 'crackle', 'brass', 'arp'],
+      ABC: ['sub', 'crackle', 'brass', 'arp', 'subOct', 'lead'],
+      ACA: ['sub', 'crackle', 'brass', 'bell'],
+      ACB: ['sub', 'crackle', 'brass', 'bell', 'arp'],
+      ACC: ['sub', 'crackle', 'brass', 'bell', 'subOct', 'lead'],             // held, not busy
+
+      BAA: ['sub', 'crackle', 'brass', 'chime', 'kick', 'snare', 'hats'],
+      BAB: ['sub', 'crackle', 'brass', 'chime', 'arp', 'kick', 'snare', 'hats'],
+      BAC: ['sub', 'crackle', 'brass', 'chime', 'arp', 'subOct', 'lead', 'kick', 'snare', 'hats'],
+      BBA: ['sub', 'crackle', 'brass', 'kick', 'snare', 'hats'],
+      BBB: ['sub', 'crackle', 'brass', 'arp', 'kick', 'snare', 'hats'],
+      BBC: ['sub', 'crackle', 'brass', 'arp', 'subOct', 'lead', 'kick', 'snare', 'hats'],
+      BCA: ['sub', 'crackle', 'brass', 'bell', 'kick', 'snare', 'hats'],
+      BCB: ['sub', 'crackle', 'brass', 'bell', 'arp', 'kick', 'snare', 'hats'],
+      BCC: ['sub', 'crackle', 'brass', 'bell', 'arp', 'subOct', 'lead', 'kick', 'snare', 'hats'],
+
+      CAA: ['sub', 'crackle', 'brass', 'chime', 'kick', 'snare', 'hats8', 'kickDouble', 'bassDrive'],  // safe: no backbeat
+      CAB: ['sub', 'crackle', 'brass', 'chime', 'arp', 'kick', 'snare', 'hats8', 'kickDouble', 'bassDrive', 'snareBack'],
+      CAC: ['sub', 'crackle', 'brass', 'chime', 'arp', 'subOct', 'lead', 'kick', 'snare', 'hats8', 'kickDouble', 'bassDrive', 'snareBack'],
+      CBA: ['sub', 'crackle', 'brass', 'kick', 'snare', 'hats8', 'kickDouble', 'bassDrive', 'snareBack'],
+      CBB: ['sub', 'crackle', 'brass', 'arp', 'kick', 'snare', 'hats8', 'kickDouble', 'bassDrive', 'snareBack'],
+      CBC: ['sub', 'crackle', 'brass', 'arp', 'subOct', 'lead', 'kick', 'snare', 'hats8', 'kickDouble', 'bassDrive', 'snareBack'],
+      CCA: ['sub', 'crackle', 'bell', 'kick', 'snare', 'hats8', 'kickDouble', 'bassDrive', 'snareBack'],   // no comfort
+      CCB: ['sub', 'crackle', 'brass', 'bell', 'arp', 'kick', 'snare', 'hats8', 'kickDouble', 'bassDrive', 'snareBack'],
+      CCC: ['sub', 'crackle', 'brass', 'bell', 'arp', 'subOct', 'lead', 'kick', 'snare', 'hats8', 'kickDouble', 'bassDrive', 'snareBack'],
+    },
+  });
+
+  /* ---- 7. MICROCODE — frantic ---- */
+  track('microcode', {
+    name: 'uop', bpm: 156, bars: 4, swing: 0, tier: 6,
+    prog: [
+      { r: 37, c: [49, 52, 55, 58] },   // dim7 -- maximum unrest
+      { r: 38, c: [50, 53, 56, 59] },
+      { r: 36, c: [48, 51, 54, 58] },
+      { r: 35, c: [47, 50, 53, 56] },
+    ],
+    bed: { gain: 0.2, cut: 210, oct: -12, voices: 2, detune: 12 },
+    stems: {
+      /* --- always: the micro-op stream and the floor under it --- */
+      arp: {
+        /* every 16th, no gaps: this IS microcode, not a layer on top of it */
+        step(M, s, t, out) {
+          const i = s % M.len, k = i & 15, ch = chordOf(M, i >> 4);
+          const seq = [0, 1, 2, 3, 2, 1, 3, 0, 1, 3, 2, 0, 3, 1, 0, 2];
+          const n = mtof(ch.c[seq[k]] + ((k % 4 === 3) ? 12 : 0) + 12);
+          iBlip(M.env, out, t, {
+            key: 'ucarp', f0: n, f1: n, dur: 0.07, duty: 0.2, decay: 1.1,
+            gain: 0.18, bits: 3, crush: 9500, cut: 6800, pan: (k % 2 ? 0.4 : -0.4),
+          });
+        },
+      },
+      subDrone: {
+        step(M, s, t, out) {
+          const i = s % M.len, ch = chordOf(M, i >> 4);
+          if ((i & 15) !== 0) return;
+          iDrone(M.env, out, t, {
+            f: mtof(ch.r - 24), len: M.spb * 16, gain: 0.34, cut: 200, q: 2,
+            voices: 2, a: 0.03, rel: M.spb * 2.4,
+          });
+        },
+      },
+
+      /* --- momentum --- */
+      kick: {
+        step(M, s, t, out) {
+          if (P('x..x..x.x..x..x.', (s % M.len) & 15))
+            iKick(M.env, out, t, { gain: 0.95, f0: 175, f1: 47, dur: 0.2, click: 0.45 });
+        },
+      },
+      snare: {
+        step(M, s, t, out) {
+          const k = (s % M.len) & 15;
+          if (k === 4 || k === 12)
+            iSnare(M.env, out, t, { gain: 0.6, dur: 0.1, tone: 3100, body: 250, wave: 'square' });
+        },
+      },
+      hats: {
+        step(M, s, t, out) {
+          const i = s % M.len, k = i & 15;
+          iHat(M.env, out, t, { gain: (k % 2 ? 0.13 : 0.22) + hrnd(i, 1) * 0.04, dur: 0.02, cut: 10500 });
+        },
+      },
+      kickRoll: {
+        step(M, s, t, out) {
+          if (P('x.xx..x.x.xx..x.', (s % M.len) & 15))
+            iKick(M.env, out, t, { gain: 0.8, f0: 180, f1: 48, dur: 0.16, click: 0.4 });
+        },
+      },
+      snareRoll: {
+        step(M, s, t, out) {
+          if (((s % M.len) & 15) % 4 === 0)
+            iSnare(M.env, out, t, { gain: 0.5, dur: 0.07, tone: 3600, body: 320 });
+        },
+      },
+      bassDrive: {
+        step(M, s, t, out) {
+          const i = s % M.len, ch = chordOf(M, i >> 4);
+          if ((i & 15) % 2 !== 1) return;
+          iSaw(M.env, out, t, {
+            f: mtof(ch.r), len: M.spb * 0.5, gain: 0.5, cut: 900, q: 6, dist: 8, voices: 2, rel: 0.02,
+          });
+        },
+      },
+
+      /* --- depth --- */
+      bass: {
+        step(M, s, t, out) {
+          const i = s % M.len, ch = chordOf(M, i >> 4);
+          if (!P('xx.xx.xx.xx.xx.x', i & 15)) return;
+          iSaw(M.env, out, t, {
+            f: mtof(ch.r - 12), len: M.spb * 0.6, gain: 0.5, cut: 380, q: 7,
+            fenv: 2.4, fdur: 0.05, dist: 7, voices: 2, rel: 0.02,
+          });
+        },
+      },
+      shimmer: {
+        step(M, s, t, out) {
+          const i = s % M.len, k = i & 15, ch = chordOf(M, i >> 4);
+          if (k !== 0 && k !== 8) return;
+          iPluck(M.env, out, t, {
+            f: mtof(ch.c[3] + 24), dur: 0.9, damp: 0.9955, bright: 0.42,
+            gain: 0.12, cut: 7200, pan: k === 0 ? -0.4 : 0.4, space: 0.55,
+          });
+        },
+      },
+      fault: {
+        step(M, s, t, out) {
+          const i = s % M.len, ch = chordOf(M, i >> 4);
+          if (!P('..x...x...x...x.', i & 15)) return;
+          iRing(M.env, out, t, {
+            f: mtof(ch.c[2] + 12), mf: 211, len: M.spb * 1.4, gain: 0.5,
+            fslide: 0.9, wave: 'square', space: 0.2,
+          });
+        },
+        enter(M, t, out) {
+          iGrain(M.env, out, t, { n: 8, span: M.spb * 3, gain: 0.18, bits: 2, seed: 977 });
+        },
+      },
+
+      /* --- power --- */
+      stutter: {
+        step(M, s, t, out) {
+          const i = s % M.len;
+          if (hrnd(i, 9) > 0.82) iGrain(M.env, out, t, { n: 5, span: M.spb * 1.5, gain: 0.16, bits: 2, seed: i * 3 });
+        },
+      },
+      subOct: {
+        step(M, s, t, out) {
+          const i = s % M.len, k = i & 15, ch = chordOf(M, i >> 4);
+          if (k !== 0 && k !== 8) return;
+          iSub(M.env, out, t, { f: mtof(ch.r - 24), len: M.spb * 7, gain: 0.3, harm: 0.2, a: 0.02 });
+        },
+      },
+      lead: {
+        step(M, s, t, out) {
+          const i = s % M.len, k = i & 15, ch = chordOf(M, i >> 4);
+          if (k % 4 !== 2) return;
+          const seq = [3, 1, 2, 0];
+          iSaw(M.env, out, t, {
+            f: mtof(ch.c[seq[(k >> 2) % 4]] + 24), len: M.spb * 1.6, gain: 0.17, cut: 3200, q: 3,
+            fenv: 1.6, fdur: 0.1, dist: 2, detune: 16, voices: 2, a: 0.008, rel: 0.1, space: 0.35,
+          });
+        },
+      },
+    },
+    cube: {
+      AAA: ['arp', 'subDrone', 'bass', 'shimmer'],
+      AAB: ['arp', 'subDrone', 'bass', 'shimmer', 'stutter'],
+      AAC: ['arp', 'subDrone', 'bass', 'shimmer', 'stutter', 'subOct', 'lead'],
+      ABA: ['arp', 'subDrone', 'bass'],
+      ABB: ['arp', 'subDrone', 'bass', 'stutter'],
+      ABC: ['arp', 'subDrone', 'bass', 'stutter', 'subOct', 'lead'],
+      ACA: ['arp', 'subDrone', 'bass', 'fault'],
+      ACB: ['arp', 'subDrone', 'bass', 'fault', 'stutter'],
+      ACC: ['arp', 'subDrone', 'bass', 'fault', 'subOct', 'lead'],            // held, not busy
+
+      BAA: ['arp', 'subDrone', 'bass', 'shimmer', 'kick', 'snare', 'hats'],
+      BAB: ['arp', 'subDrone', 'bass', 'shimmer', 'stutter', 'kick', 'snare', 'hats'],
+      BAC: ['arp', 'subDrone', 'bass', 'shimmer', 'stutter', 'subOct', 'lead', 'kick', 'snare', 'hats'],
+      BBA: ['arp', 'subDrone', 'bass', 'kick', 'snare', 'hats'],
+      BBB: ['arp', 'subDrone', 'bass', 'stutter', 'kick', 'snare', 'hats'],
+      BBC: ['arp', 'subDrone', 'bass', 'stutter', 'subOct', 'lead', 'kick', 'snare', 'hats'],
+      BCA: ['arp', 'subDrone', 'bass', 'fault', 'kick', 'snare', 'hats'],
+      BCB: ['arp', 'subDrone', 'bass', 'fault', 'stutter', 'kick', 'snare', 'hats'],
+      BCC: ['arp', 'subDrone', 'bass', 'fault', 'stutter', 'subOct', 'lead', 'kick', 'snare', 'hats'],
+
+      CAA: ['arp', 'subDrone', 'bass', 'shimmer', 'kick', 'snare', 'hats', 'kickRoll', 'bassDrive'],  // safe: no roll snare
+      CAB: ['arp', 'subDrone', 'bass', 'shimmer', 'stutter', 'kick', 'snare', 'hats', 'kickRoll', 'snareRoll', 'bassDrive'],
+      CAC: ['arp', 'subDrone', 'bass', 'shimmer', 'stutter', 'subOct', 'lead', 'kick', 'snare', 'hats', 'kickRoll', 'snareRoll', 'bassDrive'],
+      CBA: ['arp', 'subDrone', 'bass', 'kick', 'snare', 'hats', 'kickRoll', 'snareRoll', 'bassDrive'],
+      CBB: ['arp', 'subDrone', 'bass', 'stutter', 'kick', 'snare', 'hats', 'kickRoll', 'snareRoll', 'bassDrive'],
+      CBC: ['arp', 'subDrone', 'bass', 'stutter', 'subOct', 'lead', 'kick', 'snare', 'hats', 'kickRoll', 'snareRoll', 'bassDrive'],
+      CCA: ['arp', 'subDrone', 'bass', 'fault', 'kick', 'snare', 'hats', 'kickRoll', 'snareRoll', 'bassDrive'],
+      CCB: ['arp', 'subDrone', 'bass', 'fault', 'stutter', 'kick', 'snare', 'hats', 'kickRoll', 'snareRoll', 'bassDrive'],
+      CCC: ['arp', 'subDrone', 'bass', 'fault', 'stutter', 'subOct', 'lead', 'kick', 'snare', 'hats', 'kickRoll', 'snareRoll', 'bassDrive'],
+    },
+  });
+
+  /* ---- 8. SILICON — oppressive sub drone ---- */
+  track('silicon', {
+    name: 'substrate', bpm: 68, bars: 4, swing: 0, tier: 7,
+    prog: [
+      { r: 29, c: [41, 44, 48, 54] },   // #11 over the root
+      { r: 29, c: [41, 45, 48, 52] },
+      { r: 28, c: [40, 43, 47, 53] },
+      { r: 27, c: [39, 42, 46, 52] },
+    ],
+    bed: { gain: 0.26, cut: 170, oct: -12, voices: 3, detune: 6, lfo: 0.6, lfoAmt: 0.14 },
+    stems: {
+      /* --- always: the substrate itself. Nothing may silence this one. --- */
+      substrate: {
+        step(M, s, t, out) {
+          const i = s % M.len, ch = chordOf(M, i >> 4);
+          if ((i & 15) !== 0) return;
+          iSub(M.env, out, t, {
+            f: mtof(ch.r - 12), len: M.spb * 16, gain: 0.5, a: 0.35, d: 0.4,
+            sus: 0.9, rel: M.spb * 2.6, harm: 0.14,
+          });
+          iDrone(M.env, out, t, {
+            f: mtof(ch.r), len: M.spb * 16, gain: 0.24, cut: 150, q: 2.5,
+            voices: 3, detune: 5, lfo: 0.7, lfoAmt: 0.2, a: 0.5, rel: M.spb * 2.6,
+          });
+        },
+      },
+      rumble: {
+        step(M, s, t, out) {
+          const i = s % M.len;
+          if ((i & 15) !== 0) return;
+          iSweep(M.env, out, t, {
+            dur: M.spb * 15.4, f0: 90, f1: 190, q: 1.1, gain: 0.2,
+            dark: true, a: 0.6, type: 'lowpass',
+          });
+        },
+      },
+
+      /* --- momentum --- */
+      slabKick: {
+        step(M, s, t, out) {
+          const i = s % M.len, bar = i >> 4;
+          if ((i & 15) !== 0 || bar % 2 !== 0) return;
+          iKick(M.env, out, t, { gain: 1.1, f0: 210, f1: 28, dur: 0.7, pdur: 0.2, click: 0.3, body: 0.35 });
+        },
+      },
+      hits: {
+        step(M, s, t, out) {
+          const i = s % M.len, bar = i >> 4, k = i & 15;
+          if (!P('..........x.....', k) && !(k === 6 && bar % 2 === 1)) return;
+          iMetal(M.env, out, t, {
+            f: 118 + hrnd(i, 1) * 40, dur: 0.9, gain: 0.2, cut: 2400, q: 1.6,
+            pan: (hrnd(i, 2) - 0.5) * 1.4, space: 0.6,
+          });
+        },
+      },
+      pulse: {
+        step(M, s, t, out) {
+          const i = s % M.len, ch = chordOf(M, i >> 4);
+          if ((i & 15) % 2) return;
+          iSub(M.env, out, t, { f: mtof(ch.r), len: M.spb * 0.9, gain: 0.75, wave: 'triangle', a: 0.008 });
+        },
+      },
+      industrial: {
+        step(M, s, t, out) {
+          const i = s % M.len, k = i & 15;
+          if (k % 4 === 2) iHat(M.env, out, t, { gain: 0.34, dur: 0.07, cut: 5200, metal: 1.2 });
+          if (k === 8) iSnare(M.env, out, t, { gain: 0.7, dur: 0.3, tone: 1400, body: 140, q: 0.5 });
+          if (P('x.......x...x...', k)) iKick(M.env, out, t, { gain: 0.95, f0: 190, f1: 40, dur: 0.34, click: 0.3 });
+        },
+      },
+      anvil: {
+        step(M, s, t, out) {
+          if (P('....x.......x...', (s % M.len) & 15))
+            iMetal(M.env, out, t, { f: 150, dur: 0.4, gain: 0.3, cut: 2600, q: 1.6, space: 0.3 });
+        },
+        enter(M, t, out) {
+          iMetal(M.env, out, t, { f: 96, dur: 1.6, gain: 0.22, cut: 2000, q: 1.2, space: 0.7 });
+        },
+      },
+
+      /* --- depth --- */
+      toll: {
+        step(M, s, t, out) {
+          const i = s % M.len, bar = i >> 4;
+          if ((i & 15) !== 0 || bar % 2 !== 1) return;
+          iFM(M.env, out, t, {
+            f: mtof(chordOf(M, bar).c[0]), len: 2.4, ratio: 1.73, index: 800,
+            idxEnd: 0.02, idxDur: 0.9, gain: 0.24, space: 0.65,
+          });
+        },
+      },
+      grit: {
+        step(M, s, t, out) {
+          const i = s % M.len;
+          if (hrnd(i, 11) > 0.93) iGrain(M.env, out, t, { n: 3, span: M.spb * 2, gain: 0.09, bits: 3, seed: i + 71 });
+        },
+      },
+      crush: {
+        /* the #11 in the chord made explicit and detuned: at depth C the floor
+           itself stops sounding structurally sound */
+        step(M, s, t, out) {
+          const i = s % M.len, ch = chordOf(M, i >> 4);
+          if ((i & 15) !== 0) return;
+          iDrone(M.env, out, t, {
+            f: mtof(ch.r + 6), len: M.spb * 16, gain: 0.18, cut: 420, q: 4,
+            detune: 28, voices: 3, lfo: 0.11, lfoAmt: 0.35, a: 1.2, rel: M.spb * 3,
+          });
+        },
+      },
+
+      /* --- power --- */
+      choir: {
+        step(M, s, t, out) {
+          const i = s % M.len, ch = chordOf(M, i >> 4);
+          if ((i & 15) !== 0) return;
+          for (let j = 1; j < 4; j++) iSaw(M.env, out, t, {
+            f: mtof(ch.c[j] + 12), len: M.spb * 16, rel: M.spb * 2.6, gain: 0.07, cut: 1000, q: 1.4,
+            detune: 8, voices: 2, a: 0.9, space: 0.5,
+          });
+        },
+      },
+      subOct: {
+        step(M, s, t, out) {
+          const i = s % M.len, k = i & 15, ch = chordOf(M, i >> 4);
+          if (k !== 0 && k !== 8) return;
+          iSub(M.env, out, t, { f: mtof(ch.r - 24), len: M.spb * 7, gain: 0.3, harm: 0.16, a: 0.05 });
+        },
+      },
+      lead: {
+        step(M, s, t, out) {
+          const i = s % M.len, bar = i >> 4, k = i & 15, ch = chordOf(M, bar);
+          if (k !== 4 && k !== 12) return;
+          iFM(M.env, out, t, {
+            f: mtof(ch.c[3] + 12), len: M.spb * 5, ratio: 2, index: 260, idxEnd: 0.04,
+            idxDur: 0.7, gain: 0.19, pan: 0.25, space: 0.6,
+          });
+        },
+      },
+    },
+    cube: {
+      AAA: ['substrate', 'rumble', 'toll', 'grit'],
+      AAB: ['substrate', 'rumble', 'toll', 'grit', 'choir'],
+      AAC: ['substrate', 'rumble', 'toll', 'grit', 'choir', 'subOct', 'lead'],
+      ABA: ['substrate', 'rumble', 'grit'],
+      ABB: ['substrate', 'rumble', 'grit', 'choir'],
+      ABC: ['substrate', 'rumble', 'grit', 'choir', 'subOct', 'lead'],
+      ACA: ['substrate', 'rumble', 'grit', 'crush'],
+      ACB: ['substrate', 'rumble', 'grit', 'crush', 'choir'],
+      ACC: ['substrate', 'rumble', 'grit', 'crush', 'subOct', 'lead'],        // held, not busy
+
+      BAA: ['substrate', 'rumble', 'toll', 'grit', 'slabKick', 'hits'],
+      BAB: ['substrate', 'rumble', 'toll', 'grit', 'choir', 'slabKick', 'hits'],
+      BAC: ['substrate', 'rumble', 'toll', 'grit', 'choir', 'subOct', 'lead', 'slabKick', 'hits'],
+      BBA: ['substrate', 'rumble', 'grit', 'slabKick', 'hits'],
+      BBB: ['substrate', 'rumble', 'grit', 'choir', 'slabKick', 'hits'],
+      BBC: ['substrate', 'rumble', 'grit', 'choir', 'subOct', 'lead', 'slabKick', 'hits'],
+      BCA: ['substrate', 'rumble', 'grit', 'crush', 'slabKick', 'hits'],
+      BCB: ['substrate', 'rumble', 'grit', 'crush', 'choir', 'slabKick', 'hits'],
+      BCC: ['substrate', 'rumble', 'grit', 'crush', 'choir', 'subOct', 'lead', 'slabKick', 'hits'],
+
+      CAA: ['substrate', 'rumble', 'toll', 'grit', 'slabKick', 'hits', 'pulse', 'industrial'],   // safe: no anvil
+      CAB: ['substrate', 'rumble', 'toll', 'grit', 'choir', 'slabKick', 'hits', 'pulse', 'industrial', 'anvil'],
+      CAC: ['substrate', 'rumble', 'toll', 'grit', 'choir', 'subOct', 'lead', 'slabKick', 'hits', 'pulse', 'industrial', 'anvil'],
+      CBA: ['substrate', 'rumble', 'grit', 'slabKick', 'hits', 'pulse', 'industrial', 'anvil'],
+      CBB: ['substrate', 'rumble', 'grit', 'choir', 'slabKick', 'hits', 'pulse', 'industrial', 'anvil'],
+      CBC: ['substrate', 'rumble', 'grit', 'choir', 'subOct', 'lead', 'slabKick', 'hits', 'pulse', 'industrial', 'anvil'],
+      CCA: ['substrate', 'rumble', 'grit', 'crush', 'slabKick', 'hits', 'pulse', 'industrial', 'anvil'],
+      CCB: ['substrate', 'rumble', 'grit', 'crush', 'choir', 'slabKick', 'hits', 'pulse', 'industrial', 'anvil'],
+      CCC: ['substrate', 'rumble', 'grit', 'crush', 'choir', 'subOct', 'lead', 'slabKick', 'hits', 'pulse', 'industrial', 'anvil'],
+    },
+  });
+
+})();
+
+
+/* ===== 107_audio_tracks_boss.js ===== */
+/* ============================================================
+   BIND69 — AUDIO :: TRACKS — BOSSES + STINGERS
+   bossA, bossB, bossFinal, and the gameover/victory stingers.
+
+   Arrangement only. The cube machinery, the scheduler and the instrument
+   vocabulary all arrive through G.audioLib; nothing else crosses.
+
+   Boss tracks pin momentum open — a boss fight does not get calmer because
+   you stopped moving — so on these three the depth and power sliders carry
+   everything. The music tightens as your health drops and thickens as your
+   build does, which is the half of the cube a boss fight actually has.
+   ============================================================ */
+(function () {
+  const A = G.audioLib;
+  const { mtof, hrnd, P, iKick, iSnare, iHat, iSub, iSaw, iPluck, iFM, iRing, iSweep, iGrain,
+    iMetal, iDrone, iBlip, track, chordOf } = A;
+
+  /* ---- BOSS VARIANTS ---- */
+  track('bossA', {
+    name: 'segfault', bpm: 144, bars: 4, swing: 0, boss: true,
+    prog: [
+      { r: 40, c: [52, 55, 59, 62] },
+      { r: 38, c: [50, 53, 57, 60] },
+      { r: 36, c: [48, 51, 55, 58] },
+      { r: 35, c: [47, 50, 54, 59] },
+    ],
+    bed: { gain: 0.18, cut: 220, oct: -12, voices: 2, detune: 10 },
+    stems: {
+      /* --- always --- */
+      bass: {
+        step(M, s, t, out) {
+          const ch = chordOf(M, (s % M.len) >> 4);
+          iSaw(M.env, out, t, {
+            f: mtof(ch.r - 12), len: M.spb * 0.55, gain: 0.6, cut: 340, q: 7,
+            fenv: 3, fdur: 0.05, dist: 7, voices: 3, detune: 15, rel: 0.02,
+          });
+        },
+      },
+      grit: {
+        step(M, s, t, out) {
+          const i = s % M.len;
+          if (hrnd(i, 3) > 0.9) iGrain(M.env, out, t, { n: 4, span: M.spb, gain: 0.12, bits: 3, seed: i });
+        },
+      },
+
+      /* --- momentum --- */
+      kick: {
+        step(M, s, t, out) {
+          if (((s % M.len) & 15) % 4 === 0)
+            iKick(M.env, out, t, { gain: 1.1, f0: 175, f1: 44, dur: 0.28, click: 0.5, body: 0.3 });
+        },
+      },
+      hats: {
+        step(M, s, t, out) {
+          if (((s % M.len) & 15) % 2 === 1)
+            iHat(M.env, out, t, { gain: 0.24, dur: 0.028, cut: 9000, metal: 0.6 });
+        },
+      },
+      snare: {
+        step(M, s, t, out) {
+          const k = (s % M.len) & 15;
+          if (k !== 4 && k !== 12) return;
+          iSnare(M.env, out, t, { gain: 0.7, dur: 0.16, tone: 2600, body: 210, wave: 'square' });
+          iMetal(M.env, out, t, { f: 380, dur: 0.16, gain: 0.16, cut: 4600, q: 2 });
+        },
+      },
+
+      /* --- depth --- */
+      brass: {
+        step(M, s, t, out) {
+          const i = s % M.len, ch = chordOf(M, i >> 4);
+          if (!P('x...x..x..x.x...', i & 15)) return;
+          for (let j = 0; j < 3; j++) iSaw(M.env, out, t, {
+            f: mtof(ch.c[j] + 12), len: M.spb * 1.1, gain: 0.16, cut: 1600, q: 2.5,
+            fenv: 2.4, fdur: 0.12, detune: 18, voices: 2, a: 0.008, rel: 0.08, space: 0.2,
+          });
+        },
+      },
+      chime: {
+        step(M, s, t, out) {
+          const i = s % M.len, k = i & 15, ch = chordOf(M, i >> 4);
+          if (k !== 6 && k !== 14) return;
+          iPluck(M.env, out, t, {
+            f: mtof(ch.c[3] + 24), dur: 0.8, damp: 0.995, bright: 0.4,
+            gain: 0.1, cut: 7000, pan: k === 6 ? -0.45 : 0.45, space: 0.55,
+          });
+        },
+      },
+      siren: {
+        step(M, s, t, out) {
+          const i = s % M.len, ch = chordOf(M, i >> 4);
+          if ((i & 15) !== 0) return;
+          iRing(M.env, out, t, {
+            f: mtof(ch.c[0] + 24), mf: 173, len: M.spb * 3.5, gain: 0.22,
+            fslide: 0.86, mslide: 1.3, wave: 'sawtooth', space: 0.25,
+          });
+        },
+        enter(M, t, out) {
+          iSweep(M.env, out, t, { dur: M.spb * 6, f0: 1400, f1: 320, q: 3, gain: 0.16 });
+        },
+      },
+
+      /* --- power --- */
+      arp: {
+        step(M, s, t, out) {
+          const i = s % M.len, k = i & 15, ch = chordOf(M, i >> 4);
+          if (k % 2) return;
+          const n = mtof(ch.c[(k >> 1) % 4] + 24);
+          iBlip(M.env, out, t, {
+            key: 'bAarp', f0: n, f1: n, dur: 0.08, duty: 0.22, decay: 1.2,
+            gain: 0.2, bits: 4, crush: 10000, cut: 7000,
+          });
+        },
+      },
+      subOct: {
+        step(M, s, t, out) {
+          const i = s % M.len, k = i & 15, ch = chordOf(M, i >> 4);
+          if (k !== 0 && k !== 8) return;
+          iSub(M.env, out, t, { f: mtof(ch.r - 24), len: M.spb * 7, gain: 0.32, harm: 0.2, a: 0.02 });
+        },
+      },
+      lead: {
+        step(M, s, t, out) {
+          const i = s % M.len, k = i & 15, ch = chordOf(M, i >> 4);
+          if (k % 4 !== 0) return;
+          const seq = [3, 2, 3, 1];
+          iSaw(M.env, out, t, {
+            f: mtof(ch.c[seq[(k >> 2) % 4]] + 12), len: M.spb * 2.2, gain: 0.19, cut: 2800, q: 3,
+            fenv: 1.8, fdur: 0.12, dist: 3, detune: 18, voices: 2, a: 0.008, rel: 0.1, space: 0.3,
+          });
+        },
+      },
+    },
+    cube: {
+      AAA: ['bass', 'grit', 'brass', 'chime'],
+      AAB: ['bass', 'grit', 'brass', 'chime', 'arp'],
+      AAC: ['bass', 'grit', 'brass', 'chime', 'arp', 'subOct', 'lead'],
+      ABA: ['bass', 'grit', 'brass'],
+      ABB: ['bass', 'grit', 'brass', 'arp'],
+      ABC: ['bass', 'grit', 'brass', 'arp', 'subOct', 'lead'],
+      ACA: ['bass', 'grit', 'brass', 'siren'],
+      ACB: ['bass', 'grit', 'brass', 'siren', 'arp'],
+      ACC: ['bass', 'grit', 'brass', 'siren', 'subOct', 'lead'],
+
+      BAA: ['bass', 'grit', 'brass', 'chime', 'kick', 'hats'],
+      BAB: ['bass', 'grit', 'brass', 'chime', 'arp', 'kick', 'hats'],
+      BAC: ['bass', 'grit', 'brass', 'chime', 'arp', 'subOct', 'lead', 'kick', 'hats'],
+      BBA: ['bass', 'grit', 'brass', 'kick', 'hats'],
+      BBB: ['bass', 'grit', 'brass', 'arp', 'kick', 'hats'],
+      BBC: ['bass', 'grit', 'brass', 'arp', 'subOct', 'lead', 'kick', 'hats'],
+      BCA: ['bass', 'grit', 'brass', 'siren', 'kick', 'hats'],
+      BCB: ['bass', 'grit', 'brass', 'siren', 'arp', 'kick', 'hats'],
+      BCC: ['bass', 'grit', 'brass', 'siren', 'arp', 'subOct', 'lead', 'kick', 'hats'],
+
+      CAA: ['bass', 'grit', 'brass', 'chime', 'kick', 'hats', 'snare'],
+      CAB: ['bass', 'grit', 'brass', 'chime', 'arp', 'kick', 'hats', 'snare'],
+      CAC: ['bass', 'grit', 'brass', 'chime', 'arp', 'subOct', 'lead', 'kick', 'hats', 'snare'],
+      CBA: ['bass', 'grit', 'brass', 'kick', 'hats', 'snare'],
+      CBB: ['bass', 'grit', 'brass', 'arp', 'kick', 'hats', 'snare'],
+      CBC: ['bass', 'grit', 'brass', 'arp', 'subOct', 'lead', 'kick', 'hats', 'snare'],
+      CCA: ['bass', 'grit', 'siren', 'kick', 'hats', 'snare'],                // cornered: the stabs drop out
+      CCB: ['bass', 'grit', 'brass', 'siren', 'arp', 'kick', 'hats', 'snare'],
+      CCC: ['bass', 'grit', 'brass', 'siren', 'arp', 'subOct', 'lead', 'kick', 'hats', 'snare'],
+    },
+  });
+
+  track('bossB', {
+    name: 'panic', bpm: 156, bars: 4, swing: 0, boss: true,
+    prog: [
+      { r: 34, c: [46, 49, 53, 56] },
+      { r: 34, c: [46, 50, 53, 57] },
+      { r: 33, c: [45, 48, 52, 55] },
+      { r: 32, c: [44, 47, 51, 56] },
+    ],
+    bed: { gain: 0.18, cut: 210, oct: -12, voices: 2, detune: 12 },
+    stems: {
+      /* --- always --- */
+      bass: {
+        step(M, s, t, out) {
+          const ch = chordOf(M, (s % M.len) >> 4);
+          iSaw(M.env, out, t, {
+            f: mtof(ch.r - 12), len: M.spb * 0.5, gain: 0.62, cut: 300, q: 8,
+            fenv: 3.4, fdur: 0.04, dist: 9, voices: 3, detune: 20, rel: 0.02,
+          });
+        },
+      },
+      grit: {
+        step(M, s, t, out) {
+          const i = s % M.len;
+          if (hrnd(i, 2) > 0.72) iGrain(M.env, out, t, { n: 5, span: M.spb * 1.2, gain: 0.16, bits: 2, seed: i * 7 });
+        },
+      },
+
+      /* --- momentum --- */
+      hats: {
+        step(M, s, t, out) {
+          iHat(M.env, out, t, { gain: 0.16, dur: 0.018, cut: 11000 });
+        },
+      },
+      kick: {
+        step(M, s, t, out) {
+          if (P('x.x.x.x.x.x.x.x.', (s % M.len) & 15))
+            iKick(M.env, out, t, { gain: 1.0, f0: 185, f1: 42, dur: 0.2, click: 0.5 });
+        },
+      },
+      snare: {
+        step(M, s, t, out) {
+          if (P('..x...x...x...x.', (s % M.len) & 15))
+            iSnare(M.env, out, t, { gain: 0.62, dur: 0.11, tone: 3000, body: 240, wave: 'square' });
+        },
+      },
+
+      /* --- depth --- */
+      chords: {
+        step(M, s, t, out) {
+          const i = s % M.len, ch = chordOf(M, i >> 4);
+          if ((i & 15) % 4) return;
+          for (let j = 0; j < 4; j++) iSaw(M.env, out, t, {
+            f: mtof(ch.c[j]), len: M.spb * 1.6, gain: 0.13, cut: 1300, q: 3,
+            fenv: 2.6, fdur: 0.18, detune: 22, voices: 2, a: 0.006, rel: 0.1, space: 0.25,
+          });
+        },
+      },
+      chime: {
+        step(M, s, t, out) {
+          const i = s % M.len, k = i & 15, ch = chordOf(M, i >> 4);
+          if (k !== 4 && k !== 12) return;
+          iPluck(M.env, out, t, {
+            f: mtof(ch.c[3] + 24), dur: 0.7, damp: 0.9945, bright: 0.44,
+            gain: 0.1, cut: 7400, pan: k === 4 ? -0.4 : 0.4, space: 0.5,
+          });
+        },
+      },
+      klaxon: {
+        step(M, s, t, out) {
+          const i = s % M.len, ch = chordOf(M, i >> 4);
+          if ((i & 15) !== 8) return;
+          iRing(M.env, out, t, {
+            f: mtof(ch.c[3] + 12), mf: 233, len: M.spb * 2, gain: 0.24,
+            fslide: 0.8, wave: 'square', space: 0.3,
+          });
+        },
+        enter(M, t, out) {
+          iSweep(M.env, out, t, { dur: M.spb * 5, f0: 1600, f1: 340, q: 3.2, gain: 0.17 });
+        },
+      },
+
+      /* --- power --- */
+      arp: {
+        step(M, s, t, out) {
+          const i = s % M.len, k = i & 15, ch = chordOf(M, i >> 4);
+          if (k % 2) return;
+          const n = mtof(ch.c[(k >> 1) % 4] + 24);
+          iBlip(M.env, out, t, {
+            key: 'bBarp', f0: n, f1: n, dur: 0.06, duty: 0.16, decay: 1.1,
+            gain: 0.2, bits: 3, crush: 9000, cut: 8000,
+          });
+        },
+      },
+      subOct: {
+        step(M, s, t, out) {
+          const i = s % M.len, k = i & 15, ch = chordOf(M, i >> 4);
+          if (k !== 0 && k !== 8) return;
+          iSub(M.env, out, t, { f: mtof(ch.r - 24), len: M.spb * 7, gain: 0.32, harm: 0.2, a: 0.02 });
+        },
+      },
+      lead: {
+        step(M, s, t, out) {
+          const i = s % M.len, k = i & 15, ch = chordOf(M, i >> 4);
+          if (k % 8 !== 0) return;
+          iSaw(M.env, out, t, {
+            f: mtof(ch.c[2] + 12), len: M.spb * 4, gain: 0.18, cut: 3000, q: 3,
+            fenv: 1.7, fdur: 0.16, dist: 3, detune: 20, voices: 2, a: 0.01, rel: 0.14, space: 0.35,
+          });
+        },
+      },
+    },
+    cube: {
+      AAA: ['bass', 'grit', 'chords', 'chime'],
+      AAB: ['bass', 'grit', 'chords', 'chime', 'arp'],
+      AAC: ['bass', 'grit', 'chords', 'chime', 'arp', 'subOct', 'lead'],
+      ABA: ['bass', 'grit', 'chords'],
+      ABB: ['bass', 'grit', 'chords', 'arp'],
+      ABC: ['bass', 'grit', 'chords', 'arp', 'subOct', 'lead'],
+      ACA: ['bass', 'grit', 'chords', 'klaxon'],
+      ACB: ['bass', 'grit', 'chords', 'klaxon', 'arp'],
+      ACC: ['bass', 'grit', 'chords', 'klaxon', 'subOct', 'lead'],
+
+      BAA: ['bass', 'grit', 'chords', 'chime', 'hats', 'kick'],
+      BAB: ['bass', 'grit', 'chords', 'chime', 'arp', 'hats', 'kick'],
+      BAC: ['bass', 'grit', 'chords', 'chime', 'arp', 'subOct', 'lead', 'hats', 'kick'],
+      BBA: ['bass', 'grit', 'chords', 'hats', 'kick'],
+      BBB: ['bass', 'grit', 'chords', 'arp', 'hats', 'kick'],
+      BBC: ['bass', 'grit', 'chords', 'arp', 'subOct', 'lead', 'hats', 'kick'],
+      BCA: ['bass', 'grit', 'chords', 'klaxon', 'hats', 'kick'],
+      BCB: ['bass', 'grit', 'chords', 'klaxon', 'arp', 'hats', 'kick'],
+      BCC: ['bass', 'grit', 'chords', 'klaxon', 'arp', 'subOct', 'lead', 'hats', 'kick'],
+
+      CAA: ['bass', 'grit', 'chords', 'chime', 'hats', 'kick', 'snare'],
+      CAB: ['bass', 'grit', 'chords', 'chime', 'arp', 'hats', 'kick', 'snare'],
+      CAC: ['bass', 'grit', 'chords', 'chime', 'arp', 'subOct', 'lead', 'hats', 'kick', 'snare'],
+      CBA: ['bass', 'grit', 'chords', 'hats', 'kick', 'snare'],
+      CBB: ['bass', 'grit', 'chords', 'arp', 'hats', 'kick', 'snare'],
+      CBC: ['bass', 'grit', 'chords', 'arp', 'subOct', 'lead', 'hats', 'kick', 'snare'],
+      CCA: ['bass', 'grit', 'klaxon', 'hats', 'kick', 'snare'],              // cornered: the chords drop out
+      CCB: ['bass', 'grit', 'chords', 'klaxon', 'arp', 'hats', 'kick', 'snare'],
+      CCC: ['bass', 'grit', 'chords', 'klaxon', 'arp', 'subOct', 'lead', 'hats', 'kick', 'snare'],
+    },
+  });
+
+  track('bossFinal', {
+    name: 'halt', bpm: 160, bars: 4, swing: 0, boss: true,
+    prog: [
+      { r: 29, c: [41, 44, 48, 53] },
+      { r: 29, c: [41, 45, 48, 52] },
+      { r: 27, c: [39, 42, 46, 51] },
+      { r: 30, c: [42, 46, 49, 54] },
+    ],
+    bed: { gain: 0.2, cut: 200, oct: -12, voices: 3, detune: 14 },
+    stems: {
+      /* --- always --- */
+      bass: {
+        step(M, s, t, out) {
+          const ch = chordOf(M, (s % M.len) >> 4);
+          iSaw(M.env, out, t, {
+            f: mtof(ch.r), len: M.spb * 0.5, gain: 0.6, cut: 320, q: 8,
+            fenv: 3.6, fdur: 0.04, dist: 10, voices: 3, detune: 24, rel: 0.02,
+          });
+        },
+      },
+      sub: {
+        step(M, s, t, out) {
+          const i = s % M.len, ch = chordOf(M, i >> 4);
+          if ((i & 15) !== 0) return;
+          iSub(M.env, out, t, { f: mtof(ch.r - 12), len: M.spb * 16, rel: M.spb * 2.4, gain: 0.6, a: 0.02, sus: 0.85 });
+        },
+      },
+      grit: {
+        step(M, s, t, out) {
+          const i = s % M.len;
+          if (hrnd(i, 5) > 0.78) iGrain(M.env, out, t, { n: 6, span: M.spb * 1.4, gain: 0.17, bits: 2, seed: i * 11 });
+        },
+      },
+
+      /* --- momentum --- */
+      hats: {
+        step(M, s, t, out) {
+          const k = (s % M.len) & 15;
+          iHat(M.env, out, t, { gain: k % 2 ? 0.12 : 0.2, dur: 0.02, cut: 10500, metal: k % 4 === 2 ? 0.7 : 0 });
+        },
+      },
+      kick: {
+        step(M, s, t, out) {
+          if (P('x.xxx.x.x.xxx.x.', (s % M.len) & 15))
+            iKick(M.env, out, t, { gain: 1.05, f0: 200, f1: 38, dur: 0.24, click: 0.5, body: 0.3 });
+        },
+      },
+      snare: {
+        step(M, s, t, out) {
+          const k = (s % M.len) & 15;
+          if (k === 4 || k === 12 || k === 14)
+            iSnare(M.env, out, t, { gain: 0.68, dur: 0.13, tone: 2800, body: 220, wave: 'square' });
+        },
+      },
+
+      /* --- depth --- */
+      choir: {
+        step(M, s, t, out) {
+          const i = s % M.len, ch = chordOf(M, i >> 4);
+          if ((i & 15) !== 0) return;
+          for (let j = 0; j < 4; j++) iDrone(M.env, out, t, {
+            f: mtof(ch.c[j]), len: M.spb * 16, gain: 0.1, cut: 1500, q: 1.5,
+            voices: 2, detune: 12, a: 0.15, rel: M.spb * 2.6, lfo: 3.1, lfoAmt: 0.12, space: 0.4,
+          });
+        },
+      },
+      chime: {
+        step(M, s, t, out) {
+          const i = s % M.len, k = i & 15, ch = chordOf(M, i >> 4);
+          if (k !== 6 && k !== 10) return;
+          iPluck(M.env, out, t, {
+            f: mtof(ch.c[3] + 24), dur: 0.7, damp: 0.994, bright: 0.46,
+            gain: 0.1, cut: 7600, pan: k === 6 ? -0.4 : 0.4, space: 0.5,
+          });
+        },
+      },
+      toll: {
+        step(M, s, t, out) {
+          const i = s % M.len;
+          if ((i & 15) !== 8) return;
+          iMetal(M.env, out, t, { f: 90, dur: 0.6, gain: 0.2, cut: 1800, q: 1.4, space: 0.4 });
+        },
+        enter(M, t, out) {
+          iMetal(M.env, out, t, { f: 68, dur: 1.8, gain: 0.24, cut: 1500, q: 1.2, space: 0.7 });
+        },
+      },
+
+      /* --- power --- */
+      arp: {
+        step(M, s, t, out) {
+          const i = s % M.len, k = i & 15, ch = chordOf(M, i >> 4);
+          if (k % 2) return;
+          const seq = [0, 3, 2, 1, 3, 0, 1, 2];
+          const n = mtof(ch.c[seq[(k >> 1) % 8]] + 24);
+          iBlip(M.env, out, t, {
+            key: 'bFarp', f0: n, f1: n, dur: 0.07, duty: 0.2, decay: 1.1,
+            gain: 0.2, bits: 3, crush: 9000, cut: 8000, pan: (k % 4 ? 0.45 : -0.45),
+          });
+        },
+      },
+      subOct: {
+        step(M, s, t, out) {
+          const i = s % M.len, k = i & 15, ch = chordOf(M, i >> 4);
+          if (k !== 0 && k !== 8) return;
+          iSub(M.env, out, t, { f: mtof(ch.r - 24), len: M.spb * 7, gain: 0.3, harm: 0.18, a: 0.02 });
+        },
+      },
+      lead: {
+        step(M, s, t, out) {
+          const i = s % M.len, k = i & 15, ch = chordOf(M, i >> 4);
+          if (k % 8 !== 4) return;
+          iRing(M.env, out, t, {
+            f: mtof(ch.c[2] + 24), mf: 197, len: M.spb * 3, gain: 0.2,
+            fslide: 0.9, wave: 'sawtooth', space: 0.3,
+          });
+        },
+      },
+    },
+    cube: {
+      AAA: ['bass', 'sub', 'grit', 'choir', 'chime'],
+      AAB: ['bass', 'sub', 'grit', 'choir', 'chime', 'arp'],
+      AAC: ['bass', 'sub', 'grit', 'choir', 'chime', 'arp', 'subOct', 'lead'],
+      ABA: ['bass', 'sub', 'grit', 'choir'],
+      ABB: ['bass', 'sub', 'grit', 'choir', 'arp'],
+      ABC: ['bass', 'sub', 'grit', 'choir', 'arp', 'subOct', 'lead'],
+      ACA: ['bass', 'sub', 'grit', 'choir', 'toll'],
+      ACB: ['bass', 'sub', 'grit', 'choir', 'toll', 'arp'],
+      ACC: ['bass', 'sub', 'grit', 'choir', 'toll', 'subOct', 'lead'],
+
+      BAA: ['bass', 'sub', 'grit', 'choir', 'chime', 'hats', 'kick'],
+      BAB: ['bass', 'sub', 'grit', 'choir', 'chime', 'arp', 'hats', 'kick'],
+      BAC: ['bass', 'sub', 'grit', 'choir', 'chime', 'arp', 'subOct', 'lead', 'hats', 'kick'],
+      BBA: ['bass', 'sub', 'grit', 'choir', 'hats', 'kick'],
+      BBB: ['bass', 'sub', 'grit', 'choir', 'arp', 'hats', 'kick'],
+      BBC: ['bass', 'sub', 'grit', 'choir', 'arp', 'subOct', 'lead', 'hats', 'kick'],
+      BCA: ['bass', 'sub', 'grit', 'choir', 'toll', 'hats', 'kick'],
+      BCB: ['bass', 'sub', 'grit', 'choir', 'toll', 'arp', 'hats', 'kick'],
+      BCC: ['bass', 'sub', 'grit', 'choir', 'toll', 'arp', 'subOct', 'lead', 'hats', 'kick'],
+
+      CAA: ['bass', 'sub', 'grit', 'choir', 'chime', 'hats', 'kick', 'snare'],
+      CAB: ['bass', 'sub', 'grit', 'choir', 'chime', 'arp', 'hats', 'kick', 'snare'],
+      CAC: ['bass', 'sub', 'grit', 'choir', 'chime', 'arp', 'subOct', 'lead', 'hats', 'kick', 'snare'],
+      CBA: ['bass', 'sub', 'grit', 'choir', 'hats', 'kick', 'snare'],
+      CBB: ['bass', 'sub', 'grit', 'choir', 'arp', 'hats', 'kick', 'snare'],
+      CBC: ['bass', 'sub', 'grit', 'choir', 'arp', 'subOct', 'lead', 'hats', 'kick', 'snare'],
+      CCA: ['bass', 'sub', 'grit', 'toll', 'hats', 'kick', 'snare'],          // cornered: the choir drops out
+      CCB: ['bass', 'sub', 'grit', 'choir', 'toll', 'arp', 'hats', 'kick', 'snare'],
+      CCC: ['bass', 'sub', 'grit', 'choir', 'toll', 'arp', 'subOct', 'lead', 'hats', 'kick', 'snare'],
+    },
+  });
+
+  /* ---- GAME OVER — the run is over. Slow, resigned, no pulse. ----
+     Depth and power still read the run you just lost: dying deep sounds
+     heavier than dying on floor one, and dying with a monster build sounds
+     like more was thrown away. Momentum has nothing to say here, so it says
+     very little — one extra heartbeat, and only at the top. */
+  track('gameover', {
+    name: 'core dumped', bpm: 60, bars: 4, swing: 0,
+    prog: [
+      { r: 45, c: [57, 60, 64, 67] },   // Am
+      { r: 43, c: [55, 59, 62, 67] },   // G
+      { r: 41, c: [53, 57, 60, 65] },   // F
+      { r: 40, c: [52, 56, 59, 64] },   // E  (andalusian descent)
+    ],
+    bed: { gain: 0.3, cut: 190, oct: -12, voices: 3, detune: 5, lfo: 0.5, lfoAmt: 0.12, a: 0.4 },
+    stems: {
+      /* --- always --- */
+      pad: {
+        step(M, s, t, out) {
+          const i = s % M.len, ch = chordOf(M, i >> 4);
+          if ((i & 15) !== 0) return;
+          iSub(M.env, out, t, { f: mtof(ch.r - 12), len: M.spb * 16, rel: M.spb * 2.6, gain: 0.5, a: 0.25, sus: 0.9 });
+          for (let j = 0; j < 3; j++) iSaw(M.env, out, t, {
+            f: mtof(ch.c[j]), len: M.spb * 16, rel: M.spb * 2.8, gain: 0.13, cut: 640, q: 1.2,
+            detune: 6, voices: 2, a: 0.5, space: 0.45,
+          });
+        },
+      },
+      figure: {
+        step(M, s, t, out) {
+          const i = s % M.len, k = i & 15, ch = chordOf(M, i >> 4);
+          if (k !== 0 && k !== 6 && k !== 11) return;
+          const n = ch.c[k === 0 ? 2 : (k === 6 ? 1 : 0)];
+          iPluck(M.env, out, t, {
+            f: mtof(n), dur: 1.6, damp: 0.9965, bright: 0.45, gain: 0.26,
+            cut: 2600, pan: (hrnd(i, 3) - 0.5) * 0.7, space: 0.6,
+          });
+        },
+      },
+
+      /* --- momentum --- */
+      heartbeat: {
+        step(M, s, t, out) {
+          if (((s % M.len) & 15) !== 0) return;
+          iKick(M.env, out, t, { gain: 0.4, f0: 120, f1: 36, dur: 0.5, pdur: 0.18, click: 0 });
+        },
+      },
+      heartbeat2: {
+        step(M, s, t, out) {
+          if (((s % M.len) & 15) !== 3) return;
+          iKick(M.env, out, t, { gain: 0.3, f0: 112, f1: 34, dur: 0.42, pdur: 0.16, click: 0 });
+        },
+      },
+
+      /* --- depth --- */
+      bell: {
+        step(M, s, t, out) {
+          const i = s % M.len, bar = i >> 4;
+          if ((i & 15) !== 0 || bar !== 3) return;
+          iFM(M.env, out, t, {
+            f: mtof(chordOf(M, bar).r + 12), len: 2.6, ratio: 1.41, index: 700,
+            idxEnd: 0.02, idxDur: 1.0, gain: 0.2, space: 0.7,
+          });
+        },
+      },
+      grit: {
+        step(M, s, t, out) {
+          const i = s % M.len;
+          if (hrnd(i, 8) > 0.94) iGrain(M.env, out, t, { n: 2, span: M.spb * 2, gain: 0.07, bits: 3, seed: i });
+        },
+      },
+      hollow: {
+        step(M, s, t, out) {
+          const i = s % M.len, ch = chordOf(M, i >> 4);
+          if ((i & 15) !== 0) return;
+          iDrone(M.env, out, t, {
+            f: mtof(ch.r - 1), len: M.spb * 16, gain: 0.12, cut: 400, q: 3,
+            detune: 20, voices: 2, lfo: 0.09, lfoAmt: 0.3, a: 1.4, rel: M.spb * 3,
+          });
+        },
+      },
+
+      /* --- power --- */
+      subOct: {
+        step(M, s, t, out) {
+          const i = s % M.len, ch = chordOf(M, i >> 4);
+          if ((i & 15) !== 0) return;
+          iSub(M.env, out, t, { f: mtof(ch.r - 24), len: M.spb * 14, gain: 0.3, harm: 0.14, a: 0.4 });
+        },
+      },
+      elegy: {
+        step(M, s, t, out) {
+          const i = s % M.len, bar = i >> 4, k = i & 15, ch = chordOf(M, bar);
+          if (k !== 8) return;
+          iFM(M.env, out, t, {
+            f: mtof(ch.c[3]), len: M.spb * 7, ratio: 2, index: 240, idxEnd: 0.03,
+            idxDur: 1.2, gain: 0.16, pan: 0.25, space: 0.65,
+          });
+        },
+      },
+    },
+    cube: {
+      AAA: ['pad', 'figure', 'bell', 'grit'],
+      AAB: ['pad', 'figure', 'bell', 'grit', 'subOct'],
+      AAC: ['pad', 'figure', 'bell', 'grit', 'subOct', 'elegy'],
+      ABA: ['pad', 'figure', 'grit'],
+      ABB: ['pad', 'figure', 'grit', 'subOct'],
+      ABC: ['pad', 'figure', 'grit', 'subOct', 'elegy'],
+      ACA: ['pad', 'figure', 'grit', 'hollow'],
+      ACB: ['pad', 'figure', 'grit', 'hollow', 'subOct'],
+      ACC: ['pad', 'figure', 'grit', 'hollow', 'subOct', 'elegy'],
+
+      BAA: ['pad', 'figure', 'bell', 'grit', 'heartbeat'],
+      BAB: ['pad', 'figure', 'bell', 'grit', 'subOct', 'heartbeat'],
+      BAC: ['pad', 'figure', 'bell', 'grit', 'subOct', 'elegy', 'heartbeat'],
+      BBA: ['pad', 'figure', 'grit', 'heartbeat'],
+      BBB: ['pad', 'figure', 'grit', 'subOct', 'heartbeat'],
+      BBC: ['pad', 'figure', 'grit', 'subOct', 'elegy', 'heartbeat'],
+      BCA: ['pad', 'figure', 'grit', 'hollow', 'heartbeat'],
+      BCB: ['pad', 'figure', 'grit', 'hollow', 'subOct', 'heartbeat'],
+      BCC: ['pad', 'figure', 'grit', 'hollow', 'subOct', 'elegy', 'heartbeat'],
+
+      CAA: ['pad', 'figure', 'bell', 'grit', 'heartbeat', 'heartbeat2'],
+      CAB: ['pad', 'figure', 'bell', 'grit', 'subOct', 'heartbeat', 'heartbeat2'],
+      CAC: ['pad', 'figure', 'bell', 'grit', 'subOct', 'elegy', 'heartbeat', 'heartbeat2'],
+      CBA: ['pad', 'figure', 'grit', 'heartbeat', 'heartbeat2'],
+      CBB: ['pad', 'figure', 'grit', 'subOct', 'heartbeat', 'heartbeat2'],
+      CBC: ['pad', 'figure', 'grit', 'subOct', 'elegy', 'heartbeat', 'heartbeat2'],
+      CCA: ['pad', 'figure', 'grit', 'hollow', 'heartbeat', 'heartbeat2'],
+      CCB: ['pad', 'figure', 'grit', 'hollow', 'subOct', 'heartbeat', 'heartbeat2'],
+      CCC: ['pad', 'figure', 'grit', 'hollow', 'subOct', 'elegy', 'heartbeat', 'heartbeat2'],
+    },
+  });
+
+  /* ---- VICTORY — you got out. Bright, major, triumphant. ----
+     The one place depth inverts. Everywhere else the depth slider means "how
+     much trouble are you in"; on the win screen it reads as how far down you
+     had to go to get here, so its top anchor adds grandeur rather than dread. */
+  track('victory', {
+    name: 'exit 0', bpm: 128, bars: 4, swing: 0,
+    prog: [
+      { r: 36, c: [48, 52, 55, 59] },   // Cmaj7
+      { r: 43, c: [47, 50, 55, 62] },   // G
+      { r: 45, c: [45, 52, 57, 60] },   // Am
+      { r: 41, c: [41, 48, 53, 57] },   // F
+    ],
+    bed: { gain: 0.16, cut: 260, oct: -12, voices: 2, detune: 7 },
+    stems: {
+      /* --- always --- */
+      bass: {
+        step(M, s, t, out) {
+          const i = s % M.len, ch = chordOf(M, i >> 4);
+          if (!P('x..x..x.x..x..x.', i & 15)) return;
+          iSaw(M.env, out, t, {
+            f: mtof(ch.r), len: M.spb * 0.9, gain: 0.5, cut: 520, q: 5,
+            fenv: 2.6, fdur: 0.07, detune: 10, voices: 2, rel: 0.05,
+          });
+        },
+      },
+      arp: {
+        step(M, s, t, out) {
+          const i = s % M.len, k = i & 15, ch = chordOf(M, i >> 4);
+          if (k % 2) return;
+          const seq = [0, 1, 2, 3, 2, 3, 1, 2];
+          const n = mtof(ch.c[seq[(k >> 1) % 8]] + 12);
+          iBlip(M.env, out, t, {
+            key: 'vicarp', f0: n, f1: n, dur: 0.12, duty: 0.42, decay: 1.2,
+            gain: 0.2, bits: 5, crush: 16000, cut: 7000, pan: (k % 4 ? 0.4 : -0.4),
+          });
+        },
+      },
+
+      /* --- momentum --- */
+      kick: {
+        step(M, s, t, out) {
+          if (((s % M.len) & 15) % 4 === 0)
+            iKick(M.env, out, t, { gain: 1.0, f0: 160, f1: 44, dur: 0.28, click: 0.4, body: 0.25 });
+        },
+      },
+      snare: {
+        step(M, s, t, out) {
+          const k = (s % M.len) & 15;
+          if (k === 4 || k === 12) iSnare(M.env, out, t, { gain: 0.62, dur: 0.15, tone: 2400, body: 210 });
+        },
+      },
+      hats: {
+        step(M, s, t, out) {
+          const k = (s % M.len) & 15;
+          if (k === 14) iHat(M.env, out, t, { gain: 0.32, dur: 0.14, cut: 7000, metal: 1.1 });
+          else if (k % 2 === 1) iHat(M.env, out, t, { gain: 0.26, dur: 0.03, cut: 9000, metal: 0.5 });
+        },
+      },
+      riser: {
+        step(M, s, t, out) {
+          const i = s % M.len;
+          if ((i & 15) !== 0 || (i >> 4) !== 3) return;
+          iSweep(M.env, out, t, { dur: M.spb * 14, f0: 600, f1: 6000, q: 2, gain: 0.14 });
+        },
+      },
+
+      /* --- depth: how far down you had to go --- */
+      bell: {
+        step(M, s, t, out) {
+          const i = s % M.len, ch = chordOf(M, i >> 4);
+          if ((i & 15) !== 0) return;
+          iFM(M.env, out, t, {
+            f: mtof(ch.c[3] + 12), len: 0.9, ratio: 3.01, index: 500, idxEnd: 0.03,
+            gain: 0.18, space: 0.5,
+          });
+        },
+      },
+      soar: {
+        step(M, s, t, out) {
+          const i = s % M.len, ch = chordOf(M, i >> 4);
+          if ((i & 15) !== 0) return;
+          for (let j = 1; j < 4; j++) iSaw(M.env, out, t, {
+            f: mtof(ch.c[j] + 24), len: M.spb * 16, rel: M.spb * 2.6, gain: 0.055, cut: 3200, q: 1.3,
+            detune: 7, voices: 2, a: 0.6, space: 0.6,
+          });
+        },
+        enter(M, t, out) {
+          iPluck(M.env, out, t, { f: 1320, dur: 1.6, damp: 0.997, bright: 0.5, gain: 0.13, cut: 8000, space: 0.7 });
+        },
+      },
+
+      /* --- power --- */
+      fanfare: {
+        step(M, s, t, out) {
+          const i = s % M.len, ch = chordOf(M, i >> 4);
+          if (!P('x...x...x.x.x...', i & 15)) return;
+          for (let j = 0; j < 4; j++) iSaw(M.env, out, t, {
+            f: mtof(ch.c[j] + 12), len: M.spb * 1.4, gain: 0.15, cut: 2200, q: 2,
+            fenv: 2.2, fdur: 0.12, detune: 14, voices: 2, a: 0.008, rel: 0.1, space: 0.3,
+          });
+        },
+      },
+      subOct: {
+        step(M, s, t, out) {
+          const i = s % M.len, k = i & 15, ch = chordOf(M, i >> 4);
+          if (k !== 0 && k !== 8) return;
+          iSub(M.env, out, t, { f: mtof(ch.r - 24), len: M.spb * 7, gain: 0.32, harm: 0.2, a: 0.02 });
+        },
+      },
+      lead: {
+        step(M, s, t, out) {
+          const i = s % M.len, k = i & 15, ch = chordOf(M, i >> 4);
+          if (k % 4 !== 2) return;
+          const seq = [3, 2, 3, 1];
+          iFM(M.env, out, t, {
+            f: mtof(ch.c[seq[(k >> 2) % 4]] + 24), len: M.spb * 1.8, ratio: 2, index: 260,
+            idxEnd: 0.04, gain: 0.16, pan: 0.3, space: 0.5,
+          });
+        },
+      },
+    },
+    cube: {
+      AAA: ['bass', 'arp', 'bell'],
+      AAB: ['bass', 'arp', 'bell', 'fanfare'],
+      AAC: ['bass', 'arp', 'bell', 'fanfare', 'subOct', 'lead'],
+      ABA: ['bass', 'arp', 'bell'],
+      ABB: ['bass', 'arp', 'bell', 'fanfare'],
+      ABC: ['bass', 'arp', 'bell', 'fanfare', 'subOct', 'lead'],
+      ACA: ['bass', 'arp', 'bell', 'soar'],
+      ACB: ['bass', 'arp', 'bell', 'soar', 'fanfare'],
+      ACC: ['bass', 'arp', 'bell', 'soar', 'fanfare', 'subOct', 'lead'],
+
+      BAA: ['bass', 'arp', 'bell', 'kick', 'snare', 'hats'],
+      BAB: ['bass', 'arp', 'bell', 'fanfare', 'kick', 'snare', 'hats'],
+      BAC: ['bass', 'arp', 'bell', 'fanfare', 'subOct', 'lead', 'kick', 'snare', 'hats'],
+      BBA: ['bass', 'arp', 'bell', 'kick', 'snare', 'hats'],
+      BBB: ['bass', 'arp', 'bell', 'fanfare', 'kick', 'snare', 'hats'],
+      BBC: ['bass', 'arp', 'bell', 'fanfare', 'subOct', 'lead', 'kick', 'snare', 'hats'],
+      BCA: ['bass', 'arp', 'bell', 'soar', 'kick', 'snare', 'hats'],
+      BCB: ['bass', 'arp', 'bell', 'soar', 'fanfare', 'kick', 'snare', 'hats'],
+      BCC: ['bass', 'arp', 'bell', 'soar', 'fanfare', 'subOct', 'lead', 'kick', 'snare', 'hats'],
+
+      CAA: ['bass', 'arp', 'bell', 'kick', 'snare', 'hats', 'riser'],
+      CAB: ['bass', 'arp', 'bell', 'fanfare', 'kick', 'snare', 'hats', 'riser'],
+      CAC: ['bass', 'arp', 'bell', 'fanfare', 'subOct', 'lead', 'kick', 'snare', 'hats', 'riser'],
+      CBA: ['bass', 'arp', 'bell', 'kick', 'snare', 'hats', 'riser'],
+      CBB: ['bass', 'arp', 'bell', 'fanfare', 'kick', 'snare', 'hats', 'riser'],
+      CBC: ['bass', 'arp', 'bell', 'fanfare', 'subOct', 'lead', 'kick', 'snare', 'hats', 'riser'],
+      CCA: ['bass', 'arp', 'bell', 'soar', 'kick', 'snare', 'hats', 'riser'],
+      CCB: ['bass', 'arp', 'bell', 'soar', 'fanfare', 'kick', 'snare', 'hats', 'riser'],
+      CCC: ['bass', 'arp', 'bell', 'soar', 'fanfare', 'subOct', 'lead', 'kick', 'snare', 'hats', 'riser'],
+    },
+  });
+
+})();
+
+
+/* ===== 109_audio_engine.js ===== */
+/* ============================================================
+   BIND69 — AUDIO :: ENGINE + PUBLIC API
+   Context lifecycle, the lookahead pump, the three sliders and what
+   drives them, ducking, mute/volume, offline rendering, and G.Audio
+   itself. This is the only file the rest of the game talks to.
+   ============================================================ */
+(function () {
+  const A = G.audioLib;
+  const { MAX_SFX_VOICES, PUMP_MS, LOOKAHEAD, LOOKAHEAD_HIDDEN, SWEEP_EVERY, LS_MUTE, LS_VOL,
+    clamp, lsGet, lsSet, oops, errorsOf, resetErrors, setDebugLog, getDebugLog, createEnv,
+    resolvePan, newVoice, disposeVoice, finishVoice, sweepVoices, stealOldest, TRACKS, track,
+    cornerName, cornerWeights, cubeWeights, applyStemGains, resolveTrack, makePlayer,
+    schedulePlayer, destroyPlayer, SFX } = A;
 
   /* ================= engine state ================= */
   let liveEnv = null;
@@ -3044,15 +4909,26 @@ G.Pool = function (factory, reset) {
   let players = [];            // active music players (crossfading)
   let curTrackKey = null;
   let masterVolume = 0.8;
-  let intensity = 0;           // current combat-layer target
-  let intensityAuto = true;
-  let intensityCur = 0;
+  /* The three sliders, 0..1, anchors A/B/C at 0, 0.5 and 1. `mom` is what the
+     single `intensity` control became; depth and power start at their middle
+     anchor so a track with nothing driving them still plays a complete mix. */
+  const AXIS_KEYS = ['mom', 'dep', 'pow'];
+  const AXIS_ALIAS = {
+    mom: 'mom', momentum: 'mom', intensity: 'mom',
+    dep: 'dep', depth: 'dep',
+    pow: 'pow', power: 'pow',
+  };
+  const axisTgt = { mom: 0, dep: 0.5, pow: 0.5 };
+  const axisCur = { mom: 0, dep: 0.5, pow: 0.5 };
+  const axisAuto = { mom: true, dep: true, pow: true };
   const rrIndex = Object.create(null);
 
   const Audio = {
     muted: lsGet(LS_MUTE, '0') === '1',
-    debugLog: false,
   };
+  /* `G.Audio.debugLog = true` still works; it writes through to the flag the
+     synthesis layer actually reads. */
+  Object.defineProperty(Audio, 'debugLog', { get: getDebugLog, set: setDebugLog, enumerable: true });
 
   function hasWebAudio() {
     return typeof window !== 'undefined' && !!(window.AudioContext || window.webkitAudioContext);
@@ -3102,19 +4978,28 @@ G.Pool = function (factory, reset) {
     try { now = env.ctx.currentTime; } catch (e) { return; }
     pumpN++;
 
-    /* intensity follow */
+    /* Slider follow. Slew the sliders, never the stem gains: the axis weights
+       sum to 1 at every slider value, so moving the slider itself holds the
+       total level constant across the move, where ramping eight corner gains
+       independently would let the sum drift and that reads as a pump. */
     if (players.length) {
-      let target = intensity;
-      if (intensityAuto) {
-        const a = autoIntensity();
-        if (a != null) target = a;
+      let moved = false;
+      for (let a = 0; a < 3; a++) {
+        const k = AXIS_KEYS[a];
+        let target = axisTgt[k];
+        if (axisAuto[k]) { const v = autoAxis(k); if (v != null) target = v; }
+        if (Math.abs(target - axisCur[k]) > 0.002) {
+          axisCur[k] += (target - axisCur[k]) * 0.12;
+          moved = true;
+        }
       }
-      if (Math.abs(target - intensityCur) > 0.002) {
-        intensityCur += (target - intensityCur) * 0.12;
+      if (moved) {
         for (let i = 0; i < players.length; i++) {
           const p = players[i];
-          if (p.dead || p.tr.boss) continue;
-          try { p.combat.gain.setTargetAtTime(intensityCur, now, 0.08); } catch (e) { }
+          if (p.dead) continue;
+          if (!p.tr.boss) p.mom = axisCur.mom;   // boss tracks pin momentum open
+          p.dep = axisCur.dep; p.pow = axisCur.pow;
+          cubeWeights(p); applyStemGains(p, now);
         }
       }
     }
@@ -3134,6 +5019,15 @@ G.Pool = function (factory, reset) {
     if (pumpN % SWEEP_EVERY === 0) sweepVoices(env, now);
   }
 
+  /* Each slider reads the one thing it is named after. null means "no reading
+     available" — the slider then holds at whatever it was last told. */
+  function autoAxis(k) {
+    if (k === 'mom') return autoIntensity();
+    if (k === 'dep') return autoDepth();
+    return autoPower();
+  }
+
+  /* momentum — how much is happening right now */
   function autoIntensity() {
     try {
       const gm = window.G && G.Game;
@@ -3145,6 +5039,32 @@ G.Pool = function (factory, reset) {
       let n = 0;
       for (let i = 0; i < list.length; i++) { const e = list[i]; if (e && e.alive) n++; }
       return clamp(n / 3, 0, 1);
+    } catch (e) { return null; }
+  }
+
+  /* depth — how far down you are, pushed further by how badly it is going.
+     Floor sets the baseline so the axis earns its name; damage and a boss
+     room ride on top, which is what makes it move within a floor. */
+  function autoDepth() {
+    try {
+      const gm = window.G && G.Game;
+      if (!gm) return null;
+      const fl = gm.floor;
+      const base = fl && fl.index != null ? clamp(fl.index / 7, 0, 1) * 0.5 : 0;
+      const pl = gm.player;
+      const hurt = (pl && pl.maxHp > 0) ? clamp(1 - pl.hp / pl.maxHp, 0, 1) * 0.5 : 0;
+      const rm = gm.room;
+      const boss = (rm && rm.type === 'boss' && !rm.cleared) ? 0.15 : 0;
+      return clamp(base + hurt + boss, 0, 1);
+    } catch (e) { return null; }
+  }
+
+  /* power — how strong the build has become */
+  function autoPower() {
+    try {
+      const pl = window.G && G.Game && G.Game.player;
+      if (!pl || !pl.items) return null;
+      return clamp(pl.items.length / 12, 0, 1);
     } catch (e) { return null; }
   }
 
@@ -3250,7 +5170,8 @@ G.Pool = function (factory, reset) {
 
       const p = makePlayer(env, key, {
         gain: 0, startTime: now + 0.06,
-        intensity: TRACKS[key].boss ? 1 : intensityCur,
+        intensity: TRACKS[key].boss ? 1 : axisCur.mom,
+        depth: axisCur.dep, power: axisCur.pow,
       });
       if (!p) return;
       try {
@@ -3302,11 +5223,22 @@ G.Pool = function (factory, reset) {
     } catch (e) { oops(e); }
   };
 
-  Audio.setIntensity = function (v) {
-    intensity = clamp(+v || 0, 0, 1);
-    intensityAuto = false;
+  /* Setting a slider by hand takes it off its auto driver — the caller has
+     said what it should be, so nothing should quietly pull it back. */
+  Audio.setAxis = function (name, v) {
+    const k = AXIS_ALIAS[String(name).toLowerCase()];
+    if (!k) return;
+    axisTgt[k] = clamp(+v || 0, 0, 1);
+    axisAuto[k] = false;
   };
-  Audio.setAutoIntensity = function (b) { intensityAuto = !!b; };
+  Audio.setAutoAxis = function (name, b) {
+    const k = AXIS_ALIAS[String(name).toLowerCase()];
+    if (k) axisAuto[k] = !!b;
+  };
+  Audio.axes = function () { return { momentum: axisCur.mom, depth: axisCur.dep, power: axisCur.pow }; };
+
+  Audio.setIntensity = function (v) { Audio.setAxis('mom', v); };
+  Audio.setAutoIntensity = function (b) { Audio.setAutoAxis('mom', b); };
 
   /* ---------- ducking ---------- */
   Audio.duck = function (amount, ms) {
@@ -3389,6 +5321,13 @@ G.Pool = function (factory, reset) {
       const p = makePlayer(env, k, {
         gain: 1, startTime: 0.05,
         intensity: opts.intensity == null ? (TRACKS[k].boss ? 1 : 0) : opts.intensity,
+        /* Pin the other two sliders rather than inheriting the live ones. The
+           live sliders are mid-slew towards whatever the game is doing, so
+           inheriting them makes an offline render depend on how many pumps
+           happened to have elapsed — a measurement that quietly changes shape
+           between runs. Anchor B is the neutral middle of both axes. */
+        depth: opts.depth == null ? 0.5 : opts.depth,
+        power: opts.power == null ? 0.5 : opts.power,
       });
       schedulePlayer(p, seconds);
     }
@@ -3405,16 +5344,54 @@ G.Pool = function (factory, reset) {
     renderSfx: function (name, seconds, opts) { return renderOffline('sfx', name, seconds || 2.5, opts); },
     renderMusic: function (key, seconds, opts) { return renderOffline('music', key, seconds || 8, opts); },
     voices: function () { return liveEnv ? { total: liveEnv.voices.length, sfx: liveEnv.sfxVoices, players: players.length } : null; },
-    errors: function () { return { count: errCount, last: lastErr }; },
-    resetErrors: function () { errCount = 0; lastErr = null; },
+    errors: errorsOf,
+    resetErrors: resetErrors,
     state: function () {
       return {
         available: available, ctx: ctxRef ? ctxRef.state : null, unlocked: unlocked,
         muted: Audio.muted, volume: masterVolume, track: curTrackKey,
-        intensity: intensityCur, players: players.length,
+        intensity: axisCur.mom,
+        momentum: axisCur.mom, depth: axisCur.dep, power: axisCur.pow,
+        players: players.length,
         voices: liveEnv ? liveEnv.voices.length : 0,
         sfxVoices: liveEnv ? liveEnv.sfxVoices : 0,
         sampleRate: ctxRef ? ctxRef.sampleRate : 0,
+      };
+    },
+    /* the cube as pure arithmetic — no AudioContext, no rendering, so the
+       weights can be checked directly rather than inferred from a waveform */
+    cube: function (k) {
+      const tr = TRACKS[resolveTrack(k)];
+      if (!tr || !tr.corners) return null;
+      const corners = {};
+      for (let i = 0; i < 27; i++) corners[cornerName(i)] = tr.corners[i].map(function (j) { return tr.stemNames[j]; });
+      return { stems: tr.stemNames.slice(), corners: corners };
+    },
+    stemWeights: function (k, mom, dep, pow) {
+      const tr = TRACKS[resolveTrack(k)];
+      if (!tr || !tr.corners) return null;
+      const p = { tr: tr, mom: mom || 0, dep: dep || 0, pow: pow || 0, stemW: new Float32Array(tr.stemList.length) };
+      cubeWeights(p);
+      const out = {};
+      for (let i = 0; i < tr.stemNames.length; i++) out[tr.stemNames[i]] = p.stemW[i];
+      return out;
+    },
+    /* what is sounding RIGHT NOW: the sliders, the corners they land between,
+       and the gain every stem is actually holding. This is what the overlay
+       draws — it reads the live player rather than recomputing from the
+       sliders, so what you see is what is in the graph. */
+    mix: function () {
+      const p = players.length ? players[players.length - 1] : null;
+      if (!p || p.dead || !p.stemW) return null;
+      const stems = [];
+      for (let i = 0; i < p.tr.stemNames.length; i++) {
+        stems.push({ name: p.tr.stemNames[i], w: p.stemW[i], on: !!p.stemOn[i] });
+      }
+      return {
+        track: p.key, name: p.tr.name, players: players.length,
+        momentum: p.mom, depth: p.dep, power: p.pow,
+        auto: { momentum: axisAuto.mom, depth: axisAuto.dep, power: axisAuto.pow },
+        corners: cornerWeights(p), stems: stems,
       };
     },
     resolve: resolveTrack,
@@ -30945,11 +32922,8 @@ G.Pool = function (factory, reset) {
       x1 = Math.min(floor.w - 1, x1 + 1); y1 = Math.min(floor.h - 1, y1 + 1);
       const cols = x1 - x0 + 1, rows = y1 - y0 + 1;
 
-      /* ---- scale cells to fill the panel, leaving room for the info rail ----
-         The cropped map commonly leaves space on the left.  Use that edge for
-         the keys instead of letting the right-hand rail crowd the room grid. */
+      /* ---- scale cells to fill the panel, leaving room for the key ---- */
       const KEYW = 96;
-      const MAPX = KEYW + 14;
       /* the build panel below the grid is inspectable now, so it needs real
          height — the map gives it back rather than overlapping it */
       const availW = G.VW - 28 - KEYW, availH = G.VH - 152;
@@ -30958,7 +32932,7 @@ G.Pool = function (factory, reset) {
       let CH = Math.floor(availH / rows) - GAP;
       CW = clamp(CW, 12, 46); CH = clamp(CH, 10, 36);
       const gw = cols * (CW + GAP), gh = rows * (CH + GAP);
-      const ox = (MAPX + (availW - gw) / 2 | 0) - x0 * (CW + GAP);
+      const ox = (14 + (availW - gw) / 2 | 0) - x0 * (CW + GAP);
       const oy = (42 + (availH - gh) / 2 | 0) - y0 * (CH + GAP);
       const big = Math.max(1, Math.min(CW, CH) / 9);
 
@@ -31000,11 +32974,11 @@ G.Pool = function (factory, reset) {
       }
 
       /* ---- the key (REFERENCE 4.1) ---- */
-      const keyH = UI.drawMapKey(c, 6, 44, present) || 0;
+      const keyH = UI.drawMapKey(c, G.VW - KEYW - 6, 44, present) || 0;
       /* the legend for the item marks, directly under the room-type key */
       if (UI.drawFamilyKey) {
         const fy = 44 + keyH + 6;
-        UI.drawFamilyKey(c, 6, fy, G.Game && G.Game.player, 92, G.VH - 88 - fy);
+        UI.drawFamilyKey(c, G.VW - KEYW - 6, fy, G.Game && G.Game.player, 92, G.VH - 88 - fy);
       }
       /* ---- what you are actually holding ---- */
       UI.drawBuildStrip(c, G.Game && G.Game.player, 10, G.VH - 84, G.VW - 20);
@@ -31566,8 +33540,8 @@ G.Pool = function (factory, reset) {
     return null;
   }
 
-  UI.statPanelHeight = function (all, compact) {
-    return 8 + (all ? Dex.ROWS.length : 7) * (compact ? 13 : 9);
+  UI.statPanelHeight = function (all) {
+    return 8 + (all ? Dex.ROWS.length : 7) * 9;
   };
 
   /* Bars are drawn against LIMITS, not against an arbitrary maximum, so a
@@ -31577,7 +33551,7 @@ G.Pool = function (factory, reset) {
     o = o || {};
     if (!p || !p.stats) return;
     const rows = o.all ? Dex.ROWS : Dex.ROWS.slice(0, 7);
-    const h = UI.statPanelHeight(o.all, o.compact);
+    const h = UI.statPanelHeight(o.all);
     /* the death screen is red end to end; a panel that kept the floor accent
        read as a leftover from the run rather than part of the dump */
     const a = o.accent || acc();
@@ -31588,13 +33562,12 @@ G.Pool = function (factory, reset) {
        three seconds it actually matters. */
     /* a screen with no pickup behind it (the death dump) has no deltas to
        show, so it gets the column back as bar */
-    const labelW = o.compact ? 34 : 44, valW = o.compact ? 26 : 30;
-    const deltaW = o.delta === false ? 0 : (o.compact ? 30 : 34);
+    const labelW = 44, valW = 30, deltaW = o.delta === false ? 0 : 34;
     const barX = x + 6 + labelW + valW;
     const barW = Math.max(8, w - 12 - labelW - valW - deltaW);
     const deltaR = x + w - 6;
     for (let i = 0; i < rows.length; i++) {
-      const r = rows[i], ry = y + 5 + i * (o.compact ? 13 : 9);
+      const r = rows[i], ry = y + 5 + i * 9;
       const ch = changeFor(r);
       const capped = r.dir && Dex.capped(p.stats, r);
       txt(c, r.label, x + 6, ry, { size: 5, color: ch ? '#ffffff' : 'rgba(190,225,215,.62)' });
@@ -31602,12 +33575,9 @@ G.Pool = function (factory, reset) {
         { size: 5, align: 'right', color: capped ? '#ffd24a' : ch ? '#ffffff' : 'rgba(225,245,238,.9)' });
 
       const k = Dex.fill(p.stats, r);
-      const bx = o.compact ? x + 6 : barX;
-      const bw = o.compact ? w - 12 : barW;
-      const by = o.compact ? ry + 8 : ry + 1;
-      c.fillStyle = 'rgba(0,0,0,.5)'; px(c, bx, by, bw, o.compact ? 3 : 4);
+      c.fillStyle = 'rgba(0,0,0,.5)'; px(c, barX, ry + 1, barW, 4);
       c.fillStyle = capped ? '#ffd24a' : ch ? (ch.good === false ? '#ff5a6e' : '#ffffff') : a;
-      px(c, bx, by, bw * k, o.compact ? 3 : 4);
+      px(c, barX, ry + 1, barW * k, 4);
 
       if (ch && deltaW) {
         txt(c, Dex.deltaText(ch), deltaR, ry, {
@@ -31724,25 +33694,134 @@ G.Pool = function (factory, reset) {
     origHUD.call(this, c, game);
     /* pause and map draw the room (and therefore the HUD) underneath their
        own panels, and two stat readouts on one screen is worse than none */
-    const side = G.statsCanvas, sideCtx = G.statsCtx;
-    if (sideCtx) sideCtx.clearRect(0, 0, side.width, side.height);
-    if (G.stateName !== 'play') { if (side) side.style.display = 'none'; return; }
-    if (!pinned && flashT <= 0) { if (side) side.style.display = 'none'; return; }
+    if (G.stateName !== 'play') return;
+    if (!pinned && flashT <= 0) return;
     const p = game && game.player; if (!p) return;
-    const alpha = pinned ? 0.94 : clamp(flashT / 0.5, 0, 1) * 0.94;
-    if (G.statsSideAvailable && side && sideCtx) {
-      side.style.display = 'block';
-      sideCtx.globalAlpha = alpha;
-      UI.drawStatPanel(sideCtx, p, 0, 0, side.width, { all: pinned, compact: true });
-      sideCtx.globalAlpha = 1;
-    } else {
-      if (side) side.style.display = 'none';
-      const w = 190, x = G.VW - w - 4, y = G.ROOM_Y + 4;
-      c.globalAlpha = alpha;
-      UI.drawStatPanel(c, p, x, y, w, { all: pinned });
-      c.globalAlpha = 1;
-    }
+    const w = 190, x = G.VW - w - 4, y = G.ROOM_Y + 4;
+    c.globalAlpha = pinned ? 0.94 : clamp(flashT / 0.5, 0, 1) * 0.94;
+    UI.drawStatPanel(c, p, x, y, w, { all: pinned });
+    c.globalAlpha = 1;
   };
+})();
+
+
+/* ===== 612_ui_mix.js ===== */
+/* ============================================================
+   BIND69 — UI: THE MIX OVERLAY                         (owner: UI)
+
+   Draws what the music is doing while you play: the three sliders, the
+   corners of the stem cube they are currently sitting between, and the gain
+   every stem is actually holding.
+
+   It exists because the cube is otherwise invisible. You can hear that the
+   music changed; you cannot hear WHY, and when a corner turns out to be a
+   hole the only symptom in play is that things went quiet. This makes the
+   interpolation legible: nudge a slider and watch the corner weights trade
+   with each other while the stem bars slide.
+
+   Reads G.Audio.debug.mix(), which reports the live player's own gains
+   rather than recomputing them — so what is drawn is what is in the graph.
+   Rides the existing backtick debug toggle; no new key, and it never draws
+   unless that is on. Monospace here matches the other debug panel: this is
+   a dev tool, not shipped UI, and is exempt from the bitmap-font rule.
+   ============================================================ */
+(function () {
+  const W = 132;                     // panel width
+  const ROW = 8;                     // line height
+  const clamp = G.clamp;
+
+  /* the three sliders, in the order they are named everywhere else */
+  const AXES = [
+    ['MOM', 'momentum'],
+    ['DEP', 'depth'],
+    ['POW', 'power'],
+  ];
+
+  function bar(c, x, y, w, h, v, fg, bg) {
+    c.fillStyle = bg; c.fillRect(x, y, w, h);
+    const n = Math.round(w * clamp(v, 0, 1));
+    if (n > 0) { c.fillStyle = fg; c.fillRect(x, y, n, h); }
+  }
+
+  /* A/B/C sit at 0, 0.5 and 1 — drawing the ticks is what makes a slider
+     parked exactly on an anchor readable as such, rather than as "about
+     half". That distinction is the whole behaviour of the cube. */
+  function anchors(c, x, y, w, h) {
+    c.fillStyle = 'rgba(255,255,255,.35)';
+    for (let i = 0; i < 3; i++) c.fillRect(x + Math.round((w - 1) * i / 2), y - 1, 1, h + 2);
+  }
+
+  const Mix = {};
+
+  Mix.draw = function (c) {
+    let m = null;
+    try { m = G.Audio && G.Audio.debug && G.Audio.debug.mix(); } catch (e) { return; }
+    if (!m) return;
+
+    const stems = m.stems;
+    const rows = 3 + m.corners.length + stems.length + 4;
+    const h = rows * ROW + 6;
+    const x = G.VW - W - 4;
+    const y = 4;
+
+    c.save();
+    c.font = '9px monospace'; c.textAlign = 'left'; c.textBaseline = 'top';
+    c.fillStyle = 'rgba(0,0,0,.72)'; c.fillRect(x, y, W, h);
+    c.fillStyle = 'rgba(120,255,200,.18)'; c.fillRect(x, y, W, 1); c.fillRect(x, y + h - 1, W, 1);
+
+    let ty = y + 3;
+    c.fillStyle = '#8ef7c8';
+    c.fillText(m.track + (m.players > 1 ? '  x' + m.players : ''), x + 4, ty);
+    ty += ROW;
+
+    /* --- sliders --- */
+    for (const [label, key] of AXES) {
+      const v = m[key];
+      c.fillStyle = m.auto[key] ? '#8ef7c8' : '#ffd24a';   // yellow = driven by hand
+      c.fillText(label, x + 4, ty);
+      const bx = x + 26, bw = W - 26 - 30;
+      bar(c, bx, ty + 1, bw, 6, v, m.auto[key] ? '#4af0b0' : '#ffd24a', 'rgba(255,255,255,.10)');
+      anchors(c, bx, ty + 1, bw, 6);
+      c.fillStyle = '#8ef7c8';
+      c.fillText(v.toFixed(2), x + W - 26, ty);
+      ty += ROW;
+    }
+    ty += 3;
+
+    /* --- the live corners --- */
+    c.fillStyle = 'rgba(142,247,200,.55)';
+    c.fillText('CORNERS ' + m.corners.length + '/27', x + 4, ty);
+    ty += ROW;
+    for (const cr of m.corners) {
+      c.fillStyle = '#c08cff';
+      c.fillText(cr.name, x + 8, ty);
+      bar(c, x + 32, ty + 1, W - 32 - 30, 6, cr.w, '#c08cff', 'rgba(255,255,255,.08)');
+      c.fillStyle = '#8ef7c8';
+      c.fillText(cr.w.toFixed(2), x + W - 26, ty);
+      ty += ROW;
+    }
+    ty += 3;
+
+    /* --- every stem, silent ones included: seeing a stem sit at zero is
+           half the point, and a list that hides them hides the holes --- */
+    let live = 0;
+    for (const st of stems) if (st.w > 1e-4) live++;
+    c.fillStyle = 'rgba(142,247,200,.55)';
+    c.fillText('STEMS ' + live + '/' + stems.length, x + 4, ty);
+    ty += ROW;
+    for (const st of stems) {
+      const on = st.w > 1e-4;
+      c.fillStyle = on ? '#8ef7c8' : 'rgba(142,247,200,.28)';
+      c.fillText(st.name.slice(0, 10), x + 6, ty);
+      bar(c, x + 62, ty + 1, W - 62 - 26, 6, st.w,
+        on ? '#4af0b0' : 'rgba(74,240,176,.2)', 'rgba(255,255,255,.07)');
+      ty += ROW;
+    }
+
+    c.restore();
+  };
+
+  G.MixDebug = Mix;
 })();
 
 
@@ -33394,6 +35473,7 @@ G.Pool = function (factory, reset) {
       '  es ' + Game.enemyShots.length + '  p ' + C.localParticleCount(), 4, G.VH - 33);
     c.fillText('room ' + room.gx + ',' + room.gy + ' ' + room.type + ' ' + room.tpl, 4, G.VH - 22);
     c.fillText('pos ' + (p.x | 0) + ',' + (p.y | 0) + '  seed ' + Game.seedStr, 4, G.VH - 11);
+    if (G.MixDebug) G.MixDebug.draw(c);
   }
 
   /* =========================================================
@@ -33850,15 +35930,6 @@ G.Pool = function (factory, reset) {
   canvas.width = G.VW; canvas.height = G.VH;
   ctx.imageSmoothingEnabled = false;
 
-  /* A transparent sidecar lets transient HUD panels use widescreen
-     letterboxing without changing the game's 640x360 coordinate system. */
-  const statsCanvas = document.createElement('canvas');
-  const statsCtx = statsCanvas.getContext('2d');
-  statsCanvas.width = 104; statsCanvas.height = 190;
-  statsCanvas.style.cssText = 'position:fixed;display:none;pointer-events:none;image-rendering:pixelated;image-rendering:crisp-edges';
-  document.body.appendChild(statsCanvas);
-  G.statsCanvas = statsCanvas; G.statsCtx = statsCtx; G.statsSideAvailable = false;
-
   /* ---------- scaling ---------- */
   G.scale = 1;
   function resize() {
@@ -33870,13 +35941,6 @@ G.Pool = function (factory, reset) {
     G.scale = s;
     canvas.style.width = Math.round(G.VW * s) + 'px';
     canvas.style.height = Math.round(G.VH * s) + 'px';
-    const cw = G.VW * s, ch = G.VH * s, gap = 6 * s;
-    const left = (w - cw) / 2, top = (h - ch) / 2;
-    G.statsSideAvailable = left >= statsCanvas.width * s + gap;
-    statsCanvas.style.width = Math.round(statsCanvas.width * s) + 'px';
-    statsCanvas.style.height = Math.round(statsCanvas.height * s) + 'px';
-    statsCanvas.style.left = Math.round(left - statsCanvas.width * s - gap) + 'px';
-    statsCanvas.style.top = Math.round(top + G.ROOM_Y * s) + 'px';
   }
   addEventListener('resize', resize); resize();
 
@@ -33956,9 +36020,6 @@ G.Pool = function (factory, reset) {
 
     G.rframe++;
     try {
-      /* Panels opt in again while rendering; this prevents a sidecar from
-         lingering when the game changes to a screen that has no HUD. */
-      statsCanvas.style.display = 'none';
       if (G.Render && G.Render.beginFrame) G.Render.beginFrame(ctx);
       G.state && G.state.render && G.state.render(ctx);
       if (G.Render && G.Render.endFrame) G.Render.endFrame(ctx);
