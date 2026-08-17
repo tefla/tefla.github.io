@@ -30945,8 +30945,11 @@ G.Pool = function (factory, reset) {
       x1 = Math.min(floor.w - 1, x1 + 1); y1 = Math.min(floor.h - 1, y1 + 1);
       const cols = x1 - x0 + 1, rows = y1 - y0 + 1;
 
-      /* ---- scale cells to fill the panel, leaving room for the key ---- */
+      /* ---- scale cells to fill the panel, leaving room for the info rail ----
+         The cropped map commonly leaves space on the left.  Use that edge for
+         the keys instead of letting the right-hand rail crowd the room grid. */
       const KEYW = 96;
+      const MAPX = KEYW + 14;
       /* the build panel below the grid is inspectable now, so it needs real
          height — the map gives it back rather than overlapping it */
       const availW = G.VW - 28 - KEYW, availH = G.VH - 152;
@@ -30955,7 +30958,7 @@ G.Pool = function (factory, reset) {
       let CH = Math.floor(availH / rows) - GAP;
       CW = clamp(CW, 12, 46); CH = clamp(CH, 10, 36);
       const gw = cols * (CW + GAP), gh = rows * (CH + GAP);
-      const ox = (14 + (availW - gw) / 2 | 0) - x0 * (CW + GAP);
+      const ox = (MAPX + (availW - gw) / 2 | 0) - x0 * (CW + GAP);
       const oy = (42 + (availH - gh) / 2 | 0) - y0 * (CH + GAP);
       const big = Math.max(1, Math.min(CW, CH) / 9);
 
@@ -30997,11 +31000,11 @@ G.Pool = function (factory, reset) {
       }
 
       /* ---- the key (REFERENCE 4.1) ---- */
-      const keyH = UI.drawMapKey(c, G.VW - KEYW - 6, 44, present) || 0;
+      const keyH = UI.drawMapKey(c, 6, 44, present) || 0;
       /* the legend for the item marks, directly under the room-type key */
       if (UI.drawFamilyKey) {
         const fy = 44 + keyH + 6;
-        UI.drawFamilyKey(c, G.VW - KEYW - 6, fy, G.Game && G.Game.player, 92, G.VH - 88 - fy);
+        UI.drawFamilyKey(c, 6, fy, G.Game && G.Game.player, 92, G.VH - 88 - fy);
       }
       /* ---- what you are actually holding ---- */
       UI.drawBuildStrip(c, G.Game && G.Game.player, 10, G.VH - 84, G.VW - 20);
@@ -31563,8 +31566,8 @@ G.Pool = function (factory, reset) {
     return null;
   }
 
-  UI.statPanelHeight = function (all) {
-    return 8 + (all ? Dex.ROWS.length : 7) * 9;
+  UI.statPanelHeight = function (all, compact) {
+    return 8 + (all ? Dex.ROWS.length : 7) * (compact ? 13 : 9);
   };
 
   /* Bars are drawn against LIMITS, not against an arbitrary maximum, so a
@@ -31574,7 +31577,7 @@ G.Pool = function (factory, reset) {
     o = o || {};
     if (!p || !p.stats) return;
     const rows = o.all ? Dex.ROWS : Dex.ROWS.slice(0, 7);
-    const h = UI.statPanelHeight(o.all);
+    const h = UI.statPanelHeight(o.all, o.compact);
     /* the death screen is red end to end; a panel that kept the floor accent
        read as a leftover from the run rather than part of the dump */
     const a = o.accent || acc();
@@ -31585,12 +31588,13 @@ G.Pool = function (factory, reset) {
        three seconds it actually matters. */
     /* a screen with no pickup behind it (the death dump) has no deltas to
        show, so it gets the column back as bar */
-    const labelW = 44, valW = 30, deltaW = o.delta === false ? 0 : 34;
+    const labelW = o.compact ? 34 : 44, valW = o.compact ? 26 : 30;
+    const deltaW = o.delta === false ? 0 : (o.compact ? 30 : 34);
     const barX = x + 6 + labelW + valW;
     const barW = Math.max(8, w - 12 - labelW - valW - deltaW);
     const deltaR = x + w - 6;
     for (let i = 0; i < rows.length; i++) {
-      const r = rows[i], ry = y + 5 + i * 9;
+      const r = rows[i], ry = y + 5 + i * (o.compact ? 13 : 9);
       const ch = changeFor(r);
       const capped = r.dir && Dex.capped(p.stats, r);
       txt(c, r.label, x + 6, ry, { size: 5, color: ch ? '#ffffff' : 'rgba(190,225,215,.62)' });
@@ -31598,9 +31602,12 @@ G.Pool = function (factory, reset) {
         { size: 5, align: 'right', color: capped ? '#ffd24a' : ch ? '#ffffff' : 'rgba(225,245,238,.9)' });
 
       const k = Dex.fill(p.stats, r);
-      c.fillStyle = 'rgba(0,0,0,.5)'; px(c, barX, ry + 1, barW, 4);
+      const bx = o.compact ? x + 6 : barX;
+      const bw = o.compact ? w - 12 : barW;
+      const by = o.compact ? ry + 8 : ry + 1;
+      c.fillStyle = 'rgba(0,0,0,.5)'; px(c, bx, by, bw, o.compact ? 3 : 4);
       c.fillStyle = capped ? '#ffd24a' : ch ? (ch.good === false ? '#ff5a6e' : '#ffffff') : a;
-      px(c, barX, ry + 1, barW * k, 4);
+      px(c, bx, by, bw * k, o.compact ? 3 : 4);
 
       if (ch && deltaW) {
         txt(c, Dex.deltaText(ch), deltaR, ry, {
@@ -31717,13 +31724,24 @@ G.Pool = function (factory, reset) {
     origHUD.call(this, c, game);
     /* pause and map draw the room (and therefore the HUD) underneath their
        own panels, and two stat readouts on one screen is worse than none */
-    if (G.stateName !== 'play') return;
-    if (!pinned && flashT <= 0) return;
+    const side = G.statsCanvas, sideCtx = G.statsCtx;
+    if (sideCtx) sideCtx.clearRect(0, 0, side.width, side.height);
+    if (G.stateName !== 'play') { if (side) side.style.display = 'none'; return; }
+    if (!pinned && flashT <= 0) { if (side) side.style.display = 'none'; return; }
     const p = game && game.player; if (!p) return;
-    const w = 190, x = G.VW - w - 4, y = G.ROOM_Y + 4;
-    c.globalAlpha = pinned ? 0.94 : clamp(flashT / 0.5, 0, 1) * 0.94;
-    UI.drawStatPanel(c, p, x, y, w, { all: pinned });
-    c.globalAlpha = 1;
+    const alpha = pinned ? 0.94 : clamp(flashT / 0.5, 0, 1) * 0.94;
+    if (G.statsSideAvailable && side && sideCtx) {
+      side.style.display = 'block';
+      sideCtx.globalAlpha = alpha;
+      UI.drawStatPanel(sideCtx, p, 0, 0, side.width, { all: pinned, compact: true });
+      sideCtx.globalAlpha = 1;
+    } else {
+      if (side) side.style.display = 'none';
+      const w = 190, x = G.VW - w - 4, y = G.ROOM_Y + 4;
+      c.globalAlpha = alpha;
+      UI.drawStatPanel(c, p, x, y, w, { all: pinned });
+      c.globalAlpha = 1;
+    }
   };
 })();
 
@@ -33832,6 +33850,15 @@ G.Pool = function (factory, reset) {
   canvas.width = G.VW; canvas.height = G.VH;
   ctx.imageSmoothingEnabled = false;
 
+  /* A transparent sidecar lets transient HUD panels use widescreen
+     letterboxing without changing the game's 640x360 coordinate system. */
+  const statsCanvas = document.createElement('canvas');
+  const statsCtx = statsCanvas.getContext('2d');
+  statsCanvas.width = 104; statsCanvas.height = 190;
+  statsCanvas.style.cssText = 'position:fixed;display:none;pointer-events:none;image-rendering:pixelated;image-rendering:crisp-edges';
+  document.body.appendChild(statsCanvas);
+  G.statsCanvas = statsCanvas; G.statsCtx = statsCtx; G.statsSideAvailable = false;
+
   /* ---------- scaling ---------- */
   G.scale = 1;
   function resize() {
@@ -33843,6 +33870,13 @@ G.Pool = function (factory, reset) {
     G.scale = s;
     canvas.style.width = Math.round(G.VW * s) + 'px';
     canvas.style.height = Math.round(G.VH * s) + 'px';
+    const cw = G.VW * s, ch = G.VH * s, gap = 6 * s;
+    const left = (w - cw) / 2, top = (h - ch) / 2;
+    G.statsSideAvailable = left >= statsCanvas.width * s + gap;
+    statsCanvas.style.width = Math.round(statsCanvas.width * s) + 'px';
+    statsCanvas.style.height = Math.round(statsCanvas.height * s) + 'px';
+    statsCanvas.style.left = Math.round(left - statsCanvas.width * s - gap) + 'px';
+    statsCanvas.style.top = Math.round(top + G.ROOM_Y * s) + 'px';
   }
   addEventListener('resize', resize); resize();
 
@@ -33922,6 +33956,9 @@ G.Pool = function (factory, reset) {
 
     G.rframe++;
     try {
+      /* Panels opt in again while rendering; this prevents a sidecar from
+         lingering when the game changes to a screen that has no HUD. */
+      statsCanvas.style.display = 'none';
       if (G.Render && G.Render.beginFrame) G.Render.beginFrame(ctx);
       G.state && G.state.render && G.state.render(ctx);
       if (G.Render && G.Render.endFrame) G.Render.endFrame(ctx);
