@@ -2875,23 +2875,39 @@ G.Pool = function (factory, reset) {
        the Dmaj7 in bar 11 sound like relief rather than a mistake, and it makes
        the Bbmaj7 in bar 5 sound like the floor giving way. */
     tonic: 57, scale: [0, 2, 3, 5, 7, 9, 10],
+    /* `c` is the chord. `w` is what the pad plays, and it is four notes rather
+       than three because the cheapest way to stop a low grind is to take the
+       low end away, and that would cost this track the only thing it cannot
+       lose. So the bottom of `w` is always a bare OCTAVE on one pitch class —
+       two voices, zero beating, twice the weight — and the colour tones all sit
+       above 200 Hz where a third or a seventh reads as harmony.
+
+       The old line sounded `c[0..2]` an octave down, which put chord 1 at A2
+       110 Hz, B2 123.5, C3 130.8: a whole tone and a semitone inside a critical
+       band about twenty-one hertz wide, three detuned saws apiece, held a full
+       bar. Every interval it had left was inside one band, so none of them
+       sounded — they beat. The chords were never the problem; measured over
+       their four passes each, the three borrowed ones (Bbmaj7, Abmaj7, Dmaj7)
+       come out within 1% of the median, and the sourest in the whole loop are
+       the diatonic Am(add9) and E7sus4. The bVI keeps its semitone under the
+       tonic. It just stops being a beat frequency. */
     prog: [
-      { r: 45, c: [57, 59, 60, 64] },   // 1  Am(add9)   — home, but never a triad
-      { r: 43, c: [57, 60, 64, 67] },   // 2  Am7/G      — the bass walks off
-      { r: 41, c: [57, 59, 64, 65] },   // 3  Fmaj7#11   — the B floats above the F
-      { r: 36, c: [55, 59, 60, 64] },   // 4  Cmaj7
-      { r: 34, c: [57, 58, 62, 65] },   // 5  Bbmaj7     — borrowed bII: the tilt
-      { r: 43, c: [58, 62, 65, 67] },   // 6  Gm7        — bVII minor, no leading tone
-      { r: 38, c: [57, 60, 62, 65] },   // 7  Dm7
-      { r: 40, c: [59, 62, 64, 67] },   // 8  Em7        — modal v, refuses to be V7
-      { r: 45, c: [57, 59, 60, 64] },   // 9  Am(add9)   — home again, changed
-      { r: 43, c: [55, 59, 60, 64] },   // 10 C/G
-      { r: 38, c: [57, 61, 62, 66] },   // 11 Dmaj7      — Dorian IV major: the lift
-      { r: 41, c: [57, 60, 64, 65] },   // 12 Fmaj7
-      { r: 32, c: [56, 60, 63, 67] },   // 13 Abmaj7     — chromatic bVI, a semitone
-      { r: 43, c: [58, 62, 65, 67] },   // 14 Gm7        //   under the tonic
-      { r: 41, c: [57, 59, 64, 65] },   // 15 Fmaj7#11
-      { r: 40, c: [57, 59, 62, 64] },   // 16 E7sus4     — hangs, loops back unresolved
+      { r: 45, c: [57, 59, 60, 64], w: [45, 57, 60, 71] },   // 1  Am(add9)   — home, but never a triad
+      { r: 43, c: [57, 60, 64, 67], w: [43, 55, 60, 64] },   // 2  Am7/G      — the bass walks off
+      { r: 41, c: [57, 59, 64, 65], w: [41, 53, 64, 71] },   // 3  Fmaj7#11   — the B floats above the F
+      { r: 36, c: [55, 59, 60, 64], w: [48, 60, 64, 71] },   // 4  Cmaj7
+      { r: 34, c: [57, 58, 62, 65], w: [46, 58, 62, 69] },   // 5  Bbmaj7     — borrowed bII: the tilt
+      { r: 43, c: [58, 62, 65, 67], w: [43, 55, 62, 65] },   // 6  Gm7        — bVII minor, no leading tone
+      { r: 38, c: [57, 60, 62, 65], w: [45, 57, 60, 65] },   // 7  Dm7
+      { r: 40, c: [59, 62, 64, 67], w: [47, 59, 62, 67] },   // 8  Em7        — modal v, refuses to be V7
+      { r: 45, c: [57, 59, 60, 64], w: [45, 57, 60, 71] },   // 9  Am(add9)   — home again, changed
+      { r: 43, c: [55, 59, 60, 64], w: [43, 55, 60, 64] },   // 10 C/G
+      { r: 38, c: [57, 61, 62, 66], w: [45, 57, 61, 66] },   // 11 Dmaj7      — Dorian IV major: the lift
+      { r: 41, c: [57, 60, 64, 65], w: [45, 57, 60, 64] },   // 12 Fmaj7
+      { r: 32, c: [56, 60, 63, 67], w: [44, 56, 60, 67] },   // 13 Abmaj7     — chromatic bVI, a semitone
+      { r: 43, c: [58, 62, 65, 67], w: [43, 55, 62, 65] },   // 14 Gm7        //   under the tonic
+      { r: 41, c: [57, 59, 64, 65], w: [41, 53, 64, 71] },   // 15 Fmaj7#11
+      { r: 40, c: [57, 59, 62, 64], w: [45, 57, 62, 71] },   // 16 E7sus4     — hangs, loops back unresolved
     ],
     /* The same six runs, scaled to sixty bars. None of them is sixteen, so the
        arrangement never lines up with the progression: the top of the harmony
@@ -2982,9 +2998,13 @@ G.Pool = function (factory, reset) {
              top, so the same three saws read as four different pads */
           const cut = sec === 'hollow' ? 380 : sec === 'surge' ? 900 : sec === 'lift' ? 760 : 620;
           const voices = sec === 'hollow' ? 1 : 2;
-          for (let j = 0; j < 3; j++) {
+          /* The bottom pair is the octave and carries the weight, so it keeps
+             the dark corner. The colour pair sits above it and gets a little
+             more air, because it is now the part doing the harmony. */
+          for (let j = 0; j < 4; j++) {
             iSaw(M.env, out, t, {
-              f: mtof(ch.c[j] - 12), len: M.spb * bl, gain: 0.17, cut: cut, q: 1.2,
+              f: mtof(ch.w[j]), len: M.spb * bl, gain: j < 2 ? 0.16 : 0.12,
+              cut: cut * (j < 2 ? 1 : 1.6), q: 1.2,
               detune: 8, voices: voices, a: 0.25, rel: M.spb * 2.6, space: 0.25,
             });
           }
@@ -3219,7 +3239,25 @@ G.Pool = function (factory, reset) {
        300Hz and 3.2dB overall against a render of the pre-rewrite track, which
        would have put network a floor-and-a-half quieter than the two either
        side of it. Backed off a little from 0.5 and no further. */
-    bed: { gain: 0.44, cut: 300, oct: -12, voices: 3, detune: 9, lfo: 1.4, lfoAmt: 0.1 },
+    /* 120, not 300. Three detuned saws on a 29-55 Hz root through a 300 Hz
+       lowpass is not a sub -- it is harmonics 4 through 9 laid across
+       175-330 Hz, and EVERY top collision in this track was a partial pair in
+       that band: bed/bed at 221/274 and 205/232, bed/dubBass at 205/232,
+       bed/pad at 175/195. The corner put them there and pulling it to 120
+       deletes the bed's side of all of them, keeping the fundamental and its
+       octave (58-110 Hz across the roots).
+
+       The knobs were isolated rather than shipped as a bundle: corner alone
+       takes 80-250 Hz roughness 71.6 -> 60.5, detune alone only to 66.6. The
+       corner is load-bearing and the detune is not, so the detune stays and the
+       bed keeps its chorus. Gain is untouched -- its own note above records
+       that dropping it cost 3.8 dB below 300 Hz.
+
+       The low end got LOUDER: the q=2 resonant bump moved onto the bed's own
+       second harmonic, so 30-60 Hz is +0.5 dB and 60-120 Hz +0.8 while 120-500
+       loses 1.3-1.8. Wince -25.9%, chroma motion +7.2% -- the harmony moves
+       MORE. Tim: "i listened to network sub and it sounds really good too". */
+    bed: { gain: 0.44, cut: 120, oct: -12, voices: 3, detune: 9, lfo: 1.4, lfoAmt: 0.1 },
 
     stems: {
       /* --- always: the packet chatter and the dub root --- */
@@ -5310,8 +5348,17 @@ G.Pool = function (factory, reset) {
      heavier than dying on floor one, and dying with a monster build sounds
      like more was thrown away. Momentum has nothing to say here, so it says
      very little — one extra heartbeat, and only at the top. */
+  /* ================= STINGS =================
+     `gameover` and `victory` are not loops and are not going to become loops.
+     They play once, over a screen the player leaves in a few seconds, and a
+     two-and-a-half-minute death jingle would be a form nobody ever reaches the
+     end of. `sting: true` says so out loud, so that a probe asking "is this a
+     form?" can tell the difference between a track that has not been written
+     yet and one that was never meant to be a form -- see crit_music_form.js
+     check 1. The engine does not read this yet; nothing about playback
+     changes. */
   track('gameover', {
-    name: 'core dumped', bpm: 60, bars: 4, swing: 0,
+    name: 'core dumped', bpm: 60, bars: 4, swing: 0, sting: true,
     prog: [
       { r: 45, c: [57, 60, 64, 67] },   // Am
       { r: 43, c: [55, 59, 62, 67] },   // G
@@ -5443,7 +5490,7 @@ G.Pool = function (factory, reset) {
      much trouble are you in"; on the win screen it reads as how far down you
      had to go to get here, so its top anchor adds grandeur rather than dread. */
   track('victory', {
-    name: 'exit 0', bpm: 128, bars: 4, swing: 0,
+    name: 'exit 0', bpm: 128, bars: 4, swing: 0, sting: true,
     prog: [
       { r: 36, c: [48, 52, 55, 59] },   // Cmaj7
       { r: 43, c: [47, 50, 55, 62] },   // G
