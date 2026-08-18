@@ -2400,10 +2400,79 @@ G.Pool = function (factory, reset) {
 
   /* ================= MUSIC ================= */
   const TRACKS = Object.create(null);
-  function track(key, o) { o.key = key; compileCube(o); TRACKS[key] = o; }
+  function track(key, o) { o.key = key; compileMeter(o); compileForm(o); compileCube(o); TRACKS[key] = o; }
 
   /* helpers available on the player object M */
   function chordOf(M, bar) { const p = M.tr.prog; return p[bar % p.length]; }
+
+  /* ================= METER =================
+     A bar used to be sixteen steps, everywhere, as `s & 15` and `s >> 4`. That
+     is 4/4 welded into every stem, and it is why nothing here could limp.
+
+     `grid` replaces it: a list of bar lengths measured in sixteenth-steps,
+     cycled across the form. [16] is 4/4 and stays the default, so a track that
+     says nothing keeps exactly the bars it had. [20] is 5/4. [14] is 7/8.
+     [16,16,16,12] is three bars walking and a fourth that trips — the phrase
+     arrives a beat early and the ear never settles into a count.
+
+     The whole form is flattened once, at load, into three step-indexed tables:
+     which bar a step is in, how far into that bar it sits, and how long that
+     bar is. A stem asks; it never derives. Division and modulo by a bar length
+     that changes every bar is not something to be doing a few thousand times a
+     second in a scheduler, and getting it subtly wrong in 163 separate stems is
+     not a debugging session anyone wants. */
+  function compileMeter(tr) {
+    const grid = (tr.grid && tr.grid.length) ? tr.grid : [16];
+    for (let i = 0; i < grid.length; i++) {
+      const n = grid[i];
+      if (!(n > 0) || (n | 0) !== n) throw new Error('track ' + tr.key + ': grid[' + i + '] must be a whole number of steps, got ' + n);
+    }
+    const bars = tr.bars;
+    if (!(bars > 0) || (bars | 0) !== bars) throw new Error('track ' + tr.key + ': bars must be a positive whole number');
+    const barStart = new Int32Array(bars + 1);
+    let acc = 0;
+    for (let b = 0; b < bars; b++) { barStart[b] = acc; acc += grid[b % grid.length]; }
+    barStart[bars] = acc;
+    const sBar = new Int32Array(acc), sK = new Int32Array(acc), sBL = new Int32Array(acc);
+    for (let b = 0; b < bars; b++) {
+      const L = barStart[b + 1] - barStart[b];
+      for (let k = 0; k < L; k++) { const i = barStart[b] + k; sBar[i] = b; sK[i] = k; sBL[i] = L; }
+    }
+    tr.grid = grid; tr.steps = acc; tr.barStart = barStart;
+    tr.sBar = sBar; tr.sK = sK; tr.sBL = sBL;
+  }
+
+  /* ================= FORM =================
+     Long is not the same as interesting. A four-bar loop played forty times is
+     a four-bar loop; what makes two minutes hold is that the arrangement knows
+     where it is. `form` is a list of [id, bars] runs summing to `bars`, and a
+     stem can ask for the section it is in and how far through it sits — so a
+     pad can thin out in the bridge, a hat can double in the last two bars of a
+     run, a lead can stay silent until the third section and then own it.
+
+     The sum is checked rather than padded. A form that does not add up is a
+     typo, and a typo that silently leaves the last eight bars section-less
+     shows up as an arrangement that mysteriously stops evolving near the end —
+     which is a much worse afternoon than a throw at boot. */
+  function compileForm(tr) {
+    const bars = tr.bars;
+    const barSec = new Array(bars), barSecPos = new Int32Array(bars), barSecLen = new Int32Array(bars);
+    if (!tr.form) {
+      for (let b = 0; b < bars; b++) { barSec[b] = 'A'; barSecPos[b] = b; barSecLen[b] = bars; }
+    } else {
+      let at = 0;
+      for (let i = 0; i < tr.form.length; i++) {
+        const id = tr.form[i][0], n = tr.form[i][1];
+        if (!(n > 0) || (n | 0) !== n) throw new Error('track ' + tr.key + ': form run "' + id + '" must span a positive whole number of bars');
+        for (let j = 0; j < n; j++) {
+          if (at >= bars) throw new Error('track ' + tr.key + ': form spans more than ' + bars + ' bars');
+          barSec[at] = id; barSecPos[at] = j; barSecLen[at] = n; at++;
+        }
+      }
+      if (at !== bars) throw new Error('track ' + tr.key + ': form spans ' + at + ' bars, but the track is ' + bars);
+    }
+    tr.barSec = barSec; tr.barSecPos = barSecPos; tr.barSecLen = barSecLen;
+  }
 
   /* ================= STEM CUBE =================
      Three sliders — momentum, depth, power — each with anchors A, B and C
@@ -2536,7 +2605,7 @@ G.Pool = function (factory, reset) {
      departure gestures fire only on a bar line. A stem that begins or ends
      mid-phrase reads as a yanked fader however smooth its gain envelope is. */
   function stemTransitions(p, s, t) {
-    if ((s & 15) !== 0) return;
+    if (!p.down(s)) return;
     const list = p.tr.stemList, w = p.stemW, on = p.stemOn;
     for (let i = 0; i < list.length; i++) {
       if (!on[i] && w[i] > STEM_ON) {
@@ -2591,11 +2660,23 @@ G.Pool = function (factory, reset) {
     const ctx = env.ctx;
     const gain = ctx.createGain(); gain.gain.value = o.gain == null ? 1 : o.gain;
     gain.connect(env.music);
+    const spb = 60 / tr.bpm / 4;
+    /* A render may begin anywhere in the form: `startStep` says which step of
+       the music lands on the caller's startTime. What it must NOT do is wind
+       startTime back by N steps to get there. Reconstructing an origin as
+       (t0 - N*spb) + N*spb does not return t0 in floating point, so every note
+       in the window lands a hair off where the same note landed in a window
+       that started at step 0 — and a hair is enough to move a transient by a
+       sample. Keeping a separate origin makes the two bit-identical, which is
+       what lets a probe prove the form is exactly periodic by rendering sixteen
+       seconds instead of nine minutes. */
+    const st0 = (o.startStep | 0) || 0;
     const p = {
       key: key, tr: tr, env: env, gain: gain,
-      spb: 60 / tr.bpm / 4,
-      len: tr.bars * 16,
-      startTime: o.startTime, step: 0, dead: false, stopAt: Infinity,
+      spb: spb,
+      len: tr.steps,
+      startTime: o.startTime, stepOrigin: st0,
+      step: st0, dead: false, stopAt: Infinity,
       /* the old single intensity control is now the momentum slider, so
          intensity: n still means exactly what it always meant */
       mom: tr.boss ? 1 : clamp(o.intensity == null ? 0 : o.intensity, 0, 1),
@@ -2621,7 +2702,40 @@ G.Pool = function (factory, reset) {
       p.stemCur[i] = p.stemW[i];
       p.stemOn[i] = p.stemW[i] > STEM_ON ? 1 : 0;
     }
+    attachMeter(p, tr);
     return p;
+  }
+
+  /* What a stem is allowed to ask the player. Every one of these takes the raw
+     step index and wraps it itself, so a stem never writes `s % M.len` again —
+     that modulo being forgotten in one stem out of 163 is a part that plays the
+     first loop correctly and then walks off the end of the form forever.
+
+     `k` is the position in the bar and `bl` its length, which is the pair that
+     used to be `s & 15` and the constant 16. `sec`/`sp`/`sl` are the section,
+     the bar's index within it and its length, so `M.sp(s) === M.sl(s) - 1` is
+     "last bar of this section" — where fills go. `deg` walks the track's scale
+     rather than its chord, which is how a melody stays modal while the harmony
+     moves underneath it. */
+  function attachMeter(p, tr) {
+    const steps = tr.steps, sBar = tr.sBar, sK = tr.sK, sBL = tr.sBL;
+    const barSec = tr.barSec, barSecPos = tr.barSecPos, barSecLen = tr.barSecLen;
+    const prog = tr.prog, progN = prog.length;
+    const scale = tr.scale, key = tr.tonic == null ? 0 : tr.tonic, scaleN = scale ? scale.length : 0;
+    p.i = function (s) { return ((s % steps) + steps) % steps; };
+    p.bar = function (s) { return sBar[p.i(s)]; };
+    p.k = function (s) { return sK[p.i(s)]; };
+    p.bl = function (s) { return sBL[p.i(s)]; };
+    p.down = function (s) { return sK[p.i(s)] === 0; };
+    p.sec = function (s) { return barSec[sBar[p.i(s)]]; };
+    p.sp = function (s) { return barSecPos[sBar[p.i(s)]]; };
+    p.sl = function (s) { return barSecLen[sBar[p.i(s)]]; };
+    p.ch = function (s) { return prog[sBar[p.i(s)] % progN]; };
+    p.deg = function (n) {
+      if (!scaleN) throw new Error('track ' + p.key + ': deg() needs a scale');
+      const oct = Math.floor(n / scaleN);
+      return key + oct * 12 + scale[n - oct * scaleN];
+    };
   }
 
   /* Every track gets a continuous harmonic bed, fired here rather than in the
@@ -2630,18 +2744,16 @@ G.Pool = function (factory, reset) {
      instead of butting up against each other and dropping to the noise floor
      on the approach to the beat. */
   function scheduleBed(p, s, t) {
-    if ((s & 15) !== 0) return;
     const bed = p.tr.bed;
     if (!bed) return;
-    const prog = p.tr.prog;
-    const bar = ((s % p.len) >> 4) % prog.length;
-    const ch = prog[bar];
-    const spb = p.spb;
+    if (!p.down(s)) return;
+    const ch = p.ch(s);
+    const spb = p.spb, bl = p.bl(s);
     /* Straight to the player gain, not into the cube: the bed is the floor
        under every arrangement, not a stem any slider can silence. */
     iDrone(p.env, p.gain, t, {
       f: mtof(ch.r + (bed.oct == null ? -12 : bed.oct)),
-      len: spb * 16, rel: spb * (bed.rel == null ? 2.5 : bed.rel),
+      len: spb * bl, rel: spb * (bed.rel == null ? 2.5 : bed.rel),
       gain: bed.gain == null ? 0.22 : bed.gain,
       cut: bed.cut == null ? 220 : bed.cut,
       q: bed.q == null ? 2 : bed.q,
@@ -2658,9 +2770,10 @@ G.Pool = function (factory, reset) {
     const spb = p.spb;
     if (!(spb > 0)) { p.dead = true; return; }
     let guard = 0;
-    while (p.startTime + p.step * spb < until && guard++ < 20000) {
+    const o0 = p.stepOrigin;
+    while (p.startTime + (p.step - o0) * spb < until && guard++ < 20000) {
       const s = p.step;
-      let t = p.startTime + s * spb;
+      let t = p.startTime + (s - o0) * spb;
       if (p.tr.swing && (s & 1)) t += p.tr.swing * spb;
       if (t >= p.stopAt) { p.step++; continue; }
       try {
@@ -2704,29 +2817,101 @@ G.Pool = function (factory, reset) {
 (function () {
   const A = G.audioLib;
   const { mtof, hrnd, P, iKick, iSnare, iHat, iSub, iSaw, iPluck, iFM, iRing, iSweep, iMetal,
-    iDrone, iBlip, track, chordOf } = A;
+    iDrone, iBlip, track } = A;
 
-  /* ---- 1. USERLAND — calm phosphor-terminal ambience ---- */
+  /* ---- 1. USERLAND — calm phosphor-terminal ambience, in 4/4 ----
+
+     Two minutes forty-four, not ten seconds. The old version was four bars of
+     Am7-Fmaj7-Cmaj7-G6 and you heard it six times a minute, which is why it
+     stopped being music and became a fan noise.
+
+     This is the straight-metre reading of the same track: sixty bars of 4/4
+     instead of forty-eight of 5/4, at the same tempo and to the same second, so
+     the progression, the form, the melodies and the hat cycle are all unchanged
+     and the metre is the only variable. Floor 0 is the menu, the title and the
+     first thing anyone hears — strangeness ought to escalate with the tier
+     rather than open on it.
+
+     The other two things still carry the length. The progression is sixteen
+     bars of modal drift — Aeolian home, a Phrygian bII, a Dorian IV major, a
+     chromatic bVI — and it turns without ever landing on a cadence. And the
+     form is six sections of uneven length, so the arrangement and the harmony
+     sit on different cycles and the same chord arrives dressed differently
+     each time round. */
+  const UKICK = 'x.........x.....';              // the track's own kick, restored
+  const UKICK2 = 'x.......x...x...';             // ...and the busier reading
+  const UHAT = 'x..x.x..x...';                   // 12 against 16: see below
+  const USNARE = '....x.......x...';             // a backbeat that is a backbeat
+  const USNARE2 = '....x.....x.x...';
+
+  /* The arp figure: fifteen scale degrees on every other step, so thirty steps
+     of melody against a twenty-step bar. It crosses the bar line and only comes
+     home every third bar, which means the same figure sits on a different chord
+     every time it turns. Degrees, not chord tones — the line stays modal while
+     the harmony moves under it, and the dissonances that fall out are the ones
+     worth having. `null` is a rest: a figure with no holes is an arpeggiator. */
+  const UARP = [0, 2, 4, 7, null, 6, 4, 2, null, 4, 7, 9, 7, 4, null];
+
+  /* A four-bar sung line, sixty-four steps, fifteen times across the form. The
+     same eleven notes and the same contour as the 5/4 reading, re-barred rather
+     than re-written — a phrase left at its old step positions would land its
+     downbeats in the middle of the new bar, and that is not the same melody
+     played straight, it is the same melody played wrong. Sparse and long-held
+     on purpose: the arp is the busy part, and a lead that is also busy just
+     makes porridge. Indexed by step so the scan is O(1) however many notes the
+     phrase grows to. */
+  const ULEAD = [
+    { at: 0, d: 11, len: 7 }, { at: 8, d: 10, len: 3 }, { at: 12, d: 9, len: 4 },
+    { at: 16, d: 8, len: 9 }, { at: 26, d: 7, len: 5 },
+    { at: 32, d: 9, len: 3 }, { at: 36, d: 11, len: 3 }, { at: 40, d: 12, len: 8 },
+    { at: 48, d: 11, len: 5 }, { at: 54, d: 9, len: 4 }, { at: 59, d: 8, len: 6 },
+  ];
+  const ULEAD_AT = new Array(64);
+  for (let j = 0; j < ULEAD.length; j++) ULEAD_AT[ULEAD[j].at] = ULEAD[j];
+
   track('userland', {
-    name: 'phosphor', bpm: 92, bars: 4, swing: 0.06, tier: 0,
+    name: 'phosphor', bpm: 88, bars: 60, grid: [16], swing: 0.06, tier: 0,
+    /* A dorian. The natural sixth is the whole colour of the track: it makes
+       the Dmaj7 in bar 11 sound like relief rather than a mistake, and it makes
+       the Bbmaj7 in bar 5 sound like the floor giving way. */
+    tonic: 57, scale: [0, 2, 3, 5, 7, 9, 10],
     prog: [
-      { r: 45, c: [57, 60, 64, 67] },   // Am7
-      { r: 41, c: [53, 57, 60, 65] },   // Fmaj7
-      { r: 36, c: [52, 55, 60, 64] },   // Cmaj7
-      { r: 43, c: [50, 55, 59, 62] },   // G6
+      { r: 45, c: [57, 59, 60, 64] },   // 1  Am(add9)   — home, but never a triad
+      { r: 43, c: [57, 60, 64, 67] },   // 2  Am7/G      — the bass walks off
+      { r: 41, c: [57, 59, 64, 65] },   // 3  Fmaj7#11   — the B floats above the F
+      { r: 36, c: [55, 59, 60, 64] },   // 4  Cmaj7
+      { r: 34, c: [57, 58, 62, 65] },   // 5  Bbmaj7     — borrowed bII: the tilt
+      { r: 43, c: [58, 62, 65, 67] },   // 6  Gm7        — bVII minor, no leading tone
+      { r: 38, c: [57, 60, 62, 65] },   // 7  Dm7
+      { r: 40, c: [59, 62, 64, 67] },   // 8  Em7        — modal v, refuses to be V7
+      { r: 45, c: [57, 59, 60, 64] },   // 9  Am(add9)   — home again, changed
+      { r: 43, c: [55, 59, 60, 64] },   // 10 C/G
+      { r: 38, c: [57, 61, 62, 66] },   // 11 Dmaj7      — Dorian IV major: the lift
+      { r: 41, c: [57, 60, 64, 65] },   // 12 Fmaj7
+      { r: 32, c: [56, 60, 63, 67] },   // 13 Abmaj7     — chromatic bVI, a semitone
+      { r: 43, c: [58, 62, 65, 67] },   // 14 Gm7        //   under the tonic
+      { r: 41, c: [57, 59, 64, 65] },   // 15 Fmaj7#11
+      { r: 40, c: [57, 59, 62, 64] },   // 16 E7sus4     — hangs, loops back unresolved
     ],
+    /* The same six runs, scaled to sixty bars. None of them is sixteen, so the
+       arrangement never lines up with the progression: the top of the harmony
+       lands in the middle of a section, and that mismatch is what stops four
+       passes of the same chords sounding like four passes. Sixty is not a
+       multiple of sixteen either, so the loop point falls mid-progression, on
+       Fmaj7 back to Am(add9) — a move the ear reads as a chord change rather
+       than as a seam. */
+    form: [['dawn', 10], ['walk', 13], ['lift', 10], ['hollow', 7], ['surge', 13], ['fade', 7]],
     bed: { gain: 0.15, cut: 240, oct: -12, voices: 2, detune: 6, lfo: 0.9, lfoAmt: 0.1 },
 
-    /* First track on the cube. Momentum carries the rhythm section, depth the
-       harmonic colour (safe → bells, cornered → a tritone drone that refuses to
-       resolve), power the low end and the melody. `ticks` sits at all 27
-       corners: it is the phosphor-terminal signature, not a layer. */
     stems: {
       /* --- always --- */
       ticks: {
         step(M, s, t, out) {
-          const i = s % M.len;
-          if (hrnd(i, 3) > 0.72) iBlip(M.env, out, t, {
+          const i = M.i(s), sec = M.sec(s);
+          /* the terminal is quieter when the room is */
+          const thin = (sec === 'dawn' || sec === 'hollow' || sec === 'fade') ? 0.86 : 0.72;
+          if (hrnd(i, 3) <= thin) return;
+          iBlip(M.env, out, t, {
             key: 'utick', f0: 2400, f1: 2200, dur: 0.02, duty: 0.2, decay: 2, gain: 0.1,
             bits: 3, crush: 9000, pan: hrnd(i, 4) * 1.4 - 0.7,
           });
@@ -2736,25 +2921,35 @@ G.Pool = function (factory, reset) {
       /* --- momentum: what is happening right now --- */
       kick: {
         step(M, s, t, out) {
-          const k = (s % M.len) & 15;
-          if (k === 0 || k === 10) iKick(M.env, out, t, { gain: 0.5, f0: 120, f1: 42, dur: 0.26, click: 0.12 });
+          const sec = M.sec(s);
+          const v = P((sec === 'surge' || sec === 'walk') ? UKICK2 : UKICK, M.k(s));
+          if (v) iKick(M.env, out, t, { gain: 0.5 * v, f0: 120, f1: 42, dur: 0.26, click: 0.12 });
         },
       },
       hat: {
+        /* Twelve steps of pattern against a sixteen-step bar. The two share a
+           factor of four, so the figure lands somewhere new in every bar and
+           only comes home every third. This is the half of the strangeness that
+           survives a straight metre: the bar is countable now, but the hats
+           still refuse to sit inside it. Pattern lengths are chosen to divide
+           the form's 960 steps, so the loop point is still sample-identical; a
+           period that does not divide it puts a lurch at the seam. */
         step(M, s, t, out) {
-          const i = s % M.len;
-          if ((i & 15) % 4 === 2) iHat(M.env, out, t, { gain: 0.16 + hrnd(i, 1) * 0.06, dur: 0.03, cut: 8000 });
+          const i = M.i(s), v = P(UHAT, i);
+          if (v) iHat(M.env, out, t, { gain: (0.18 + hrnd(i, 1) * 0.07) * v, dur: 0.03, cut: 9500 });
         },
       },
       hatDrive: {
         step(M, s, t, out) {
-          if (((s % M.len) & 15) % 2 === 1) iHat(M.env, out, t, { gain: 0.2, dur: 0.028, cut: 9000 });
+          const k = M.k(s);
+          if (k % 2 === 1) iHat(M.env, out, t, { gain: k % 4 === 3 ? 0.22 : 0.15, dur: 0.028, cut: 9000 });
         },
       },
       snare: {
         step(M, s, t, out) {
-          const k = (s % M.len) & 15;
-          if (k === 4 || k === 12) iSnare(M.env, out, t, { gain: 0.5, dur: 0.14, tone: 2100, body: 190 });
+          const sec = M.sec(s);
+          const v = P(sec === 'surge' ? USNARE2 : USNARE, M.k(s));
+          if (v) iSnare(M.env, out, t, { gain: 0.5 * v, dur: 0.14, tone: 2100, body: 190 });
         },
         /* a backbeat this loud appearing on a bare downbeat is a slap — the
            sweep opens across the bar so the snare arrives inside something */
@@ -2765,15 +2960,15 @@ G.Pool = function (factory, reset) {
           iMetal(M.env, out, t, { f: 300, dur: 0.55, gain: 0.09, cut: 5200, q: 1.4, space: 0.55 });
         },
       },
-      /* Momentum is otherwise all percussion, and percussion is transient —
-         it changes the onset rate far more than the level. This is the axis's
-         sustained half: an eighth-note bassline rather than a quarter-note
-         pulse, so winding momentum up reads as drive and not just clatter. */
+      /* Momentum is otherwise all percussion, and percussion is transient — it
+         changes the onset rate far more than the level. This is the axis's
+         sustained half: an eighth-note bassline with the last eighth of the bar
+         left empty, so the bar breathes where a straight pulse would not. */
       bassPulse: {
         step(M, s, t, out) {
-          const i = s % M.len, k = i & 15, ch = chordOf(M, i >> 4);
-          if (k % 2) return;
-          const oct = (k === 6 || k === 14) ? 12 : 0;
+          const k = M.k(s), ch = M.ch(s);
+          if (k % 2 || k === 14) return;
+          const oct = (k === 6 || k === 12) ? 12 : 0;
           iSub(M.env, out, t, { f: mtof(ch.r + oct), len: M.spb * 1.5, gain: 0.34, wave: 'triangle' });
         },
       },
@@ -2781,23 +2976,27 @@ G.Pool = function (factory, reset) {
       /* --- depth: how much trouble you are in --- */
       pad: {
         step(M, s, t, out) {
-          const i = s % M.len, ch = chordOf(M, i >> 4);
-          if ((i & 15) !== 0) return;
+          if (!M.down(s)) return;
+          const ch = M.ch(s), sec = M.sec(s), bl = M.bl(s);
+          /* the filter is the section's dial: shut in the bridge, open at the
+             top, so the same three saws read as four different pads */
+          const cut = sec === 'hollow' ? 380 : sec === 'surge' ? 900 : sec === 'lift' ? 760 : 620;
+          const voices = sec === 'hollow' ? 1 : 2;
           for (let j = 0; j < 3; j++) {
             iSaw(M.env, out, t, {
-              f: mtof(ch.c[j] - 12), len: M.spb * 16, gain: 0.13, cut: 620, q: 1.2,
-              detune: 8, voices: 2, a: 0.25, rel: M.spb * 2.6, space: 0.25,
+              f: mtof(ch.c[j] - 12), len: M.spb * bl, gain: 0.17, cut: cut, q: 1.2,
+              detune: 8, voices: voices, a: 0.25, rel: M.spb * 2.6, space: 0.25,
             });
           }
         },
       },
       bells: {
         step(M, s, t, out) {
-          const i = s % M.len, k = i & 15, ch = chordOf(M, i >> 4);
-          if (k !== 0 && k !== 6) return;
+          const k = M.k(s), ch = M.ch(s);
+          if (k !== 0 && k !== 6 && !(k === 11 && M.sec(s) === 'lift')) return;
           iPluck(M.env, out, t, {
             f: mtof(ch.c[3] + 24), dur: 1.4, damp: 0.9975, bright: 0.3,
-            gain: 0.12, cut: 6000, pan: k === 0 ? -0.4 : 0.45, space: 0.6,
+            gain: 0.15, cut: 6000, pan: k === 0 ? -0.4 : 0.45, space: 0.6,
           });
         },
       },
@@ -2805,10 +3004,10 @@ G.Pool = function (factory, reset) {
         /* a tritone over the root, detuned hard and swelling slowly: the
            progression stops resolving and the room stops feeling safe */
         step(M, s, t, out) {
-          const i = s % M.len, ch = chordOf(M, i >> 4);
-          if ((i & 15) !== 0) return;
+          if (!M.down(s)) return;
+          const ch = M.ch(s);
           iDrone(M.env, out, t, {
-            f: mtof(ch.r + 6), len: M.spb * 16, gain: 0.15, cut: 620, q: 4,
+            f: mtof(ch.r + 6), len: M.spb * M.bl(s), gain: 0.15, cut: 620, q: 4,
             detune: 24, voices: 3, lfo: 0.17, lfoAmt: 0.3, a: 0.7, rel: M.spb * 3,
           });
         },
@@ -2817,45 +3016,48 @@ G.Pool = function (factory, reset) {
       /* --- power: how strong your build is --- */
       arp: {
         step(M, s, t, out) {
-          const i = s % M.len, k = i & 15, ch = chordOf(M, i >> 4);
-          if (k % 2) return;
-          const idx = (k >> 1) % 4;
-          const oct = ((k >> 3) & 1) ? 12 : 0;
+          const i = M.i(s);
+          if (i % 2) return;
+          const n = UARP[(i >> 1) % 15];
+          if (n == null) return;
+          /* the figure climbs an octave for the two loudest sections, which is
+             the same eleven notes doing something a fader cannot do */
+          const sec = M.sec(s), oct = (sec === 'surge' || sec === 'lift') ? 12 : 0;
           iPluck(M.env, out, t, {
-            f: mtof(ch.c[idx] + oct), dur: 0.55, damp: 0.9915, bright: 0.55,
-            gain: 0.3, cut: 3600, pan: (idx - 1.5) * 0.28, space: 0.3,
+            f: mtof(M.deg(n) + oct), dur: 0.55, damp: 0.9915, bright: 0.55,
+            gain: 0.34, cut: 3600, pan: ((n % 4) - 1.5) * 0.28, space: 0.3,
           });
         },
       },
       sub: {
         step(M, s, t, out) {
-          const i = s % M.len, ch = chordOf(M, i >> 4);
-          if ((i & 15) !== 0) return;
-          iSub(M.env, out, t, { f: mtof(ch.r - 12), len: M.spb * 16, rel: M.spb * 2.4, gain: 0.5, harm: 0.22, a: 0.02 });
+          if (!M.down(s)) return;
+          iSub(M.env, out, t, {
+            f: mtof(M.ch(s).r - 12), len: M.spb * M.bl(s), rel: M.spb * 2.4,
+            gain: 0.42, harm: 0.22, a: 0.02,
+          });
         },
       },
       subOct: {
         step(M, s, t, out) {
-          const i = s % M.len, k = i & 15, ch = chordOf(M, i >> 4);
+          const k = M.k(s);
           if (k !== 0 && k !== 8) return;
           iSaw(M.env, out, t, {
-            f: mtof(ch.r - 24), len: M.spb * 8, gain: 0.28, cut: 190, q: 2,
+            f: mtof(M.ch(s).r - 24), len: M.spb * 8, gain: 0.28, cut: 190, q: 2,
             detune: 5, voices: 2, a: 0.03, rel: M.spb * 1.6,
           });
         },
       },
       lead: {
-        /* chord-tone indices, never absolute intervals — the progression walks
-           through four different qualities and a fixed shape would fight it */
         step(M, s, t, out) {
-          const i = s % M.len, bar = i >> 4, k = i & 15, ch = chordOf(M, bar);
-          if (k % 2) return;
-          const j = (k >> 1) % 8;
-          if (j === 3 && (bar & 1) === 0) return;   // a hole, so the line phrases
-          const seq = [0, 2, 3, 2, 1, 3, 2, 0];
+          const sec = M.sec(s);
+          /* the line has somewhere to arrive because it is not always there */
+          if (sec === 'dawn' || sec === 'hollow') return;
+          const n = ULEAD_AT[M.i(s) % 64];
+          if (!n) return;
           iFM(M.env, out, t, {
-            f: mtof(ch.c[seq[j]] + 12), len: M.spb * 1.6, ratio: 2, index: 220, idxEnd: 0.04,
-            gain: 0.17, pan: 0.2, space: 0.45,
+            f: mtof(M.deg(n.d + (sec === 'surge' ? 2 : 0))), len: M.spb * n.len,
+            ratio: 2, index: 220, idxEnd: 0.04, gain: 0.2, pan: 0.2, space: 0.45,
           });
         },
         enter(M, t, out) {
@@ -2914,36 +3116,150 @@ G.Pool = function (factory, reset) {
     },
   });
 
-  /* ---- 2. NETWORK — packet-switched dub ---- */
+  /* ---- 2. NETWORK — packet-switched dub, in 4/4 ----
+
+     Two minutes twenty-five of D dorian that never arrives. The old track was
+     four bars of Dm7-Bb-F-C turning over every nine seconds, which the ear has
+     memorised before the first room is clear.
+
+     Straight metre, deliberately. Floor 1 is the second thing anyone hears and
+     the strangeness in this game escalates with the tier — so what carries the
+     length here is the harmony and the form, not the bar. The one thing a dub
+     track can do that no other genre can is leave the downbeat alone: the kick
+     lands on one and then not again until the and-of-three, the bass plays only
+     the offbeats, and the space between them is the point.
+
+     The device the whole track is built on is rerouting. Bars 1 and 9 are the
+     same four notes — F A C E — with a different bass underneath, so Dm9
+     arrives as Fmaj7 without a single voice moving; bars 4 and 5 do it again
+     from Bb to Gm, and 14 and 15 from C minor to Bb. A packet takes another
+     path and comes out as something else. Eighteen bars of that against
+     sixty-three bars of form, so the progression never lands twice in the same
+     place and the loop point falls mid-turn, on Am7 back to Dm9 — which the ear
+     reads as a chord change rather than as a seam. */
+  const NKICK = 'x.........x.....';     // one, and then the and-of-three: dub leaves
+  const NKICK2 = 'x..x......x...x.';    //   the rest of the bar to the bass
+  const NSNARE = '........x.......';    // the one drop — a single backbeat on three
+  const NSNARE2 = '....x...x.......';
+  const NHAT = '5.7.4.6.4.7.';          // 12 against 16: home every third bar
+  const NHATDUB = '..x.....x.......x.....x...x...x.....';   // 36: home every ninth
+
+  /* Nine steps of scale degrees against a sixteen-step bar, and the reason
+     `plucks` can sit at all twenty-seven corners: nine and sixteen share
+     nothing, so the figure lands somewhere new for nine bars before it comes
+     home. This is the strangeness that survives a straight metre — the bar is
+     countable, and the part on top of it still refuses to sit inside it.
+     Degrees rather than chord tones on purpose: over a progression that
+     reharmonises by moving only the bass, a line that refuses to move is the
+     only thing that makes the move audible. */
+  const NPLK = [7, null, 4, null, 2, 4, null, 9, null];
+
+  /* Sixty-three steps between pings against a sixteen-step bar. Each one lands
+     a single sixteenth earlier than the last, so it walks backwards through the
+     bar and comes home exactly once, at the loop point. It is the one event in
+     the track with no rhythmic job at all, which is what makes it read as an
+     arrival rather than as a part. */
+  const NPING = 63;
+
+  /* Seven bars of melody over an eighteen-bar progression. 112 steps goes into
+     the form's 1008 nine times over, but seven bars and eighteen bars do not
+     agree until a hundred and twenty-six — twice the length of the track — so
+     the phrase never meets the same chord twice in a single pass of the loop.
+     The same twelve notes and the same contour as the 7/8 reading, re-barred
+     rather than re-written: a phrase left at its old step positions lands its
+     strong notes in the middle of the new bar, and that is not the same tune
+     played straight, it is the same tune played wrong. */
+  const NLEAD = [
+    { at: 0, d: 7, len: 7 }, { at: 9, d: 9, len: 5 },
+    { at: 16, d: 11, len: 9 }, { at: 26, d: 10, len: 5 },
+    { at: 32, d: 7, len: 11 },
+    { at: 48, d: 12, len: 7 }, { at: 56, d: 11, len: 7 },
+    { at: 64, d: 9, len: 5 }, { at: 70, d: 8, len: 9 },
+    { at: 80, d: 13, len: 9 }, { at: 90, d: 11, len: 5 },
+    { at: 96, d: 9, len: 11 },
+  ];
+  const NLEAD_AT = new Array(112);
+  for (let j = 0; j < NLEAD.length; j++) NLEAD_AT[NLEAD[j].at] = NLEAD[j];
+
   track('network', {
-    name: 'packet', bpm: 104, bars: 4, swing: 0.12, tier: 1,
+    name: 'packet', bpm: 104, bars: 63, grid: [16], swing: 0.12, tier: 1,
+    /* D dorian. The natural sixth — the B — is what stops this being a
+       minor-key dub track: it is the note that makes bar 3's Bbmaj7#11 sound
+       like a wrong turn rather than a wrong note. */
+    tonic: 50, scale: [0, 2, 3, 5, 7, 9, 10],
     prog: [
-      { r: 38, c: [50, 53, 57, 60] },   // Dm7
-      { r: 34, c: [46, 50, 53, 57] },   // Bbmaj7
-      { r: 41, c: [53, 57, 60, 64] },   // Fmaj7
-      { r: 36, c: [48, 52, 55, 59] },   // Cmaj7
+      { r: 38, c: [53, 57, 60, 64] },   // 1  Dm9         — home, and rootless above the bass
+      { r: 38, c: [52, 57, 59, 64] },   // 2  Dm6/9       — the dorian sixth arrives
+      { r: 34, c: [53, 57, 62, 64] },   // 3  Bbmaj7#11   — bass drops a third, top barely moves
+      { r: 34, c: [53, 58, 62, 67] },   // 4  Bbmaj9
+      { r: 43, c: [53, 58, 62, 67] },   // 5  Gm11        — same four notes, rerouted
+      { r: 43, c: [53, 58, 60, 67] },   // 6  Gm7add11
+      { r: 36, c: [52, 55, 59, 66] },   // 7  Cmaj7#11    — lydian: the one bar of daylight
+      { r: 36, c: [52, 55, 59, 64] },   // 8  Cmaj7       — the #11 steps down and it closes
+      { r: 41, c: [53, 57, 60, 64] },   // 9  Fmaj7       — bar 1's voicing, a new floor under it
+      { r: 45, c: [52, 57, 60, 64] },   // 10 Am7         — modal v, no leading tone anywhere
+      { r: 45, c: [52, 57, 60, 62] },   // 11 Am11
+      { r: 39, c: [55, 58, 62, 65] },   // 12 Ebmaj9      — chromatic bII: the tilt
+      { r: 39, c: [55, 58, 62, 69] },   // 13 Ebmaj9#11   — the #11 is D dorian's own fifth
+      { r: 36, c: [55, 58, 63, 65] },   // 14 Cm11        — bar 8 was C major; same bass, light out
+      { r: 34, c: [55, 58, 63, 65] },   // 15 Bbsus4/9    — rerouted a third time
+      { r: 34, c: [55, 58, 60, 62] },   // 16 Bb6/9       — warm, and too late to mean anything
+      { r: 45, c: [55, 57, 62, 64] },   // 17 A7sus4      — hangs
+      { r: 45, c: [55, 57, 62, 65] },   // 18 Am11/A      — and loops back unresolved
     ],
-    bed: { gain: 0.5, cut: 300, oct: -12, voices: 3, detune: 9, lfo: 1.4, lfoAmt: 0.1 },
+    /* Eight, twelve, seven, eleven, fourteen, eleven. None of them divides the
+       eighteen-bar progression, so the arrangement and the harmony are on
+       different cycles: the top of the chords lands in the middle of a run, and
+       that mismatch is the whole reason three and a half passes of the same
+       eighteen bars do not sound like three and a half passes. */
+    form: [['handshake', 8], ['stream', 12], ['flood', 7], ['idle', 11], ['burst', 14], ['teardown', 11]],
+    /* The bed is this track's only sub — nothing at all 27 corners goes below
+       the roots, which sit at 58-110Hz — so it is not a place to economise.
+       Dropping it to 0.22 to make room for eighteen chords cost 3.8dB below
+       300Hz and 3.2dB overall against a render of the pre-rewrite track, which
+       would have put network a floor-and-a-half quieter than the two either
+       side of it. Backed off a little from 0.5 and no further. */
+    bed: { gain: 0.44, cut: 300, oct: -12, voices: 3, detune: 9, lfo: 1.4, lfoAmt: 0.1 },
+
     stems: {
       /* --- always: the packet chatter and the dub root --- */
       plucks: {
         step(M, s, t, out) {
-          const i = s % M.len, bar = i >> 4, k = i & 15, ch = chordOf(M, bar);
-          if (!P('x.xx.x.xx.x.xx.x', k)) return;
-          const n = ch.c[(k * 3 + bar) % ch.c.length] + (hrnd(i, 9) > 0.75 ? 12 : 0);
+          const i = M.i(s), sec = M.sec(s);
+          const n = NPLK[i % 9];
+          if (n == null) return;
+          /* The quiet sections take whole passes of the cell out rather than
+             turning the figure down: one pass in two, and one in four through
+             the breakdown. A thinned line still reads as a line; a quiet one
+             reads as a mixing mistake. Every stride divides the form's 1008
+             steps, so the loop point stays sample-identical. */
+          const stride = sec === 'idle' ? 36 : (sec === 'handshake' || sec === 'teardown') ? 18 : 9;
+          if ((i % stride) >= 9) return;
+          const oct = (sec === 'flood' || sec === 'burst') ? 12 : 0;
           iPluck(M.env, out, t, {
-            f: mtof(n), dur: 0.35, damp: 0.988, bright: 0.68, gain: 0.24,
-            cut: 5200, pan: (k % 4 < 2 ? -0.55 : 0.55), space: 0.3,
+            f: mtof(M.deg(n) + oct), dur: 0.35, damp: 0.988, bright: 0.68, gain: 0.24,
+            cut: 5200, pan: ((i % 3) - 1) * 0.55, space: 0.3,
           });
         },
       },
       dubBass: {
+        /* Every offbeat eighth and never a downbeat — the one place the kick
+           has already been. In dub the bass IS the arrangement, so this takes
+           the section with it: one hit a bar and shut through the breakdown,
+           four through the body, eight and open when it floods. Measured on the
+           render, 0.3-1kHz is where a mix at neutral sliders actually lives and
+           this stem owns it; moving the hats and the stabs around above it
+           changed the top octave by 4dB and the section by less than one. */
         step(M, s, t, out) {
-          const i = s % M.len, ch = chordOf(M, i >> 4);
-          if ((i & 15) % 4 !== 2) return;
+          const k = M.k(s), sec = M.sec(s);
+          const loud = sec === 'flood' || sec === 'burst';
+          if (sec === 'idle') { if (k !== 2) return; }
+          else if (loud) { if (k % 2) return; }
+          else if (k % 4 !== 2) return;
           iSaw(M.env, out, t, {
-            f: mtof(ch.r), len: M.spb * 1.4, gain: 0.5, cut: 420, q: 5, fenv: 2.6, fdur: 0.12,
-            detune: 10, voices: 2, rel: 0.1,
+            f: mtof(M.ch(s).r), len: M.spb * (sec === 'idle' ? 2.4 : 1.4),
+            gain: sec === 'idle' ? 0.4 : 0.5, cut: sec === 'idle' ? 230 : loud ? 720 : 420,
+            q: 5, fenv: 2.6, fdur: 0.12, detune: 10, voices: 2, rel: 0.1,
           });
         },
       },
@@ -2951,32 +3267,57 @@ G.Pool = function (factory, reset) {
       /* --- momentum --- */
       kick: {
         step(M, s, t, out) {
-          if (P('x.......x..x....', (s % M.len) & 15))
-            iKick(M.env, out, t, { gain: 0.7, f0: 145, f1: 44, dur: 0.28, click: 0.25 });
+          const sec = M.sec(s);
+          /* idle drops to the downbeat alone — the one stretch of the form
+             where the rhythm section stops arguing with the harmony */
+          if (sec === 'idle') {
+            if (M.down(s)) iKick(M.env, out, t, { gain: 0.62, f0: 145, f1: 44, dur: 0.32, click: 0.18 });
+            return;
+          }
+          const v = P((sec === 'flood' || sec === 'burst') ? NKICK2 : NKICK, M.k(s));
+          if (v) iKick(M.env, out, t, { gain: 0.7 * v, f0: 145, f1: 44, dur: 0.28, click: 0.25 });
         },
       },
       hats: {
         step(M, s, t, out) {
-          const hv = P('4.6.4.7.4.6.4.7.', (s % M.len) & 15);
-          if (hv) iHat(M.env, out, t, { gain: hv * 0.3, dur: 0.032, cut: 7600, metal: 0.6 });
+          const i = M.i(s), sec = M.sec(s);
+          /* idle loses the top end outright. Half the reason a two-minute loop
+             holds is that it is willing to stop doing something. */
+          if (sec === 'idle') return;
+          const hv = P(NHAT, i);
+          if (!hv) return;
+          /* elsewhere in the hollow it is only the accents, so the twelve-step
+             figure is heard as two events a bar and not as six */
+          if (sec === 'handshake' && hv < 0.7) return;
+          const loud = sec === 'flood' || sec === 'burst';
+          iHat(M.env, out, t, { gain: hv * (loud ? 0.38 : 0.3), dur: 0.032, cut: loud ? 8600 : 7600, metal: 0.6 });
         },
       },
       hatsDub: {
         step(M, s, t, out) {
-          if (P('..x...x...x...x.', (s % M.len) & 15))
+          if (P(NHATDUB, M.i(s)))
             iHat(M.env, out, t, { gain: 0.24, dur: 0.06, cut: 6500, metal: 1 });
         },
       },
       snare: {
         step(M, s, t, out) {
-          if (P('....x.......x...', (s % M.len) & 15))
-            iSnare(M.env, out, t, { gain: 0.5, dur: 0.15, tone: 2000, body: 200 });
+          const sec = M.sec(s);
+          if (sec === 'idle' || sec === 'handshake') return;
+          const v = P((sec === 'flood' || sec === 'burst') ? NSNARE2 : NSNARE, M.k(s));
+          if (v) iSnare(M.env, out, t, { gain: 0.5 * v, dur: 0.15, tone: 2000, body: 200 });
         },
       },
       snareGhost: {
         step(M, s, t, out) {
-          if (((s % M.len) & 15) === 14)
-            iSnare(M.env, out, t, { gain: 0.4, dur: 0.1, tone: 2600, body: 240 });
+          const k = M.k(s);
+          /* The last bar of a run gets the roll. A form only exists to a
+             listener at the moment it changes, and this is what that moment
+             sounds like from inside the kit. */
+          if (M.sp(s) === M.sl(s) - 1 && k >= 12) {
+            iSnare(M.env, out, t, { gain: 0.26 + (k - 12) * 0.06, dur: 0.08, tone: 3000, body: 260 });
+            return;
+          }
+          if (k === 15) iSnare(M.env, out, t, { gain: 0.4, dur: 0.1, tone: 2600, body: 240 });
         },
         /* the riser the arrangement used to fire once a phrase, now spent on
            the moment the rhythm section actually doubles up */
@@ -2986,10 +3327,9 @@ G.Pool = function (factory, reset) {
       },
       bassDouble: {
         step(M, s, t, out) {
-          const i = s % M.len, ch = chordOf(M, i >> 4);
-          if ((i & 15) % 2) return;
+          if (M.k(s) % 2) return;
           iSaw(M.env, out, t, {
-            f: mtof(ch.r - 12), len: M.spb * 0.8, gain: 0.36, cut: 300, q: 4, dist: 3, voices: 2,
+            f: mtof(M.ch(s).r - 12), len: M.spb * 0.8, gain: 0.36, cut: 300, q: 4, dist: 3, voices: 2,
           });
         },
       },
@@ -2997,30 +3337,39 @@ G.Pool = function (factory, reset) {
       /* --- depth --- */
       pad: {
         step(M, s, t, out) {
-          const i = s % M.len, ch = chordOf(M, i >> 4);
-          if ((i & 15) !== 0) return;
+          if (!M.down(s)) return;
+          const ch = M.ch(s), sec = M.sec(s), bl = M.bl(s);
+          /* the filter is the section's dial. Six settings of one lowpass do
+             more to the shape of two and a half minutes than six faders would,
+             because a fader only ever says "more of the same thing". */
+          const cut = sec === 'idle' ? 300 : sec === 'flood' ? 1100 : sec === 'burst' ? 960
+            : sec === 'teardown' ? 460 : sec === 'handshake' ? 520 : 760;
+          const loud = sec === 'flood' || sec === 'burst';
           for (let j = 0; j < 3; j++) iSaw(M.env, out, t, {
-            f: mtof(ch.c[j]), len: M.spb * 16, rel: M.spb * 2.6, gain: 0.1, cut: 780, q: 1.3,
-            detune: 7, voices: 2, a: 0.2, space: 0.3,
+            f: mtof(ch.c[j]), len: M.spb * bl, rel: M.spb * 2.6,
+            gain: sec === 'idle' ? 0.07 : loud ? 0.15 : 0.1, cut: cut, q: 1.3,
+            detune: 7, voices: sec === 'idle' ? 1 : 2, a: 0.2, space: 0.3,
           });
         },
       },
       pings: {
         step(M, s, t, out) {
-          const i = s % M.len, bar = i >> 4;
-          if ((i & 15) !== 6 || bar % 2 !== 1) return;
+          const i = M.i(s);
+          if (i % NPING) return;
+          const c = (i / NPING) | 0;
           iFM(M.env, out, t, {
-            f: mtof(chordOf(M, bar).c[3] + 12), len: 0.4, ratio: 3.5, index: 700,
-            idxEnd: 0.03, gain: 0.24, pan: 0.6, space: 0.5,
+            f: mtof(M.deg(14 + (c % 3))), len: 0.4, ratio: 3.5, index: 700,
+            idxEnd: 0.03, gain: 0.24, pan: (c % 2) ? 0.6 : -0.6, space: 0.5,
           });
         },
       },
       drift: {
+        /* a tritone over the root, detuned hard and swelling slowly: the
+           progression stops resolving and the room stops feeling safe */
         step(M, s, t, out) {
-          const i = s % M.len, ch = chordOf(M, i >> 4);
-          if ((i & 15) !== 0) return;
+          if (!M.down(s)) return;
           iDrone(M.env, out, t, {
-            f: mtof(ch.r + 6), len: M.spb * 16, gain: 0.16, cut: 700, q: 4,
+            f: mtof(M.ch(s).r + 6), len: M.spb * M.bl(s), gain: 0.16, cut: 700, q: 4,
             detune: 22, voices: 3, lfo: 0.21, lfoAmt: 0.3, a: 0.7, rel: M.spb * 3,
           });
         },
@@ -3029,28 +3378,37 @@ G.Pool = function (factory, reset) {
       /* --- power --- */
       stab: {
         step(M, s, t, out) {
-          const i = s % M.len, k = i & 15, ch = chordOf(M, i >> 4);
-          if (k !== 6 && k !== 10) return;
+          const sec = M.sec(s), k = M.k(s);
+          if (sec === 'idle' || sec === 'handshake') return;
+          /* off the beat both times, which is the only place a chord can go in
+             a bar this empty. The two loud runs get a third and a brighter
+             filter, so the harmony stops being punctuation and becomes the part
+             carrying the section. */
+          const loud = sec === 'flood' || sec === 'burst';
+          if (k !== 6 && k !== 14 && !(loud && k === 10)) return;
           for (let j = 1; j < 4; j++) iSaw(M.env, out, t, {
-            f: mtof(ch.c[j]), len: M.spb * 1.1, gain: 0.13, cut: 1900, q: 3,
+            f: mtof(M.ch(s).c[j]), len: M.spb * 1.1, gain: loud ? 0.2 : 0.13, cut: loud ? 2700 : 1900, q: 3,
             fenv: 1.8, fdur: 0.09, detune: 12, voices: 2, a: 0.004, rel: 0.08, pan: -0.25,
           });
         },
       },
       subOct: {
         step(M, s, t, out) {
-          const i = s % M.len, k = i & 15, ch = chordOf(M, i >> 4);
+          const k = M.k(s);
           if (k !== 0 && k !== 8) return;
-          iSub(M.env, out, t, { f: mtof(ch.r - 24), len: M.spb * 7, gain: 0.34, harm: 0.18, a: 0.02 });
+          iSub(M.env, out, t, { f: mtof(M.ch(s).r - 24), len: M.spb * 6, gain: 0.34, harm: 0.18, a: 0.02 });
         },
       },
       lead: {
         step(M, s, t, out) {
-          const i = s % M.len, bar = i >> 4, k = i & 15, ch = chordOf(M, bar);
-          if (k % 4 !== 0) return;
-          const seq = [3, 2, 3, 1];
+          const sec = M.sec(s);
+          /* the line has somewhere to arrive because it is not always there */
+          if (sec === 'handshake' || sec === 'idle') return;
+          const n = NLEAD_AT[M.i(s) % 112];
+          if (!n) return;
+          const oct = (sec === 'flood' || sec === 'burst') ? 12 : sec === 'teardown' ? -12 : 0;
           iFM(M.env, out, t, {
-            f: mtof(ch.c[seq[(k >> 2) % 4]] + 12), len: M.spb * 3, ratio: 1.5, index: 320,
+            f: mtof(M.deg(n.d) + oct), len: M.spb * n.len, ratio: 1.5, index: 320,
             idxEnd: 0.05, gain: 0.16, pan: 0.3, space: 0.5,
           });
         },
@@ -3094,22 +3452,85 @@ G.Pool = function (factory, reset) {
     },
   });
 
-  /* ---- 3. FILESYSTEM — mechanical rotation ---- */
+  /* ---- 3. FILESYSTEM — mechanical rotation, in 4/4 ----
+
+     Two minutes thirty-one of C aeolian. Straight metre, and the rotation moved
+     out of the bar and into the parts on top of it, which is a better place for
+     it anyway: a platter turns at its own rate and the rate has no reason to
+     divide a bar. The kick fires three times a bar at six-step spacing, so the
+     gap after the third lobe is four rather than six and the wheel is audibly
+     not square inside a bar that is. The hats run thirty-six steps and the
+     grind eighteen, so neither comes home until the ninth bar.
+
+     The harmony is laid out the same way. The sixteen bars are eight blocks of
+     three, one, two, three, one, two, one and three, so the chords change at an
+     interval as lopsided as the kick is, and the two are never in phase. */
+  const FHAT = '5.7.4.6.5.7.4.8.6.4.7.5.4.6.8.4.7.5.';   // 36 against 16: home every ninth bar
+  const FGRIND = 'x..x.x..x...x.x.x.';                      // 18 against 16: shifts two steps a bar
+
+  /* Eighteen scale degrees on every other step — thirty-six steps of figure
+     against a sixteen-step bar, so it comes back to the top of the bar only
+     every ninth. `null` is a rest; a figure with no holes in it is an
+     arpeggiator, and an arpeggiator is not a melody. */
+  const FARP = [0, 2, 4, 3, null, 5, 4, 2, 7, null, 5, 4, 2, 0, null, 3, 5, null];
+
+  /* Nine bars of lead over a sixteen-bar progression: 144 steps into the form's
+     1152 eight times, and nine and sixteen do not agree until a hundred and
+     forty-four bars, so within one pass of the track the phrase never meets the
+     same chord twice. The same eleven notes and the same contour as the mixed
+     -metre reading, re-barred rather than re-written. Long notes: the busy part
+     is the machine. */
+  const FLEAD = [
+    { at: 0, d: 11, len: 9 }, { at: 10, d: 12, len: 5 },
+    { at: 16, d: 11, len: 11 }, { at: 32, d: 9, len: 13 },
+    { at: 48, d: 10, len: 9 }, { at: 60, d: 13, len: 11 },
+    { at: 72, d: 12, len: 7 }, { at: 80, d: 11, len: 13 },
+    { at: 96, d: 8, len: 11 }, { at: 112, d: 9, len: 9 }, { at: 124, d: 7, len: 13 },
+  ];
+  const FLEAD_AT = new Array(144);
+  for (let j = 0; j < FLEAD.length; j++) FLEAD_AT[FLEAD[j].at] = FLEAD[j];
+
   track('filesystem', {
-    name: 'spindle', bpm: 114, bars: 4, swing: 0, tier: 2,
+    name: 'spindle', bpm: 114, bars: 72, grid: [16], swing: 0, tier: 2,
+    /* C aeolian. The flat sixth is the difference between this floor and the
+       two above it: userland and network are both dorian, and the moment the
+       Ab arrives instead of the A the machine stops being friendly. */
+    tonic: 48, scale: [0, 2, 3, 5, 7, 8, 10],
     prog: [
-      { r: 38, c: [50, 53, 57, 62] },   // Dm add11
-      { r: 38, c: [50, 55, 57, 60] },
-      { r: 43, c: [48, 55, 58, 62] },   // Gm-ish
-      { r: 36, c: [48, 51, 55, 58] },
+      { r: 36, c: [51, 55, 58, 62] },   // 1  Cm(add9)    — three bars of home
+      { r: 36, c: [51, 55, 58, 62] },   // 2
+      { r: 36, c: [51, 55, 58, 62] },   // 3
+      { r: 32, c: [51, 55, 60, 62] },   // 4  Abmaj9#11   — one bar, and the floor tilts
+      { r: 41, c: [51, 55, 58, 60] },   // 5  Fm11        — two
+      { r: 41, c: [51, 55, 58, 60] },   // 6
+      { r: 39, c: [51, 55, 58, 62] },   // 7  Ebmaj7      — bar 1's four notes, read off a
+      { r: 39, c: [51, 55, 58, 62] },   // 8               //   different sector
+      { r: 39, c: [51, 55, 58, 62] },   // 9
+      { r: 37, c: [53, 56, 60, 63] },   // 10 Dbmaj9      — one bar of bII: the Neapolitan
+      { r: 43, c: [53, 55, 58, 62] },   // 11 Gm11        — two, and the modal v never becomes V
+      { r: 43, c: [53, 55, 58, 62] },   // 12
+      { r: 33, c: [48, 51, 55, 58] },   // 13 Am9b5       — one bar half-diminished: the read error
+      { r: 34, c: [51, 53, 58, 60] },   // 14 Bbsus4/9    — three bars that refuse to cadence
+      { r: 34, c: [51, 53, 58, 60] },   // 15
+      { r: 34, c: [51, 53, 58, 60] },   // 16
     ],
+    /* Fourteen, ten, fifteen, nine, thirteen, eleven. None of them divides
+       sixteen, and seventy-two is not a multiple of sixteen either, so the loop
+       point falls four bars into a block — on Ebmaj7 back to Cm(add9), which is
+       bar 1's own voicing arriving under a new bass. The seam is a
+       reharmonisation. */
+    form: [['spinup', 14], ['seek', 10], ['stream', 15], ['fault', 9], ['rebuild', 13], ['park', 11]],
     bed: { gain: 0.16, cut: 230, oct: -12, voices: 2, detune: 10 },
+
     stems: {
       /* --- always: the head chatter and the spindle itself --- */
       seek: {
         step(M, s, t, out) {
-          const i = s % M.len;
-          if (hrnd(i, 2) <= 0.42) return;
+          const i = M.i(s), sec = M.sec(s);
+          /* the head is busiest where the arrangement is emptiest, so the two
+             never pile up and the track is never actually still */
+          const thr = sec === 'fault' ? 0.20 : sec === 'seek' ? 0.30 : sec === 'park' ? 0.78 : 0.46;
+          if (hrnd(i, 2) <= thr) return;
           iBlip(M.env, out, t + hrnd(i, 5) * M.spb * 0.4, {
             key: 'seek', f0: 3200, f1: 1800, dur: 0.018, duty: 0.15, decay: 2.4,
             gain: 0.13 + hrnd(i, 6) * 0.08, bits: 3, crush: 8000, pan: Math.sin(i * 0.7) * 0.75,
@@ -3118,11 +3539,34 @@ G.Pool = function (factory, reset) {
       },
       churn: {
         step(M, s, t, out) {
-          const i = s % M.len, ch = chordOf(M, i >> 4);
-          if ((i & 15) !== 0) return;
+          if (!M.down(s)) return;
+          const ch = M.ch(s), bl = M.bl(s), sec = M.sec(s);
+          /* The spindle winds down through park and back up through spinup.
+             It is nine or ten dB louder than anything layered over it, so any
+             section change that leaves it alone is a section change the meter
+             cannot see and the ear can barely hear — the rest of the
+             arrangement is arguing over the last ten percent of the level. */
           iDrone(M.env, out, t, {
-            f: mtof(ch.r - 12), len: M.spb * 16, gain: 0.42, cut: 260, q: 3.5,
-            detune: 11, voices: 3, lfo: 2.6, lfoAmt: 0.18, a: 0.1, rel: M.spb * 2.4,
+            f: mtof(ch.r - 12), len: M.spb * bl,
+            gain: sec === 'park' ? 0.26 : sec === 'spinup' ? 0.34
+              : (sec === 'stream' || sec === 'rebuild') ? 0.48 : 0.42,
+            cut: sec === 'park' ? 200 : (sec === 'stream' || sec === 'rebuild') ? 310 : 260, q: 3.5,
+            detune: 11, voices: 3, lfo: sec === 'fault' ? 5.5 : 2.6, lfoAmt: sec === 'fault' ? 0.3 : 0.18,
+            a: 0.1, rel: M.spb * 2.4,
+          });
+          /* churn is one of the two stems on at all twenty-seven corners, so it
+             carries the chord and not only the root. A mix that can take the
+             harmony out entirely is the mistake silicon shipped with, and it
+             sounds like weather rather than like music. The filter on it is the
+             section's, so the harmony itself opens and shuts with the form
+             rather than only the parts layered on top of it. */
+          const cut = sec === 'park' ? 380 : sec === 'stream' ? 1150 : sec === 'rebuild' ? 980
+            : sec === 'fault' ? 460 : 820;
+          for (let j = 0; j < 3; j += 2) iDrone(M.env, out, t, {
+            f: mtof(ch.c[j]), len: M.spb * bl,
+            gain: sec === 'park' ? 0.07 : (sec === 'stream' || sec === 'rebuild') ? 0.17 : 0.12,
+            cut: cut, q: 1.6,
+            voices: 2, detune: 8, a: 0.3, rel: M.spb * 2.2, space: 0.35, pan: j ? 0.3 : -0.3,
           });
         },
       },
@@ -3130,28 +3574,53 @@ G.Pool = function (factory, reset) {
       /* --- momentum --- */
       kick: {
         step(M, s, t, out) {
-          if (P('x.....x...x.....', (s % M.len) & 15))
-            iKick(M.env, out, t, { gain: 0.72, f0: 135, f1: 40, dur: 0.3, click: 0.3, body: 0.2 });
+          /* Three lobes a bar at six steps apart, so the gap after the third is
+             four and not six. The rotation is a constant rate that has no
+             reason to divide a bar of four, and this is where that is stated —
+             in the one part of the kit nobody can listen past, and without the
+             bar itself having to be strange. */
+          const k = M.k(s), sec = M.sec(s);
+          if (k % 6 || k > 12) return;
+          /* park keeps one lobe of the three — the platter is coasting rather
+             than driven, which is the only honest way to end a rotation */
+          if (sec === 'park' && k !== 0) return;
+          iKick(M.env, out, t, {
+            gain: sec === 'park' ? 0.6 : 0.72, f0: 135, f1: 40, dur: 0.3,
+            click: sec === 'park' ? 0.18 : 0.3, body: 0.2,
+          });
         },
       },
       snare: {
         step(M, s, t, out) {
-          if (P('....x.......x...', (s % M.len) & 15))
+          const k = M.k(s), sec = M.sec(s);
+          if (sec === 'park') return;
+          /* Straight on three, and the only square thing in the track. It is
+             what the three-lobed kick is heard against; take it away and the
+             kick stops sounding lopsided and starts sounding lost. */
+          if (k === 8) {
             iSnare(M.env, out, t, { gain: 0.55, dur: 0.17, tone: 1700, body: 170, q: 0.6 });
+            return;
+          }
+          if ((sec === 'stream' || sec === 'rebuild') && k === 14)
+            iSnare(M.env, out, t, { gain: 0.3, dur: 0.1, tone: 2400, body: 230 });
+          /* the fault is nine bars of the head retrying: the backbeat stutters
+             into a triple rather than the arrangement getting louder */
+          else if (sec === 'fault' && (k === 10 || k === 11))
+            iSnare(M.env, out, t, { gain: 0.34, dur: 0.07, tone: 2900, body: 260 });
         },
       },
       hats: {
         step(M, s, t, out) {
-          if (((s % M.len) & 15) % 2 === 0)
-            iHat(M.env, out, t, { gain: 0.22, dur: 0.035, cut: 8200 });
+          const hv = P(FHAT, M.i(s));
+          if (hv) iHat(M.env, out, t, { gain: hv * 0.22, dur: 0.035, cut: 8200 });
         },
       },
       grind: {
         step(M, s, t, out) {
-          const i = s % M.len, ch = chordOf(M, i >> 4);
-          if (!P('x.x.xx..x.x.x.x.', i & 15)) return;
+          const i = M.i(s);
+          if (!P(FGRIND, i)) return;
           iSaw(M.env, out, t, {
-            f: mtof(ch.r), len: M.spb * 0.7, gain: 0.4, cut: 520, q: 6, dist: 4, fenv: 2, voices: 2,
+            f: mtof(M.ch(s).r), len: M.spb * 0.7, gain: 0.4, cut: 520, q: 6, dist: 4, fenv: 2, voices: 2,
           });
         },
         enter(M, t, out) {
@@ -3161,28 +3630,34 @@ G.Pool = function (factory, reset) {
 
       /* --- depth --- */
       platter: {
-        /* the mechanical clank that says the machine is still healthy */
+        /* The clank marks the four-bar rotation from two places at once — the
+           head of the fourth bar and the middle of the third — so a phrase has
+           a shape even when nothing else in the arrangement has moved. */
         step(M, s, t, out) {
-          if (((s % M.len) & 15) === 8)
-            iMetal(M.env, out, t, { f: 210, dur: 0.22, gain: 0.16, cut: 3000, q: 2, space: 0.35 });
+          const b = M.bar(s) % 4, k = M.k(s);
+          if (b === 3 && k === 0)
+            iMetal(M.env, out, t, { f: 210, dur: 0.26, gain: 0.18, cut: 3000, q: 2, space: 0.35 });
+          else if (b === 2 && k === 10)
+            iMetal(M.env, out, t, { f: 158, dur: 0.34, gain: 0.14, cut: 2400, q: 1.8, space: 0.45 });
         },
       },
       pad: {
         step(M, s, t, out) {
-          const i = s % M.len, ch = chordOf(M, i >> 4);
-          if ((i & 15) !== 0) return;
+          if (!M.down(s)) return;
+          const ch = M.ch(s), sec = M.sec(s), bl = M.bl(s);
+          const cut = sec === 'park' ? 320 : sec === 'stream' ? 1150 : sec === 'rebuild' ? 940
+            : sec === 'fault' ? 380 : sec === 'spinup' ? 540 : 720;
           for (let j = 0; j < 3; j++) iSaw(M.env, out, t, {
-            f: mtof(ch.c[j]), len: M.spb * 16, rel: M.spb * 2.4, gain: 0.09, cut: 720, q: 1.4,
-            detune: 9, voices: 2, a: 0.22, space: 0.3,
+            f: mtof(ch.c[j]), len: M.spb * bl, rel: M.spb * 2.4, gain: 0.09, cut: cut, q: 1.4,
+            detune: 9, voices: (sec === 'park' || sec === 'fault') ? 1 : 2, a: 0.22, space: 0.3,
           });
         },
       },
       drift: {
         step(M, s, t, out) {
-          const i = s % M.len, ch = chordOf(M, i >> 4);
-          if ((i & 15) !== 0) return;
+          if (!M.down(s)) return;
           iDrone(M.env, out, t, {
-            f: mtof(ch.r + 6), len: M.spb * 16, gain: 0.15, cut: 640, q: 4,
+            f: mtof(M.ch(s).r + 6), len: M.spb * M.bl(s), gain: 0.15, cut: 640, q: 4,
             detune: 25, voices: 3, lfo: 0.19, lfoAmt: 0.32, a: 0.7, rel: M.spb * 3,
           });
         },
@@ -3191,33 +3666,46 @@ G.Pool = function (factory, reset) {
       /* --- power --- */
       arp: {
         step(M, s, t, out) {
-          const i = s % M.len, k = i & 15, ch = chordOf(M, i >> 4);
-          if (k % 2) return;
-          const seq = [0, 2, 1, 3, 2, 1, 3, 0];
-          const n = ch.c[seq[(k >> 1) % 8]];
+          const i = M.i(s), sec = M.sec(s);
+          /* The figure stops on the read error and through the spin-down. It is
+             the loudest thing above the churn at a neutral mix, so taking it
+             out is the single largest gesture the form has — and a section that
+             cannot be heard arriving is not a section, it is a comment. */
+          if (sec === 'fault' || sec === 'park') return;
+          if (i % (sec === 'spinup' ? 4 : 2)) return;
+          const n = FARP[(i >> 1) % 18];
+          if (n == null) return;
+          const oct = (sec === 'stream' || sec === 'rebuild') ? 12 : 0;
+          const f = mtof(M.deg(n) + 12 + oct);
           iBlip(M.env, out, t, {
-            key: 'fsarp', f0: mtof(n + 12), f1: mtof(n + 12), dur: 0.13, duty: 0.35,
-            decay: 1.6, gain: 0.16, bits: 4, crush: 13000, cut: 4000,
-            rate: 1, pan: (k % 8 < 4 ? -0.35 : 0.35),
+            key: 'fsarp', f0: f, f1: f, dur: 0.13, duty: 0.35, decay: 1.6, gain: 0.16,
+            bits: 4, crush: 13000, cut: 4000, rate: 1, pan: ((i >> 1) % 4 < 2 ? -0.35 : 0.35),
           });
         },
       },
       subOct: {
         step(M, s, t, out) {
-          const i = s % M.len, k = i & 15, ch = chordOf(M, i >> 4);
-          if (k !== 0 && k !== 8) return;
-          iSub(M.env, out, t, { f: mtof(ch.r - 24), len: M.spb * 7, gain: 0.32, harm: 0.2, a: 0.02 });
+          if (!M.down(s)) return;
+          iSub(M.env, out, t, {
+            f: mtof(M.ch(s).r - 24), len: M.spb * (M.bl(s) - 2), rel: M.spb * 2,
+            gain: 0.32, harm: 0.2, a: 0.02,
+          });
         },
       },
       lead: {
         step(M, s, t, out) {
-          const i = s % M.len, bar = i >> 4, k = i & 15, ch = chordOf(M, bar);
-          if (k % 4 !== 2) return;
-          const seq = [2, 3, 1, 3];
+          const sec = M.sec(s);
+          if (sec === 'spinup' || sec === 'park') return;
+          const n = FLEAD_AT[M.i(s) % 144];
+          if (!n) return;
+          const oct = (sec === 'stream' || sec === 'rebuild') ? 12 : 0;
           iPluck(M.env, out, t, {
-            f: mtof(ch.c[seq[(k >> 2) % 4]] + 12), dur: 0.7, damp: 0.993, bright: 0.5,
+            f: mtof(M.deg(n.d) + oct), dur: M.spb * n.len, damp: 0.9955, bright: 0.5,
             gain: 0.22, cut: 4200, pan: 0.3, space: 0.45,
           });
+        },
+        enter(M, t, out) {
+          iMetal(M.env, out, t, { f: 262, dur: 0.7, gain: 0.1, cut: 4200, q: 1.4, space: 0.6 });
         },
       },
     },
@@ -3254,35 +3742,117 @@ G.Pool = function (factory, reset) {
     },
   });
 
-  /* ---- 4. KERNEL — driving industrial ---- */
+  /* ---- 4. KERNEL — driving industrial, and one short bar in four ----
+
+     Two and a half minutes of E phrygian at 126. `grid` is [16, 16, 16, 12]:
+     three bars of four and a fourth of three, so the phrase arrives a beat
+     early every fourth bar and then squares up again. This is floor 3, which is
+     where the metre is allowed to start bending — one short bar in a four-bar
+     group, and no further. It is also the cheapest possible bend to play: every
+     pattern below is written for sixteen steps and `P()` simply runs out of
+     string on the short bar, so the fourth bar is the same part with its last
+     beat cut off rather than a second part that has to agree with the first.
+
+     Over the top of it `siren` groups the bar in fives — 0, 5, 10, 15 against a
+     kit counting in fours. Two readings of one bar running at once and agreeing
+     only on the downbeat is what a preemptive scheduler sounds like from inside
+     the process it is interrupting, and it does not need an odd bar to do it.
+
+     Phrygian, not aeolian: the flat second is a note, not just a chord, and
+     `lead` leans on it. It is the difference between dread and sadness. */
+  const KKICK = 'x...x...x...x...';    // four to the floor — and three, on the short bar
+  const KKICK_H = 'x.......x.......';  // the half-time reading for the two still sections
+  const KKICK_I = 'x...x...x...x.x.';  // ...and the interrupt storm, pushing into the downbeat
+  const KSNARE = '....x.......x...';   // two and four; the short bar keeps only the first
+  const KGHOST = '......x.......x.';   // and the two slots left over
+  const KH16 = 'x.x.xx.x.x.x.x';       // 14 against 16: home every seventh bar
+  const KDBL = '..x...x...x.......';   // 18 against the 60-step group: home every third
+
+  /* Twenty-eight steps of bass riff against a sixteen-step bar and a sixty-step
+     group: it comes home every twenty-eight bars, which happens three times in
+     the whole track. Written as scale degrees an octave down, so the riff is a
+     line the ear can follow through the harmony rather than a root note being
+     restated — and it is the part that makes a straight bar stop sounding
+     straight without the bar having to change. */
+  const KBASS = [
+    0, null, 0, null, null, 3, null, 0, null, 0, null, 1, null, null, 0, null,
+    5, null, 0, null, 3, null, null, 0, null, 2, null, null,
+  ];
+
+  /* Twenty-one degrees on every other step — forty-two steps of figure against
+     a sixty-step group, home every seven groups. */
+  const KARP = [
+    0, 2, 4, 3, null, 6, 4, 2, null, 5, 7, 5, 3, null, 2, 4, 6, null, 4, 2, null,
+  ];
+
+  /* A hundred and eighty steps: three four-bar groups of melody over a
+     fourteen-bar progression. Neither divides the other and both divide the
+     form, so the phrase meets the chords in seven different alignments and then
+     the track loops — the largest number of distinct passes eighty-four bars
+     can hold. The same fifteen notes and the same contour as the 15/16 reading,
+     re-barred onto the new bar lengths rather than left where they sat. */
+  const KLEAD = [
+    { at: 0, d: 7, len: 11 }, { at: 13, d: 9, len: 6 }, { at: 20, d: 11, len: 9 },
+    { at: 32, d: 10, len: 13 }, { at: 48, d: 8, len: 7 },
+    { at: 60, d: 12, len: 11 }, { at: 73, d: 11, len: 6 }, { at: 81, d: 13, len: 15 },
+    { at: 101, d: 11, len: 9 }, { at: 110, d: 9, len: 10 },
+    { at: 124, d: 8, len: 11 }, { at: 137, d: 10, len: 9 }, { at: 148, d: 12, len: 13 },
+    { at: 163, d: 9, len: 9 }, { at: 172, d: 7, len: 7 },
+  ];
+  const KLEAD_AT = new Array(180);
+  for (let j = 0; j < KLEAD.length; j++) KLEAD_AT[KLEAD[j].at] = KLEAD[j];
+
   track('kernel', {
-    name: 'ring0', bpm: 126, bars: 4, swing: 0, tier: 3,
+    name: 'ring0', bpm: 126, bars: 84, grid: [16, 16, 16, 12], swing: 0, tier: 3,
+    tonic: 52, scale: [0, 1, 3, 5, 7, 8, 10],     // E phrygian
     prog: [
-      { r: 40, c: [52, 55, 59, 62] },   // Em7
-      { r: 40, c: [52, 55, 59, 64] },
-      { r: 36, c: [48, 52, 55, 59] },   // Cmaj7
-      { r: 35, c: [47, 51, 54, 59] },   // B
+      { r: 40, c: [55, 59, 62, 64] },   // 1  Em7          — home, open, no third on top
+      { r: 40, c: [55, 59, 62, 64] },   // 2
+      { r: 41, c: [53, 57, 60, 64] },   // 3  Fmaj7        — bII, a semitone up: the phrygian slide
+      { r: 41, c: [53, 55, 60, 62] },   // 4  F6/9
+      { r: 36, c: [52, 55, 59, 64] },   // 5  Cmaj7        — the relative major, and the only
+      { r: 36, c: [52, 55, 59, 64] },   // 6               //   bar in the track that is at rest
+      { r: 45, c: [52, 55, 59, 62] },   // 7  Am11
+      { r: 45, c: [52, 55, 60, 64] },   // 8  Am7
+      { r: 38, c: [53, 57, 60, 62] },   // 9  Dm7          — bVII: still no leading tone
+      { r: 34, c: [53, 57, 60, 62] },   // 10 Bbmaj9       — bar 9's notes over a bass a tritone
+      { r: 34, c: [53, 57, 60, 62] },   // 11              //   from home. Nothing moved.
+      { r: 32, c: [51, 55, 58, 60] },   // 12 Abmaj9       — chromatic, and briefly enormous
+      { r: 41, c: [53, 57, 60, 64] },   // 13 Fmaj7        — the bII again, now as the way out
+      { r: 35, c: [52, 57, 59, 64] },   // 14 Bsus4        — modal v; hangs and loops back
     ],
+    /* Ten, sixteen, twelve, eighteen, twelve, sixteen. Fourteen bars of harmony
+       under runs none of which divides fourteen, so six passes of the chords
+       are dressed six different ways. */
+    form: [['boot', 10], ['sched', 16], ['preempt', 12], ['irq', 18], ['trap', 12], ['halt', 16]],
     bed: { gain: 0.2, cut: 200, oct: -12, voices: 2, detune: 8 },
+
     stems: {
-      /* --- always: the ring-0 sub and the 16th bass engine --- */
+      /* --- always: the ring-0 sub and the bass riff --- */
       subDrone: {
         step(M, s, t, out) {
-          const i = s % M.len, ch = chordOf(M, i >> 4);
-          if ((i & 15) !== 0) return;
+          if (!M.down(s)) return;
+          const ch = M.ch(s), bl = M.bl(s);
           iDrone(M.env, out, t, {
-            f: mtof(ch.r - 24), len: M.spb * 16, gain: 0.4, cut: 180, q: 2,
+            f: mtof(ch.r - 12), len: M.spb * bl, gain: 0.4, cut: 180, q: 2,
             voices: 2, detune: 6, a: 0.05, rel: M.spb * 2.4,
           });
         },
       },
       bass: {
         step(M, s, t, out) {
-          const i = s % M.len, k = i & 15, ch = chordOf(M, i >> 4);
-          if (!P('x.xxx.x.xx.x.xx.', k)) return;
-          const oct = (k === 6 || k === 13) ? 12 : 0;
+          const i = M.i(s), n = KBASS[i % 28];
+          if (n == null) return;
+          /* Through the two still sections the riff collapses to the seven
+             notes of it that were already on the root: same twenty-eight steps,
+             five fewer events, no melody. This stem is the loudest thing in the
+             band a neutral mix actually lives in, so it has to take the section
+             with it or the form is only happening in the hi-hats. */
+          const sec = M.sec(s), still = sec === 'boot' || sec === 'trap';
+          if (still && n !== 0) return;
           iSaw(M.env, out, t, {
-            f: mtof(ch.r - 12 + oct), len: M.spb * 0.85, gain: 0.62, cut: 360, q: 7,
+            f: mtof(M.deg(n) - 12), len: M.spb * 0.85, gain: still ? 0.5 : 0.62,
+            cut: sec === 'irq' ? 470 : still ? 260 : 360, q: 7,
             fenv: 3.2, fdur: 0.07, dist: 6, detune: 14, voices: 3, rel: 0.04,
           });
         },
@@ -3291,73 +3861,101 @@ G.Pool = function (factory, reset) {
       /* --- momentum --- */
       kick: {
         step(M, s, t, out) {
-          if (((s % M.len) & 15) % 4 === 0)
-            iKick(M.env, out, t, { gain: 1.0, f0: 160, f1: 43, dur: 0.3, click: 0.4, body: 0.25 });
+          const sec = M.sec(s);
+          const pat = (sec === 'boot' || sec === 'trap') ? KKICK_H : sec === 'irq' ? KKICK_I : KKICK;
+          if (!P(pat, M.k(s))) return;
+          iKick(M.env, out, t, { gain: 1.0, f0: 160, f1: 43, dur: 0.3, click: 0.4, body: 0.25 });
         },
       },
       snare: {
         step(M, s, t, out) {
-          const k = (s % M.len) & 15;
-          if (k !== 4 && k !== 12) return;
+          const sec = M.sec(s), k = M.k(s);
+          if (sec === 'boot') return;
+          /* Four sections all running the same kit at the same level is a form
+             the meter cannot see and the ear reads as one long section. So the
+             backbeat itself carries the shape: preempt gets a third hit inside
+             the last beat, halt gives up the first one and leans late. */
+          const on = sec === 'halt' ? (k === 12)
+            : sec === 'preempt' ? (P(KSNARE, k) || k === 14)
+              : !!P(KSNARE, k);
+          if (!on) return;
           iSnare(M.env, out, t, { gain: 0.62, dur: 0.16, tone: 2400, body: 210, wave: 'square' });
           iMetal(M.env, out, t, { f: 340, dur: 0.14, gain: 0.14, cut: 4200, q: 2 });
         },
       },
       hats: {
         step(M, s, t, out) {
-          const k = (s % M.len) & 15;
-          if (k === 14) iHat(M.env, out, t, { gain: 0.3, dur: 0.14, cut: 7000, metal: 1.1 });
-          else if (k % 2 === 1) iHat(M.env, out, t, { gain: 0.26, dur: 0.03, cut: 8600, metal: 0.5 });
+          const k = M.k(s), sec = M.sec(s), bl = M.bl(s);
+          const still = sec === 'boot' || sec === 'trap';
+          /* the accent sits on the last step of whatever bar it is in, so the
+             short bar announces itself a beat before the ear expects it to */
+          if (k === bl - 1) { iHat(M.env, out, t, { gain: still ? 0.16 : 0.3, dur: 0.14, cut: 7000, metal: 1.1 }); return; }
+          if (k % 2 !== 1) return;
+          /* four of the seven through the two still sections: the machine is
+             running at the same tempo and idling, which is not the same thing */
+          if (still && k % 4 !== 1) return;
+          iHat(M.env, out, t, {
+            gain: sec === 'irq' ? 0.34 : sec === 'halt' ? 0.19 : 0.26, dur: 0.03,
+            cut: sec === 'irq' ? 9600 : sec === 'halt' ? 6400 : 8600, metal: 0.5,
+          });
         },
       },
       kickDouble: {
         step(M, s, t, out) {
-          if (P('..x.......x...x.', (s % M.len) & 15))
+          if (P(KDBL, M.i(s)))
             iKick(M.env, out, t, { gain: 1.0, f0: 155, f1: 45, dur: 0.22, click: 0.35 });
         },
       },
       hats16: {
         step(M, s, t, out) {
-          if (P('.x.x.x.x.x.x.x.x', (s % M.len) & 15))
+          if (P(KH16, M.i(s)))
             iHat(M.env, out, t, { gain: 0.3, dur: 0.025, cut: 10000 });
         },
       },
       snareGhost: {
         step(M, s, t, out) {
-          const k = (s % M.len) & 15;
-          if (k === 6 || k === 14) iSnare(M.env, out, t, { gain: 0.42, dur: 0.09, tone: 3400, body: 300 });
+          if (P(KGHOST, M.k(s)))
+            iSnare(M.env, out, t, { gain: 0.42, dur: 0.09, tone: 3400, body: 300 });
         },
       },
 
       /* --- depth --- */
       pad: {
         step(M, s, t, out) {
-          const i = s % M.len, ch = chordOf(M, i >> 4);
-          if ((i & 15) !== 0) return;
+          if (!M.down(s)) return;
+          const ch = M.ch(s), sec = M.sec(s), bl = M.bl(s);
+          const cut = sec === 'boot' ? 380 : sec === 'irq' ? 1400 : sec === 'halt' ? 500
+            : sec === 'sched' ? 940 : sec === 'preempt' ? 1150 : 660;
+          const loud = sec === 'irq' || sec === 'preempt';
           for (let j = 1; j < 4; j++) iSaw(M.env, out, t, {
-            f: mtof(ch.c[j]), len: M.spb * 16, rel: M.spb * 2.4, gain: 0.085, cut: 900, q: 1.4,
-            detune: 10, voices: 2, a: 0.2, space: 0.32,
+            f: mtof(ch.c[j]), len: M.spb * bl, rel: M.spb * 2.4,
+            gain: sec === 'boot' ? 0.06 : loud ? 0.13 : 0.085, cut: cut, q: 1.4,
+            detune: 10, voices: sec === 'boot' ? 1 : 2, a: 0.2, space: 0.32,
           });
         },
       },
       chime: {
         step(M, s, t, out) {
-          const i = s % M.len, k = i & 15, ch = chordOf(M, i >> 4);
-          if (k !== 2 && k !== 10) return;
+          const i = M.i(s);
+          if (i % 21) return;
+          /* twenty-one steps against a sixty-step group: the chime lands on a
+             downbeat once every seven groups and somewhere else the rest */
           iPluck(M.env, out, t, {
-            f: mtof(ch.c[3] + 24), dur: 1.1, damp: 0.9965, bright: 0.35,
-            gain: 0.1, cut: 6500, pan: k === 2 ? -0.45 : 0.45, space: 0.6,
+            f: mtof(M.ch(s).c[3] + 24), dur: 1.1, damp: 0.9965, bright: 0.35,
+            gain: 0.1, cut: 6500, pan: ((i / 21) % 2) ? 0.45 : -0.45, space: 0.6,
           });
         },
       },
       siren: {
-        /* the ring-modulated alarm the combat layer used to open with — here
-           it is what "you are in trouble" sounds like, not what "busy" does */
+        /* Fives across a bar the drums are counting in fours: 0, 5, 10, 15, and
+           on the short bar only the first three. The ring-modulated alarm the
+           combat layer used to open with is now the second metre — it is what
+           "you are being preempted" sounds like rather than "busy", and it gets
+           there without the bar itself having to be odd. */
         step(M, s, t, out) {
-          const i = s % M.len, ch = chordOf(M, i >> 4);
-          if ((i & 15) % 4) return;
+          if (M.k(s) % 5) return;
           iRing(M.env, out, t, {
-            f: mtof(ch.c[0] + 12), mf: 137, len: M.spb * 3, gain: 0.55,
+            f: mtof(M.ch(s).c[0] + 12), mf: 137, len: M.spb * 3, gain: 0.55,
             fslide: 1.02, wave: 'sawtooth', space: 0.2,
           });
         },
@@ -3369,30 +3967,47 @@ G.Pool = function (factory, reset) {
       /* --- power --- */
       arp: {
         step(M, s, t, out) {
-          const i = s % M.len, k = i & 15, ch = chordOf(M, i >> 4);
-          if (k % 2) return;
-          const seq = [0, 3, 1, 2, 0, 3, 2, 1];
-          const n = ch.c[seq[(k >> 1) % 8]] + 12;
+          const i = M.i(s), sec = M.sec(s);
+          /* boot has no arp at all and trap has half of one. The lead is out
+             across both too, so the two still sections are the bass riff, the
+             pad and the kit — which is what makes the return of the figure at
+             the top of sched sound like the machine coming up. */
+          if (sec === 'boot') return;
+          if (i % (sec === 'trap' ? 4 : 2)) return;
+          const n = KARP[(i >> 1) % 21];
+          if (n == null) return;
+          const oct = (sec === 'irq' || sec === 'preempt') ? 12 : 0;
+          const f = mtof(M.deg(n) + 12 + oct);
           iBlip(M.env, out, t, {
-            key: 'kar', f0: mtof(n), f1: mtof(n), dur: 0.11, duty: 0.25, decay: 1.3,
+            key: 'kar', f0: f, f1: f, dur: 0.11, duty: 0.25, decay: 1.3,
             gain: 0.2, bits: 4, crush: 11000, cut: 5200, pan: (hrnd(i, 8) - 0.5) * 0.5,
           });
         },
       },
       subOct: {
         step(M, s, t, out) {
-          const i = s % M.len, k = i & 15, ch = chordOf(M, i >> 4);
-          if (k !== 0 && k !== 8) return;
-          iSub(M.env, out, t, { f: mtof(ch.r - 24), len: M.spb * 7, gain: 0.3, harm: 0.22, a: 0.02 });
+          if (!M.down(s)) return;
+          iSub(M.env, out, t, {
+            f: mtof(M.ch(s).r - 24), len: M.spb * (M.bl(s) - 2), rel: M.spb * 2,
+            gain: 0.3, harm: 0.22, a: 0.02,
+          });
         },
       },
       lead: {
         step(M, s, t, out) {
-          const i = s % M.len, ch = chordOf(M, i >> 4);
-          if (!P('x..x..x.x..x..x.', i & 15)) return;
+          const sec = M.sec(s);
+          if (sec === 'boot' || sec === 'trap') return;
+          const n = KLEAD_AT[M.i(s) % 180];
+          if (!n) return;
+          const oct = (sec === 'irq' || sec === 'preempt') ? 12 : 0;
           iSaw(M.env, out, t, {
-            f: mtof(ch.c[2] + 12), len: M.spb * 1.2, gain: 0.34, cut: 2200, q: 3,
-            fenv: 2, fdur: 0.1, dist: 4, detune: 20, voices: 2, a: 0.006, rel: 0.06,
+            f: mtof(M.deg(n.d) + oct), len: M.spb * n.len, gain: 0.3, cut: 2200, q: 3,
+            fenv: 2, fdur: 0.1, dist: 4, detune: 20, voices: 2, a: 0.02, rel: 0.12, space: 0.3,
+          });
+        },
+        enter(M, t, out) {
+          iRing(M.env, out, t, {
+            f: 220, mf: 91, len: 0.6, gain: 0.14, fslide: 1.6, wave: 'sawtooth', space: 0.4,
           });
         },
       },
@@ -3957,38 +4572,108 @@ G.Pool = function (factory, reset) {
     },
   });
 
-  /* ---- 8. SILICON — oppressive sub drone ---- */
+  /* ---- 8. SILICON — the substrate, in 3/4 that trips every fourth bar ----
+
+     Fourteen seconds became two and a half minutes. The deepest floor should
+     feel enormous and old, and nothing feels old that comes round every fourteen
+     seconds.
+
+     The meter is the point: three bars of 3/4 and then a bar of 7/8. Slow triple
+     time is where cinematic grandeur lives, and the short fourth bar means the
+     phrase arrives half a beat early, every time, forever. It is almost regular,
+     which is worse than irregular — the ear keeps trying to settle and the floor
+     keeps taking the last eighth away.
+
+     The harmony is a fourteen-bar lament in F minor with a chromatic bass and
+     two lifts: a Db6/9 that is the only warm chord in the track, and a Bmaj7 in
+     bar 11 sitting a tritone from home, which is the shaft of light. Fourteen
+     bars against fifty-six means four turns, and six form sections of uneven
+     length mean no two of those turns are dressed the same. */
+  const SI_IND12 = 'x...x...x...';                // the 3/4 bars
+  const SI_IND14 = 'x...x...x.x...';              // ...and the one that trips
+  const SI_ANV12 = '....x.......';
+  const SI_ANV14 = '....x.....x...';
+
+  /* Seven steps of metal against bars of twelve and fourteen. Seven divides the
+     form's 700 steps, so the loop point is still clean, but it shares no factor
+     with the four-bar group of fifty — the ping lands somewhere new for
+     twenty-eight bars before it comes home, which happens exactly twice in the
+     whole track. Nobody will consciously hear the cycle. That is the intention. */
+  const SI_HITS = 'x....x.';
+
+  /* A hundred-step line — two four-bar groups — over a fourteen-bar
+     progression, so the same melody sits on different harmony every time it
+     turns. Long notes and few of them: this floor is supposed to be vast, and
+     vastness is mostly silence with something enormous moving through it. */
+  const SILEAD = [
+    { at: 0, d: 11, len: 10 }, { at: 12, d: 12, len: 6 }, { at: 18, d: 11, len: 8 },
+    { at: 26, d: 9, len: 12 }, { at: 40, d: 10, len: 8 },
+    { at: 50, d: 14, len: 14 }, { at: 66, d: 13, len: 8 }, { at: 74, d: 11, len: 10 },
+    { at: 86, d: 9, len: 14 },
+  ];
+  const SILEAD_AT = new Array(100);
+  for (let j = 0; j < SILEAD.length; j++) SILEAD_AT[SILEAD[j].at] = SILEAD[j];
+
   track('silicon', {
-    name: 'substrate', bpm: 68, bars: 4, swing: 0, tier: 7,
+    name: 'substrate', bpm: 68, bars: 56, grid: [12, 12, 12, 14], swing: 0, tier: 7,
+    tonic: 53, scale: [0, 2, 3, 5, 7, 8, 10],     // F aeolian
     prog: [
-      { r: 29, c: [41, 44, 48, 54] },   // #11 over the root
-      { r: 29, c: [41, 45, 48, 52] },
-      { r: 28, c: [40, 43, 47, 53] },
-      { r: 27, c: [39, 42, 46, 52] },
+      { r: 29, c: [41, 43, 44, 48] },   // 1  Fm(add9)  — home, and it stays a while
+      { r: 29, c: [41, 43, 44, 48] },   // 2  Fm(add9)
+      { r: 25, c: [41, 43, 46, 48] },   // 3  Db6/9     — the only warm chord here
+      { r: 25, c: [41, 43, 46, 48] },   // 4  Db6/9
+      { r: 32, c: [43, 44, 48, 51] },   // 5  Abmaj9
+      { r: 32, c: [43, 44, 48, 51] },   // 6  Abmaj9
+      { r: 27, c: [41, 42, 46, 49] },   // 7  Ebm9      — the light goes out
+      { r: 24, c: [39, 43, 46, 48] },   // 8  Cm9
+      { r: 34, c: [41, 44, 46, 49] },   // 9  Bbm9
+      { r: 27, c: [41, 44, 46, 51] },   // 10 Ebsus4add9
+      { r: 23, c: [42, 46, 47, 49] },   // 11 Bmaj7     — a tritone from home: the
+      { r: 34, c: [41, 44, 46, 49] },   // 12 Bbm9      //   shaft of light
+      { r: 25, c: [41, 43, 46, 48] },   // 13 Db6/9
+      { r: 24, c: [41, 43, 48, 53] },   // 14 Csus4     — hangs, never cadences
     ],
+    form: [['void', 10], ['drift', 12], ['mass', 8], ['light', 10], ['collapse', 9], ['embers', 7]],
     bed: { gain: 0.26, cut: 170, oct: -12, voices: 3, detune: 6, lfo: 0.6, lfoAmt: 0.14 },
+
     stems: {
       /* --- always: the substrate itself. Nothing may silence this one. --- */
       substrate: {
         step(M, s, t, out) {
-          const i = s % M.len, ch = chordOf(M, i >> 4);
-          if ((i & 15) !== 0) return;
+          if (!M.down(s)) return;
+          const ch = M.ch(s), bl = M.bl(s);
           iSub(M.env, out, t, {
-            f: mtof(ch.r - 12), len: M.spb * 16, gain: 0.5, a: 0.35, d: 0.4,
+            f: mtof(ch.r - 12), len: M.spb * bl, gain: 0.5, a: 0.35, d: 0.4,
             sus: 0.9, rel: M.spb * 2.6, harm: 0.14,
           });
           iDrone(M.env, out, t, {
-            f: mtof(ch.r), len: M.spb * 16, gain: 0.24, cut: 150, q: 2.5,
+            f: mtof(ch.r), len: M.spb * bl, gain: 0.24, cut: 150, q: 2.5,
             voices: 3, detune: 5, lfo: 0.7, lfoAmt: 0.2, a: 0.5, rel: M.spb * 2.6,
           });
+          /* The chord, and not only the root. substrate is one of just three
+             stems on at all twenty-seven corners, and the other two are a low
+             sweep and noise — so before this, harmony was something the mix was
+             free to remove entirely, and at most slider positions it did. Two
+             minutes of root drone and random metal is weather, not music. Kept
+             dark, spread wide and slow to open, so it reads as the floor having
+             a key rather than as a pad that wandered in from another track. */
+          for (let j = 0; j < 3; j += 2) {
+            iDrone(M.env, out, t, {
+              f: mtof(ch.c[j]), len: M.spb * bl, gain: 0.15, cut: 760, q: 1.6,
+              voices: 2, detune: 7, a: 0.35, rel: M.spb * 2.4, space: 0.4,
+              pan: j ? 0.32 : -0.32,
+            });
+          }
         },
       },
       rumble: {
         step(M, s, t, out) {
-          const i = s % M.len;
-          if ((i & 15) !== 0) return;
+          if (!M.down(s)) return;
+          /* the short bar gets the steeper sweep, so the trip is felt in the
+             low end and not only counted in the drums */
+          const bl = M.bl(s);
           iSweep(M.env, out, t, {
-            dur: M.spb * 15.4, f0: 90, f1: 190, q: 1.1, gain: 0.2,
+            dur: M.spb * (bl - 0.6), f0: 90, f1: bl === 14 ? 240 : 190, q: 1.1, gain: 0.2,
             dark: true, a: 0.6, type: 'lowpass',
           });
         },
@@ -3997,39 +4682,53 @@ G.Pool = function (factory, reset) {
       /* --- momentum --- */
       slabKick: {
         step(M, s, t, out) {
-          const i = s % M.len, bar = i >> 4;
-          if ((i & 15) !== 0 || bar % 2 !== 0) return;
+          if (!M.down(s)) return;
+          const bar = M.bar(s);
+          /* every bar in the loud sections, every other bar elsewhere: the
+             slowest possible way to double the tempo without touching the bpm */
+          const sec = M.sec(s);
+          /* every bar except in the two quietest sections: at 68bpm in 3/4 a
+             kick every other bar is five seconds apart, which is too far apart
+             to be a pulse — it is just a recurring event */
+          if (bar % 2 !== 0 && (sec === 'void' || sec === 'embers')) return;
           iKick(M.env, out, t, { gain: 1.1, f0: 210, f1: 28, dur: 0.7, pdur: 0.2, click: 0.3, body: 0.35 });
         },
       },
       hits: {
         step(M, s, t, out) {
-          const i = s % M.len, bar = i >> 4, k = i & 15;
-          if (!P('..........x.....', k) && !(k === 6 && bar % 2 === 1)) return;
+          const i = M.i(s);
+          if (!P(SI_HITS, i)) return;
+          /* Tuned to the chord rather than to a random 118-158Hz. The seven-step
+             precession was always the most interesting thing in this track and
+             it was being spent on a noise: pitch it, and the same figure becomes
+             the hook that carries the harmony round its long cycle. */
+          const ch = M.ch(s), c = (i / 7) | 0;
+          const j = (i % 7) === 0 ? 0 : 2;
           iMetal(M.env, out, t, {
-            f: 118 + hrnd(i, 1) * 40, dur: 0.9, gain: 0.2, cut: 2400, q: 1.6,
-            pan: (hrnd(i, 2) - 0.5) * 1.4, space: 0.6,
+            f: mtof(ch.c[j] + ((c % 3) === 2 ? 24 : 12)), dur: 0.9, gain: 0.22,
+            cut: 3200, q: 1.6, pan: (hrnd(i, 2) - 0.5) * 1.4, space: 0.6,
           });
         },
       },
       pulse: {
         step(M, s, t, out) {
-          const i = s % M.len, ch = chordOf(M, i >> 4);
-          if ((i & 15) % 2) return;
-          iSub(M.env, out, t, { f: mtof(ch.r), len: M.spb * 0.9, gain: 0.75, wave: 'triangle', a: 0.008 });
+          if (M.k(s) % 2) return;
+          iSub(M.env, out, t, { f: mtof(M.ch(s).r), len: M.spb * 0.9, gain: 0.75, wave: 'triangle', a: 0.008 });
         },
       },
       industrial: {
         step(M, s, t, out) {
-          const i = s % M.len, k = i & 15;
+          const k = M.k(s), bl = M.bl(s);
           if (k % 4 === 2) iHat(M.env, out, t, { gain: 0.34, dur: 0.07, cut: 5200, metal: 1.2 });
           if (k === 8) iSnare(M.env, out, t, { gain: 0.7, dur: 0.3, tone: 1400, body: 140, q: 0.5 });
-          if (P('x.......x...x...', k)) iKick(M.env, out, t, { gain: 0.95, f0: 190, f1: 40, dur: 0.34, click: 0.3 });
+          if (P(bl === 14 ? SI_IND14 : SI_IND12, k))
+            iKick(M.env, out, t, { gain: 0.95, f0: 190, f1: 40, dur: 0.34, click: 0.3 });
         },
       },
       anvil: {
         step(M, s, t, out) {
-          if (P('....x.......x...', (s % M.len) & 15))
+          const bl = M.bl(s);
+          if (P(bl === 14 ? SI_ANV14 : SI_ANV12, M.k(s)))
             iMetal(M.env, out, t, { f: 150, dur: 0.4, gain: 0.3, cut: 2600, q: 1.6, space: 0.3 });
         },
         enter(M, t, out) {
@@ -4040,28 +4739,28 @@ G.Pool = function (factory, reset) {
       /* --- depth --- */
       toll: {
         step(M, s, t, out) {
-          const i = s % M.len, bar = i >> 4;
-          if ((i & 15) !== 0 || bar % 2 !== 1) return;
+          /* once per four-bar group: the bell marks the group, so the trip in
+             the fourth bar has something to be measured against */
+          if (!M.down(s) || M.bar(s) % 4 !== 0) return;
           iFM(M.env, out, t, {
-            f: mtof(chordOf(M, bar).c[0]), len: 2.4, ratio: 1.73, index: 800,
+            f: mtof(M.ch(s).c[0]), len: 2.4, ratio: 1.73, index: 800,
             idxEnd: 0.02, idxDur: 0.9, gain: 0.24, space: 0.65,
           });
         },
       },
       grit: {
         step(M, s, t, out) {
-          const i = s % M.len;
+          const i = M.i(s);
           if (hrnd(i, 11) > 0.93) iGrain(M.env, out, t, { n: 3, span: M.spb * 2, gain: 0.09, bits: 3, seed: i + 71 });
         },
       },
       crush: {
-        /* the #11 in the chord made explicit and detuned: at depth C the floor
-           itself stops sounding structurally sound */
+        /* the tritone made explicit and detuned: at depth C the floor itself
+           stops sounding structurally sound */
         step(M, s, t, out) {
-          const i = s % M.len, ch = chordOf(M, i >> 4);
-          if ((i & 15) !== 0) return;
+          if (!M.down(s)) return;
           iDrone(M.env, out, t, {
-            f: mtof(ch.r + 6), len: M.spb * 16, gain: 0.18, cut: 420, q: 4,
+            f: mtof(M.ch(s).r + 6), len: M.spb * M.bl(s), gain: 0.18, cut: 420, q: 4,
             detune: 28, voices: 3, lfo: 0.11, lfoAmt: 0.35, a: 1.2, rel: M.spb * 3,
           });
         },
@@ -4070,28 +4769,40 @@ G.Pool = function (factory, reset) {
       /* --- power --- */
       choir: {
         step(M, s, t, out) {
-          const i = s % M.len, ch = chordOf(M, i >> 4);
-          if ((i & 15) !== 0) return;
+          if (!M.down(s)) return;
+          const ch = M.ch(s), sec = M.sec(s), bl = M.bl(s);
+          /* the section opens the filter rather than the fader — a choir that
+             only gets louder is a choir that only gets louder */
+          const cut = sec === 'light' ? 2600 : sec === 'mass' ? 1900 : sec === 'void' ? 1100 : 1400;
+          /* The attack was nine tenths of a second. That is long enough for
+             every note to arrive after the ear has stopped asking what the
+             chord is, which is why this read as atmosphere and never as
+             harmony. Spread across the stereo field too, so the three voices
+             are three voices. */
           for (let j = 1; j < 4; j++) iSaw(M.env, out, t, {
-            f: mtof(ch.c[j] + 12), len: M.spb * 16, rel: M.spb * 2.6, gain: 0.07, cut: 1000, q: 1.4,
-            detune: 8, voices: 2, a: 0.9, space: 0.5,
+            f: mtof(ch.c[j] + 12), len: M.spb * bl, rel: M.spb * 2.6, gain: 0.1, cut: cut, q: 1.4,
+            detune: 8, voices: 2, a: 0.35, space: 0.5, pan: (j - 2) * 0.36,
           });
         },
       },
       subOct: {
         step(M, s, t, out) {
-          const i = s % M.len, k = i & 15, ch = chordOf(M, i >> 4);
+          const k = M.k(s);
           if (k !== 0 && k !== 8) return;
-          iSub(M.env, out, t, { f: mtof(ch.r - 24), len: M.spb * 7, gain: 0.3, harm: 0.16, a: 0.05 });
+          iSub(M.env, out, t, { f: mtof(M.ch(s).r - 24), len: M.spb * 7, gain: 0.3, harm: 0.16, a: 0.05 });
         },
       },
       lead: {
         step(M, s, t, out) {
-          const i = s % M.len, bar = i >> 4, k = i & 15, ch = chordOf(M, bar);
-          if (k !== 4 && k !== 12) return;
+          const sec = M.sec(s);
+          const n = SILEAD_AT[M.i(s) % 100];
+          if (!n) return;
+          /* an octave up for the two brightest sections: the same nine notes,
+             an entirely different scale of thing */
+          const oct = (sec === 'light' || sec === 'mass') ? 12 : sec === 'void' ? -12 : 0;
           iFM(M.env, out, t, {
-            f: mtof(ch.c[3] + 12), len: M.spb * 5, ratio: 2, index: 260, idxEnd: 0.04,
-            idxDur: 0.7, gain: 0.19, pan: 0.25, space: 0.6,
+            f: mtof(M.deg(n.d) + oct), len: M.spb * n.len, ratio: 2, index: 260,
+            idxEnd: 0.04, idxDur: 0.7, gain: 0.24, pan: 0.25, space: 0.6,
           });
         },
       },
@@ -5319,7 +6030,7 @@ G.Pool = function (factory, reset) {
       const k = resolveTrack(key);
       if (!k || !TRACKS[k]) return Promise.resolve(null);
       const p = makePlayer(env, k, {
-        gain: 1, startTime: 0.05,
+        gain: 1, startTime: 0.05, startStep: opts.startStep || 0,
         intensity: opts.intensity == null ? (TRACKS[k].boss ? 1 : 0) : opts.intensity,
         /* Pin the other two sliders rather than inheriting the live ones. The
            live sliders are mid-slew towards whatever the game is doing, so
@@ -5339,7 +6050,18 @@ G.Pool = function (factory, reset) {
     trackNames: function () { return Object.keys(TRACKS); },
     trackInfo: function (k) {
       const t = TRACKS[resolveTrack(k)];
-      return t ? { key: t.key, name: t.name, bpm: t.bpm, bars: t.bars, swing: t.swing || 0, spb: 60 / t.bpm / 4, boss: !!t.boss } : null;
+      if (!t) return null;
+      const spb = 60 / t.bpm / 4;
+      /* `steps` is the honest length now that a bar is not always sixteen of
+         them; every probe that used to reach for bars * 16 wants this instead.
+         `loopSecs` is that in seconds, which is what all of them were really
+         computing. */
+      return {
+        key: t.key, name: t.name, bpm: t.bpm, bars: t.bars, grid: t.grid.slice(),
+        steps: t.steps, swing: t.swing || 0, spb: spb, loopSecs: t.steps * spb,
+        form: t.form ? t.form.map(function (r) { return r.slice(); }) : null,
+        boss: !!t.boss,
+      };
     },
     renderSfx: function (name, seconds, opts) { return renderOffline('sfx', name, seconds || 2.5, opts); },
     renderMusic: function (key, seconds, opts) { return renderOffline('music', key, seconds || 8, opts); },
