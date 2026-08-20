@@ -8116,18 +8116,37 @@ G.Pool = function (factory, reset) {
   /* ---------------- cycle token: currency ---------------- */
   /* The shop is apt and it bills in CPU time. A hex token with a stamped
      denomination, nothing like a penny. */
+  /* The facets have to survive ELEVEN PIXELS. Two earlier masks did not, and
+     they failed in opposite directions, which is what identifies the actual
+     culprit: the first opened on a 3px flat and took five rows to reach full
+     width; the second widened the flats to 5px and shortened the chamfer. Both
+     read as a gold disc with a stamped digit, i.e. a penny — the one thing
+     THEME_AND_LEGS 2.3 asked this icon not to be.
+
+     What they had in common was RADIAL SYMMETRY, and that is the thing the eye
+     reads as "struck". A shape with the same profile in every direction is a
+     coin at this size no matter how many sides the mask actually has.
+
+     So: stop drawing a polygon and draw a MILLED SLUG. Seven-pixel flats top
+     and bottom, nine rows of dead-vertical side, and a chamfer of exactly one
+     row taking 2px — the same clipped corner the disk, the PEM block and the
+     charge all take, applied to all four so it still reads as currency rather
+     than as a fourth carrier. A rectangle with clipped corners cannot be
+     mistaken for a circle, and it puts the token inside the family's language
+     instead of beside it. The lit facet stays on the top flat alone: one
+     machined edge catching light is what says milled rather than struck. */
   const HEX = [
-    '....ooo....',
-    '...ogggo...',
-    '..o#####o..',
+    '..ggggggg..',
     '.o#######o.',
     'o#########o',
     'o#########o',
     'o#########o',
+    'o#########o',
+    'o#########o',
+    'o#########o',
+    'o#########o',
     '.o#######o.',
-    '..o#####o..',
-    '...o###o...',
-    '....ooo....',
+    '..ooooooo..',
   ];
   /* rim, case, facet — the same three steps of one hue every carrier takes.
      The specular gleam it used to wear (#fff2c8, L 242) was the set's only
