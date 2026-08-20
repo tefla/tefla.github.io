@@ -625,11 +625,16 @@ G.Pool = function (factory, reset) {
     { id: 'kills5000', label: 'genocide', desc: 'kill 5000 processes', test: (s) => s.kills >= 5000 },
 
     { id: 'rooms200', label: 'cartographer', desc: 'clear 200 rooms', test: (s) => s.rooms >= 200 },
-    { id: 'rot50', label: 'corrupted', desc: 'drop below 50 integrity', test: (s) => s.lowInteg <= 50 },
-    { id: 'rot20', label: 'unrecoverable', desc: 'drop below 20 integrity', test: (s) => s.lowInteg <= 20 },
+    { id: 'rot50', label: 'corrupted', desc: 'drop below 50 cover', test: (s) => s.lowInteg <= 50 },
+    { id: 'rot20', label: 'unrecoverable', desc: 'drop below 20 cover', test: (s) => s.lowInteg <= 20 },
     { id: 'hoard', label: 'hoarder', desc: 'hold 15 items at once', test: (s) => s.mostItems >= 15 },
     { id: 'rich', label: 'well funded', desc: 'collect 300 cycles', test: (s) => s.coins >= 300 },
     { id: 'win', label: 'root', desc: 'reach the bottom', test: (s) => s.wins >= 1 },
+    /* docs/THEME_AND_LEGS.md §1.3. This gate could not fire until the hats
+       existed — the run had no identity to win AS. NULL was held out of the
+       roster for exactly that reason (023_chars.js), because a promise the
+       game cannot keep is worse than a character it does not have. */
+    { id: 'winblack', label: 'no disclosure', desc: 'win a run as BLACK HAT', test: (s) => (s.winBlack || 0) >= 1 },
   ];
   const BY_ID = Object.create(null);
   for (let i = 0; i < TRIGGERS.length; i++) BY_ID[TRIGGERS[i].id] = TRIGGERS[i];
@@ -787,6 +792,12 @@ G.Pool = function (factory, reset) {
       add('bosses', (run.bossKills || []).length);
       add('deaths', won ? 0 : 1);
       add('wins', won ? 1 : 0);
+      /* the ending is derived and stamped by Game.nextFloor from the deal
+         record, so this counts how the run was actually played rather than
+         anything the player selected */
+      add('winBlack', won && run.ending === 'black' ? 1 : 0);
+      add('winWhite', won && run.ending === 'white' ? 1 : 0);
+      add('winGrey', won && run.ending === 'grey' ? 1 : 0);
       add('time', run.time || 0);
       most('deepest', run.deepest || run.floorIndex || 1);
       most('mostItems', (run.items && run.items.length) || 0);
@@ -912,14 +923,35 @@ G.Pool = function (factory, reset) {
       unlock: 'kills1000',
     },
 
-    /* NULL, the fifth in §3.1, is deliberately absent. It is defined entirely
-       in section 1's vocabulary — "starts at 50% cover", "cannot take
-       white-hat deals", "black-hat items cost half" — and section 1 is not
-       built: there is no COVER, and tryDealDoor (550_special.js) still splits
-       devil-vs-angel on a second roll rather than offering three hats. Its
-       unlock, "win as BLACK", therefore names a thing that cannot happen, and
-       a gate that can never fire is worse than no character at all: it is a
-       promise the game makes and cannot keep. NULL lands with the hats. */
+    /* NULL, the fifth in §3.1. Held back until the hats existed, because it is
+       defined entirely in section 1's vocabulary and a gate that can never fire
+       is worse than no character at all. Section 1 is now built: COVER is the
+       word, tryDealDoor offers three doors, and `winblack` (022_unlocks.js) is
+       a mark the player can actually earn. So NULL lands.
+
+       It pays for its start the way the standing rule demands. Half cover is
+       not a handicap you play around — it is threat level 2 from the first
+       room, which means buffed enemies and rotting floors on floor 1, and it
+       is four black-hat deals from PANIC rather than eight. What it buys is
+       that black-hat altars charge half, so the door that is killing you is
+       also the only one that will still deal with you. */
+    {
+      /* id is `devnull`, not `null`: run.charId is a string OR the JS value
+         null when no character resolved (700_game.js:325), and an id of
+         'null' would make those two states read identically at every call
+         site that stringifies or logs it. The player still sees NULL. */
+      id: 'devnull', name: 'NULL', sub: 'ALREADY INSIDE',
+      blurb: 'STARTS AT 50% COVER   BLACK HAT COSTS HALF',
+      desc: 'You did not break in. You were already here, and something noticed a long time ' +
+        'ago. The sweeps start on floor one and the only people still dealing with you are ' +
+        'the ones you should not be dealing with.',
+      color: '#b06aff', pal: ['#9a4ae0', '#4a1a7a', '#e0c0ff'], mark: 'null',
+      pages: -1,
+      mul: { damage: 1.12, speed: 1.04 },
+      add: null,
+      start: null, innate: 'nullhat',
+      unlock: 'winblack',
+    },
   ];
 
   const DEFAULT_ID = 'kiddie';
@@ -1155,6 +1187,50 @@ G.Pool = function (factory, reset) {
         if (G.Game && G.Game.restoring) return;
         const def = recruit(p, run.rng || G.rnd);
         if (def && G.Stats) G.Stats.fx().popup(p.x, p.y - 22, '+' + def.name.toUpperCase(), '#8ef05a');
+      },
+    };
+    /* NULL — docs/THEME_AND_LEGS.md §1.3, and the character that could not
+       ship until the hats did. Two rules, both stated in hat vocabulary:
+
+         - the run starts at 50% cover, which is threat level 2 from room one
+         - black-hat altars charge half
+
+       The discount is applied where the altar reads the cost rather than by
+       rewriting the item, so a NULL run and a kiddie run pick up the SAME
+       black-hat item and only the bill differs. onPickup's own tax
+       (317_items_devil.js) is untouched: NULL gets a cheaper door, not a
+       cheaper item, which keeps the two costs independent the way
+       sp_rooms_gate already documents them. */
+    INNATE.nullhat = {
+      id: 'char_null', name: 'null', char: true, pinned: true,
+      tag: 'passive', quality: 4, color: '#b06aff',
+      desc: 'Nobody provisioned you. Nobody can deprovision you either.',
+      effect: 'Starts at 50% cover. Black-hat altars charge half.',
+      icon: S.mkIcon([
+        'PPPPPPPPPPPP', 'P..........P', 'P.PP....PP.P', 'P.P.P..P.P.P',
+        'P.P..PP..P.P', 'P.P......P.P', 'P.PP....PP.P', 'P..........P',
+        'PPPPPPPPPPPP',
+      ]),
+      /* TWO RULES WITH DIFFERENT LIFETIMES, and conflating them cost the
+         character its entire upside.
+
+         The 50% cover is a one-time run-START effect: replaying the kit on a
+         resumed run must not knock the player down another 50, so it is
+         guarded by Game.restoring the way the swarm's recruit is.
+
+         `halfBlack` is a STANDING property of who you are. Guarding it the
+         same way meant a resumed NULL run came back holding the penalty and
+         not the compensation — cover still 50, doors back to full price, no
+         error and no gate. Measured before the split: half true -> false
+         across a capture/restore. It is set unconditionally, and is a pure
+         function of the character rather than of run history, so it needs no
+         snapshot field of its own. */
+      onPickup(p, run) {
+        if (!run) return;
+        run.halfBlack = true;
+        if (G.Game && G.Game.restoring) return;
+        if (G.Stats && G.Stats.integrity) G.Stats.integrity(run, -50);
+        else run.integrity = 50;
       },
     };
     return INNATE;
@@ -7546,6 +7622,7 @@ G.Pool = function (factory, reset) {
     secret: { frame: null, leaf: null, glyph: '' },
     devil:  { frame: '#e01838', leaf: '#1a0206', glyph: 'DEV' },
     angel:  { frame: '#ffe89a', leaf: '#d6e8ff', glyph: 'CRT' },
+    grey:   { frame: '#c8c8c8', leaf: '#141a1e', glyph: 'CVE' },
     bomb:   { frame: null, leaf: null, glyph: '' },
   };
 
@@ -7637,6 +7714,16 @@ G.Pool = function (factory, reset) {
         x.fillRect(22, 8, 2, 6); x.fillRect(24, 6, 2, 4); x.fillRect(40, 8, 2, 6); x.fillRect(38, 6, 2, 4);
         for (let i = 0; i < 9; i++) x.fillRect(24 + i, 14 + i, 16 - i * 2, 1);
         x.fillStyle = '#ff4a5e'; x.fillRect(28, 16, 8, 1);
+      } else if (kind === 'grey') {
+        /* a clock face on a plain slab. The other two deal doors shout — horns
+           and wings — and grey deliberately does not: it is the door that looks
+           like paperwork, which is exactly what is behind it. */
+        x.fillStyle = '#c8c8c8'; ringPx(x, 32, 16, 8, 1);
+        x.fillRect(31, 10, 2, 7);            /* the long hand, at 12 */
+        x.fillRect(32, 16, 6, 2);            /* the short hand, at 3 */
+        x.fillStyle = '#8a949c';
+        x.fillRect(31, 6, 2, 2); x.fillRect(31, 26, 2, 2);
+        x.fillRect(21, 15, 2, 2); x.fillRect(41, 15, 2, 2);
       } else if (kind === 'angel') {
         x.fillStyle = '#ffe89a'; ringPx(x, 32, 10, 6, 2);
         x.fillStyle = '#ffffff';
@@ -9887,7 +9974,7 @@ G.Pool = function (factory, reset) {
     return b;
   }
 
-  const DOOR_KINDS = { normal: 1, locked: 1, boss: 1, secret: 1, devil: 1, angel: 1, bomb: 1 };
+  const DOOR_KINDS = { normal: 1, locked: 1, boss: 1, secret: 1, devil: 1, angel: 1, grey: 1, bomb: 1 };
 
   function bakeRoom(c, room, th, rw, rh) {
     const W = rw * TILE, H = rh * TILE;
@@ -11193,6 +11280,38 @@ G.Pool = function (factory, reset) {
   /* ============================================================
      per-frame tick — driven from G.Render.beginFrame (also mine)
      ============================================================ */
+  /* THREE ENDINGS — docs/THEME_AND_LEGS.md §1.3.
+     Three things to do with root once you have it, chosen by the hat the run
+     derived rather than by anything the player declared. `none` is a real
+     fourth outcome and not a fallback: a run that reached bare silicon without
+     taking a single deal genuinely did not pick a side, and saying so is more
+     interesting than pretending it was white. */
+  const ENDING = {
+    black: {
+      short: 'BLACK', color: '#ff3a5c', title: 'EXFILTRATED',
+      line: 'you took what was down there and left. nobody was told.',
+    },
+    white: {
+      short: 'WHITE', color: '#ffe9a8', title: 'DISCLOSED',
+      line: 'you wrote it up, signed it, and sent it to the vendor.',
+    },
+    grey: {
+      short: 'GREY', color: '#c8c8c8', title: 'SOLD',
+      line: 'you sold it to whoever asked first, and kept the receipt.',
+    },
+    none: {
+      short: 'NONE', color: '#4af0b0', title: 'ROOT ACQUIRED',
+      line: 'you reached bare silicon and took no deal to get there.',
+    },
+    /* dealt, but never enough of one thing to be called anything. hat() is
+       null here for the same reason it is null for `none`, which is exactly
+       how the victory screen came to tell a dealer they had dealt with nobody. */
+    unaligned: {
+      short: 'UNALIGNED', color: '#8ecfff', title: 'ROOT ACQUIRED',
+      line: 'you dealt when it suited you and committed to nothing.',
+    },
+  };
+
   const Cin = G.Cinema = {
 
     tick(dt) {
@@ -11651,7 +11770,7 @@ G.Pool = function (factory, reset) {
           ['ROOMS', run.roomsVisited],
           ['KILLS', run.kills],
           ['ITEMS', run.items ? run.items.length : 0],
-          ['INTEGRITY', (run.integrity | 0) + '%', run.integrity < 50 ? '#ff5a5e' : null],
+          ['COVER', (run.integrity | 0) + '%', run.integrity < 50 ? '#ff5a5e' : null],
           ['TIME', fmtTime(run.time)],
         ], 116, 130, { color: 'rgba(190,225,215,0.75)' });
       }
@@ -11768,7 +11887,7 @@ G.Pool = function (factory, reset) {
           ['ROOMS', run.roomsVisited],
           ['KILLS', run.kills],
           ['CYCLES', run.coins],
-          ['INTEGRITY', (run.integrity | 0) + '%'],
+          ['COVER', (run.integrity | 0) + '%'],
           ['TIME', fmtTime(run.time)],
         ], 46, 134, { color: 'rgba(255,190,200,0.75)', addr: '#6b2030', reveal: dump });
       }
@@ -11852,10 +11971,15 @@ G.Pool = function (factory, reset) {
       const flash = 1 - seg(t, 0, 0.7);
       if (flash > 0) { c.fillStyle = rgba('#ffffff', flash * flash); c.fillRect(0, 0, VW, VH); }
 
+      /* THREE ENDINGS — docs/THEME_AND_LEGS.md §1.3. Same climb out, three
+         different things done with what was found at the bottom. The hat was
+         derived from the deals actually taken (550_special.js), so the ending
+         reports the run rather than a choice made from a menu. */
+      const end = ENDING[(run && run.ending) || 'none'] || ENDING.none;
       const head = seg(t, 0.3, 0.8);
       c.globalAlpha = head;
-      txt(c, 'ROOT ACQUIRED', cx, 34, { size: 3, big: true, color: accent, align: 'center', shadow: true });
-      txt(c, 'you reached bare silicon. the machine is yours.', cx, 74,
+      txt(c, end.title, cx, 34, { size: 3, big: true, color: end.color || accent, align: 'center', shadow: true });
+      txt(c, end.line, cx, 74,
         { size: 1, color: 'rgba(255,220,190,0.7)', align: 'center' });
       c.globalAlpha = 1;
 
@@ -11874,7 +11998,8 @@ G.Pool = function (factory, reset) {
           ['ROOMS', run.roomsVisited],
           ['KILLS', run.kills],
           ['CYCLES', run.coins],
-          ['INTEGRITY', (run.integrity | 0) + '%'],
+          ['COVER', (run.integrity | 0) + '%'],
+          ['HAT', end.short],
           ['TIME', fmtTime(run.time)],
         ], 46, 136, { color: 'rgba(255,225,200,0.8)', addr: '#6b3a12', reveal: dump });
       }
@@ -13933,7 +14058,7 @@ G.Pool = function (factory, reset) {
         }
       }
       const low = s.lowInteg == null ? 100 : s.lowInteg;
-      txt(c, 'WORST INTEGRITY SURVIVED', 28, BY + BH - 40, { size: 1, color: A.FAINT });
+      txt(c, 'LOWEST COVER SURVIVED', 28, BY + BH - 40, { size: 1, color: A.FAINT });
       txt(c, low + '%', 28, BY + BH - 28, { size: 2, big: true, color: low <= 20 ? A.BAD : A.HOT });
       if (!mounted) txt(c, 'NOTHING IS BEING RECORDED - MOUNT A VOLUME', 300, BY + BH - 28,
         { size: 1, color: '#ffb45a' });
@@ -14056,27 +14181,40 @@ G.Pool = function (factory, reset) {
     n() { return 0; },
     tally() {
       const b = poolCount('devil'), w = poolCount('angel');
-      return { have: (b.have ? 1 : 0) + (w.have ? 1 : 0), total: 3, note: 'two doors roll',
+      const st = G.Game && G.Game.run && G.SpecialRooms && G.SpecialRooms.hatOf(G.Game.run);
+      return { have: (b.have ? 1 : 0) + (w.have ? 1 : 0), total: 3, note: 'three doors roll',
         lines: ['black ' + b.have + '/' + b.tot + '   white ' + w.have + '/' + w.tot,
-          'the grey hat, the one with a contract, is not in this build'] };
+          st ? 'this run wears the ' + st.name : 'the hat is derived from the deals you take'] };
     },
     draw(c) {
       A.panel(c, 14, BY, VW - 28, BH, 'HATS');
       txt(c, 'the three doors', 28, BY + 12, { size: 2, big: true, color: A.ACCENT });
-      txt(c, 'A deal room puts a door in front of you. Two of the three roll today.',
+      txt(c, 'A deal room puts a door in front of you. Which one you get is rolled.',
         28, BY + 36, { size: 1, color: A.INK });
       door(c, 28, BY + 60, 'BLACK HAT', A.BAD, 'costs integrity, permanently',
         'Raw power at a standing price. What it burns does not come back.', poolCount('devil'));
       door(c, 224, BY + 60, 'WHITE HAT', '#9fe4ff', 'free',
         'Cover restored, something defensive, and no bill afterwards.', poolCount('angel'));
-      door(c, 420, BY + 60, 'GREY HAT', A.FAINT, 'free, with a contract',
-        'A bounty condition you agree to and are then held to. This door is not cut yet.', null);
-      const s = stats(), wins = s.wins || 0;
-      txt(c, 'ENDINGS', 28, BY + BH - 52, { size: 1, color: A.FAINT });
-      txt(c, wins ? 'THE DIE IS DOWN. You have reached the only ending there is.'
-        : 'One ending exists: put THE DIE down on floor 8. You have not, yet.',
-        28, BY + BH - 38, { size: 1, color: wins ? A.HOT : A.INK });
-      txt(c, 'more endings arrive with the third door', 28, BY + BH - 20, { size: 1, color: A.FAINT });
+      door(c, 420, BY + 60, 'GREY HAT', '#c8c8c8', 'free, with a contract',
+        'The same stock as black, taken on risk instead of price. Keep the contract ' +
+        'and cover comes back. Break it and you pay more than the door would have charged.',
+        poolCount('devil'));
+      /* Reads the SAME counters the unlock ladder banks (022_unlocks.js), so
+         this page cannot claim an ending the profile does not have. It used to
+         be a hand-written sentence and it went stale the day the doors landed. */
+      const s = stats();
+      const got = [['black', 'EXFILTRATE', s.winBlack || 0], ['white', 'DISCLOSE', s.winWhite || 0],
+        ['grey', 'SELL', s.winGrey || 0]];
+      const seen = got.filter(g => g[2] > 0).length;
+      txt(c, 'ENDINGS   ' + seen + ' / 3 SEEN', 28, BY + BH - 52, { size: 1, color: A.FAINT });
+      let ex = 28;
+      for (let i = 0; i < got.length; i++) {
+        const g2 = got[i], on = g2[2] > 0;
+        txt(c, g2[1], ex, BY + BH - 38, { size: 1, color: on ? A.HOT : A.FAINT });
+        ex += 116;
+      }
+      txt(c, 'the ending is read off the hat you wore, not off a choice you were asked to make',
+        28, BY + BH - 20, { size: 1, color: A.FAINT });
     },
   };
 
@@ -14085,9 +14223,11 @@ G.Pool = function (factory, reset) {
     n() { return 0; },
     tally() {
       const d = G.Difficulty && G.Difficulty.current();
-      return { have: 1, total: 1, note: 'one, unnamed',
+      const roster = (G.Chars && G.Chars.roster && G.Chars.roster()) || [];
+      const open = roster.filter(r => r.unlocked).length;
+      return { have: open, total: roster.length || 1, note: 'the roster',
         lines: [d ? 'you descend at ' + d.name + ', ' + d.hearts + ' hearts' : '',
-          'the roster is not in this build'] };
+          open + ' of ' + roster.length + ' characters open'] };
     },
     draw(c) {
       A.panel(c, 14, BY, VW - 28, BH, 'CHARS');
@@ -19393,16 +19533,31 @@ G.Pool = function (factory, reset) {
     def.pools = def.pools || ['devil'];
     def.quality = def.quality == null ? 4 : def.quality;
     def.devil = true;
-    def.archetype = def.archetype || 'pact';
+    /* Published so WORLD2 can price a grey contract against what this item
+       would ACTUALLY have cost at a black altar. It was invisible before, and
+       that is exactly how the grey stake came to be set against the altar
+       price alone — half the real bill — which made black strictly dominated.
+       A number two modules must agree on cannot live in one module's closure. */
+    def.coverCost = cost || 12;
+    def.archetype = def.archetype || 'blackhat';
     const prev = def.onPickup;
     def.onPickup = function (p, run) {
+      /* A black-hat item burns cover WHEREVER it is picked up — that price is
+         a property of the item, not of the altar, which is why it lives here
+         and not in the room that offered it.
+         The one exception is the grey door (553_bounty.js): grey stocks this
+         same pool and charges a CONTRACT instead of a price, so the item must
+         arrive free. WORLD2 raises run.freeDeal for exactly the duration of
+         the grant and lowers it in a finally, so a throw mid-pickup cannot
+         leave the flag up and make every later black-hat item free. */
+      if (run && run.freeDeal) { if (prev) prev(p, run); return; }
       S.integrity(run, -(cost || 12));
       FX().flash('#ff2a4a', 0.3);
       FX().glitch(1, 0.7);
       FX().chroma(1, 0.6);
       FX().shake(8, 0.5);
       FX().snd('devilDeal', { vol: 0.9 });
-      FX().popup(p.x, p.y - 32, '-' + (cost || 12) + ' INTEGRITY', '#ff2a4a');
+      FX().popup(p.x, p.y - 32, '-' + (cost || 12) + ' COVER', '#ff2a4a');
       if (prev) prev(p, run);
     };
     return add(def);
@@ -19411,7 +19566,7 @@ G.Pool = function (factory, reset) {
     def.pools = def.pools || ['angel'];
     def.quality = def.quality == null ? 3 : def.quality;
     def.angel = true;
-    def.archetype = def.archetype || 'blessing';
+    def.archetype = def.archetype || 'whitehat';
     const prev = def.onPickup;
     def.onPickup = function (p, run) {
       S.integrity(run, +4);
@@ -21651,9 +21806,15 @@ G.Pool = function (factory, reset) {
       rule: 'Reacts when something hits you.' },
     ammunition: { badge: 'AMMO', order: 12, frame: 'magazine',
       rule: 'A limited payload reserve that refills on its own rule.' },
-    pact: { badge: 'PACT', order: 13, frame: 'horns',
-      rule: 'Root deal. Burns system integrity, permanently.' },
-    blessing: { badge: 'SIGNED', order: 14, frame: 'halo',
+    /* docs/THEME_AND_LEGS.md §1.2. The two families are unchanged in content
+       — that content was always right — and renamed to the axis the player
+       actually navigates. The GREY door hands out blackhat items under a
+       contract rather than a price, so it is a way of ACQUIRING rather than a
+       third family; the hat you end up wearing is derived from the deal
+       record (§1.3), not from a badge on any one item. */
+    blackhat: { badge: 'BLACK HAT', order: 13, frame: 'brimBlack',
+      rule: 'Root deal. Burns cover, permanently.' },
+    whitehat: { badge: 'WHITE HAT', order: 14, frame: 'brimWhite',
       rule: 'Signed code. Defensive, and it costs nothing.' },
     /* docs/BUILD_LISTING.md §7. The only family whose repair is a
        REARRANGEMENT rather than a pickup, which is why it needed the listing
@@ -21741,8 +21902,8 @@ G.Pool = function (factory, reset) {
   Dex.archKey = function (def) {
     if (!def) return 'stat';
     if (def.archetype && ARCH[def.archetype]) return def.archetype;
-    if (def.devil) return 'pact';
-    if (def.angel) return 'blessing';
+    if (def.devil) return 'blackhat';
+    if (def.angel) return 'whitehat';
     const byTag = BY_TAG[def.tag];
     if (byTag) return byTag;
     return (def.flags && def.flags.length) ? 'shot' : 'stat';
@@ -24057,7 +24218,11 @@ G.Pool = function (factory, reset) {
       p.hurtT = 0; p.run = run || null;
       p.blink = 0; p.blinkT = 1.5;
       p.stepT = 0;
-      p.mem = {};
+      /* shotsFired starts at 0, not undefined: WORLD2's grey-hat contracts
+         (553_bounty.js) must be able to tell "the instrument is missing" from
+         "the player has not fired yet", and a lazily-created counter reads the
+         same as an absent one. */
+      p.mem = { shotsFired: 0 };
       /* Who this run is: stat block, containers, kit, innate. INTEGRATOR owns
          the roster (023_chars.js) because a run's identity and its unlock gate
          belong beside the difficulty tier, not in the combat model. It resolves
@@ -24175,6 +24340,13 @@ G.Pool = function (factory, reset) {
          the burst driver at 1.88x baseline DPS for free. Hooks now Math.max
          or scale the value that actually survives. */
       this.fireTimer = st.fireDelay;
+      /* One counter, incremented per VOLLEY rather than per packet, because
+         the grey-hat `quiet` contract (553_bounty.js) asks the player to hold
+         their fire and a shotCount-14 build would otherwise fail it fourteen
+         times as fast for exactly the same trigger discipline. Initialised to
+         0 at create() so WORLD2 can tell an absent instrument from a quiet
+         player. */
+      this.mem.shotsFired = (this.mem.shotsFired || 0) + 1;
 
       for (let i = 0; i < n; i++) {
         const off = n > 1 ? (i - (n - 1) / 2) * spr : 0;
@@ -33119,7 +33291,7 @@ G.Pool = function (factory, reset) {
 
   /* deal / utility rooms: an open floor with a framed centre, so pedestals,
      altars and shop stock sit on something that reads as staged. */
-  lay('sanctum', ['devil', 'angel', 'curse', 'library', 'sacrifice', 'arcade'], [
+  lay('sanctum', ['devil', 'angel', 'grey', 'curse', 'library', 'sacrifice', 'arcade'], [
     '.................',
     '.................',
     '....X.......X....',
@@ -33131,7 +33303,7 @@ G.Pool = function (factory, reset) {
     '.................',
   ]);
 
-  lay('sanctumwide', ['devil', 'angel', 'curse', 'library', 'sacrifice', 'arcade'], [
+  lay('sanctumwide', ['devil', 'angel', 'grey', 'curse', 'library', 'sacrifice', 'arcade'], [
     '.................',
     '.X.............X.',
     '.................',
@@ -33839,6 +34011,63 @@ G.Pool = function (factory, reset) {
   }
   const THREAT_NAME = ['NOMINAL', 'UNSTABLE', 'DEGRADED', 'CRITICAL', 'PANIC'];
 
+  /* ---------------- the hat — docs/THEME_AND_LEGS.md §1.3 ----------------
+     DERIVED from the deal record, never chosen. The player is not asked what
+     kind of hacker they are; they find out, from what they actually took,
+     which is the only version of that question a roguelike can ask honestly.
+
+       >=2 black, 0 white          -> BLACK
+       >=1 white, 0 black          -> WHITE
+       anything mixed, or any grey -> GREY
+       nothing yet                 -> null (no hat, and the HUD shows none)
+
+     Grey dominates on purpose: it is the hat of someone who has been on both
+     sides, and one grey contract is enough to say so. */
+  const HAT = { black: { name: 'BLACK HAT', color: '#ff3a5c' },
+    white: { name: 'WHITE HAT', color: '#ffe9a8' },
+    grey: { name: 'GREY HAT', color: '#c8c8c8' } };
+
+  function hat(run) {
+    const s = run && run.sp; if (!s) return null;
+    const b = s.blackDeals || 0, w = s.whiteDeals || 0, g = s.greyDeals || 0;
+    if (g) return 'grey';
+    if (b >= 2 && !w) return 'black';
+    if (w >= 1 && !b) return 'white';
+    if (b && w) return 'grey';
+    return null;             /* one black deal is not yet an identity */
+  }
+  /* Did this run deal AT ALL? Distinct from hat(), and the distinction is not
+     pedantry: hat() returns null both for a run that touched nothing and for
+     one that took a single black deal, and the victory screen was using that
+     one null to tell a player who HAD dealt that they "took no deal to get
+     there". A falsehood on the last screen of the run. */
+  function dealt(run) {
+    const s = run && run.sp; if (!s) return 0;
+    return (s.blackDeals || 0) + (s.whiteDeals || 0) + (s.greyDeals || 0);
+  }
+
+  /* What a BLACK altar charges for an item, at the door. Factored out because
+     the grey door has to price its contract against it (553_bounty.js) and a
+     number two callers must agree on cannot stay inline in one of them.
+     `jitter` is the caller's own rng draw, passed in rather than taken here, so
+     a pricing QUERY never spends a draw and cannot perturb later rolls.
+     NULL (024_chars_innate.js) buys its 50% starting cover back with a
+     half-price door; applied AFTER the clamp so the discount lands on the real
+     price rather than the pre-clamp figure. */
+  function blackPrice(def, floorIndex, run, jitter) {
+    const q = def && def.quality != null ? def.quality : 1;
+    let c = clamp(10 + q * 4 + (jitter || 0) + Math.floor((floorIndex || 1) * 0.6), 10, 25);
+    if (run && run.halfBlack) c = Math.max(5, Math.round(c / 2));
+    return c;
+  }
+  /* The FULL bill for taking an item at a black altar: the door's price plus
+     the item's own onPickup tax (317_items_devil.js). Measured mean 34.1,
+     median 40 — against which a grey contract must be priced, or grey is
+     strictly the better deal at every win rate including zero. */
+  function blackTotal(def, floorIndex, run) {
+    return blackPrice(def, floorIndex, run, 2) + ((def && def.coverCost) || 12);
+  }
+
   function later(run, t, fn) { const s = st(run); if (s) s.pending.push({ t: t, fn: fn }); }
 
   /* ============================================================
@@ -33947,6 +34176,10 @@ G.Pool = function (factory, reset) {
           s.prevClean = s.floorDmg === 0;
           s.cleanStreak = s.floorDmg === 0 ? s.cleanStreak + 1 : 0;
         }
+        /* Resolve BEFORE floorDmg is cleared: the `clean` contract is judged
+           on the floor just left, and this is the only moment that number is
+           still the one the player earned. */
+        if (G.Bounty) { try { G.Bounty.onFloor(run, s); } catch (e) { console.warn('bounty.onFloor', e); } }
         s.floorSeen = floorIndex;
         s.floorDmg = 0;
         s.restock = false;
@@ -34150,7 +34383,7 @@ G.Pool = function (factory, reset) {
     } catch (e) { console.warn('SpecialRooms.growDealRoom populate', e); }
     floor.grid.set(slot.x + ',' + slot.y, room);
     floor.rooms.push(room);
-    const kind = type === 'devil' ? 'devil' : 'angel';
+    const kind = type === 'devil' ? 'devil' : type === 'grey' ? 'grey' : 'angel';
     const dir = slot.dir, back = OPP[dir];
     slot.from.doors[dir] = { to: room, kind: kind, open: true, hidden: false, dir: dir, plate: type };
     room.doors[back] = { to: slot.from, kind: kind, open: true, hidden: false, dir: back, plate: type };
@@ -34279,7 +34512,7 @@ G.Pool = function (factory, reset) {
     for (let i = 0; i < n; i++) {
       const def = rollItem('devil', rng);
       const q = def && def.quality != null ? def.quality : 1;
-      const cost = clamp(10 + q * 4 + rng.int(5) + Math.floor(fl * 0.6), 10, 25);
+      const cost = blackPrice(def, fl, run, rng.int(5));
       d.altars.push({
         x: xs[i], y: 156, def: def, cost: cost, taken: false, gone: false,
         hold: 0, need: 0.85, t: rng.range(0, 6), pulse: 0, refuse: 0, group: 'devil',
@@ -34306,6 +34539,36 @@ G.Pool = function (factory, reset) {
     d.font = { x: CX, y: 214, used: false, t: 0, charge: 0 };
     d.rays = 0;
     d.fp = (hexStr(rng, 2) + ':' + hexStr(rng, 2) + ':' + hexStr(rng, 2) + ':' + hexStr(rng, 2)).toUpperCase();
+  };
+
+  /* GREY HAT — docs/THEME_AND_LEGS.md §1.2.
+     The stock is the BLACK-HAT pool, deliberately: grey is not a third roster,
+     it is a third way to ACQUIRE the same power. Black charges you a price you
+     can compute at the altar; grey charges you a bet you cannot. That framing
+     is what makes the choice interesting — two doors offering different items
+     is a preference, two doors offering the same item at different KINDS of
+     cost is a decision. It also means the leg costs no new item content, which
+     is why it could land in one round. */
+  SETUP.grey = function (room, run, rng, ctx) {
+    const d = data(room);
+    d.altars = [];
+    const xs = [190, 354];
+    for (let i = 0; i < 2; i++) {
+      const gdef = rollItem('devil', rng);
+      d.altars.push({
+        x: xs[i], y: 152, def: gdef, cost: 0, taken: false, gone: false,
+        stake: blackTotal(gdef, run.floorIndex || 1, run),
+        hold: 0, need: 0.55, t: rng.range(0, 6), pulse: 0, refuse: 0, group: 'grey',
+      });
+    }
+    /* One contract for the room, rolled here so it is a property of the ROOM
+       (seeded, stable across a save/restore that re-runs setup) rather than of
+       whichever altar the player happens to walk into first. Both altars carry
+       the same bet — the choice at the altar is which ITEM, never which risk. */
+    d.bounty = (G.Bounty && G.Bounty.pick(run, rng)) || null;
+    d.clock = 0;
+    d.days = 90;
+    const st0 = st(run); if (st0) st0.offered++;
   };
 
   SETUP.curse = function (room, run, rng, ctx) {
@@ -34406,6 +34669,7 @@ G.Pool = function (factory, reset) {
     superSecret: ['$ exec ./0day --root', '#ffe36a', ['secretFound', 'portal']],
     devil: ['# dd if=/dev/mem of=/dev/you', '#ff2a44', ['devilDeal', 'curse']],
     angel: ['$ openssl verify -CAfile ca.pem', '#fff3c0', ['heal', 'activeReady']],
+    grey: ['$ cat disclosure.eml  # unsent', '#c8c8c8', ['uiSelect', 'tick']],
     curse: ['$ free() // never called', '#ff4a6a', ['curse']],
     sacrifice: ['# kill -9 $$', '#ff3a5c', ['curse', 'doorLock']],
     challenge: ['$ stress --cpu 8 --timeout 3', '#ff9a3a', ['doorLock', 'bossRoar']],
@@ -34429,7 +34693,11 @@ G.Pool = function (factory, reset) {
      CHOICE ALTARS — devil (costed, hold to sign), angel + library
      (free, exclusive: taking one dissolves the rest)
      ============================================================ */
-  const EXCLUSIVE = { angel: 1, library: 1 };
+  /* taking one dissolves the rest. grey joins them: a disclosure timeline is
+     a single contract, and offering two would let the player bank a second
+     bet on the same floor and average the risk away — which is the one
+     property §1.2 says grey exists to NOT have. */
+  const EXCLUSIVE = { angel: 1, library: 1, grey: 1 };
 
   function updateAltars(room, d, dt, ctx) {
     if (!d.altars) return false;
@@ -34478,11 +34746,39 @@ G.Pool = function (factory, reset) {
        never charge without granting, and the altar can never be taken twice */
     a.taken = true;
     const def = a.def;
-    if (!grantItem(def, ctx)) { a.taken = false; return; }
+    /* Grey stocks the black-hat pool, and a black-hat item charges cover in its
+       OWN onPickup (317_items_devil.js) wherever it is picked up. Grey charges
+       a contract instead, so the price is suppressed across the grant — in a
+       try/finally, because a throw inside grantItem that left the flag raised
+       would make every black-hat item free for the rest of the run. */
+    const free = a.group === 'grey';
+    if (free) run.freeDeal = true;
+    let got;
+    try { got = grantItem(def, ctx); }
+    finally { if (free) run.freeDeal = false; }
+    if (!got) { a.taken = false; return; }
     if (a.cost > 0) {
       addIntegrity(run, -a.cost);
       s.deals++;
+      s.blackDeals = (s.blackDeals || 0) + 1;
       dealShock(a, ctx, a.cost);
+    }
+    if (a.holy) s.whiteDeals = (s.whiteDeals || 0) + 1;
+    /* Grey costs nothing NOW. It arms a contract instead, and it is armed
+       strictly after grantItem so `nodeals` snapshots a black-hat count that
+       already includes the item just taken — the contract is "no FURTHER black
+       hat", which is what the altar told the player it was. */
+    if (a.group === 'grey') {
+      s.greyDeals = (s.greyDeals || 0) + 1;
+      const spec = d.bounty;
+      /* Staked on THIS item, not on a constant. A flat burn had to be guessed
+         against a bill that varies 23..43, and the guess was wrong in the
+         direction that made black pointless. Deriving it means the two doors
+         cannot drift apart when item costs change. */
+      /* the altar's OWN stake, the one the player read off its tag — not a
+         recomputation, which could disagree if pricing ever gains a term */
+      if (spec && G.Bounty) G.Bounty.arm(run, spec, a.stake);
+      greyShock(a, ctx, spec);
     }
     if (EXCLUSIVE[a.group]) {
       for (let i = 0; i < d.altars.length; i++) {
@@ -34513,14 +34809,28 @@ G.Pool = function (factory, reset) {
     FX.chroma(1, 0.9);
     FX.zoom(0.08, 0.5);
     FX.parts(a.x, a.y - 18, 40, { color: '#ff2a44', speed: 190, life: 1.0, size: 3, add: true });
-    FX.popup(a.x, a.y - 40, '-' + cost + '% INTEGRITY', '#ff2a44');
+    FX.popup(a.x, a.y - 40, '-' + cost + '% COVER', '#ff2a44');
     if (G.UI && G.UI.popup) {
-      G.UI.popup('ROOT GRANTED :: INTEGRITY ' + Math.round(integ(run)) + '%', '#ff3a5c');
+      G.UI.popup('ROOT GRANTED :: COVER ' + Math.round(integ(run)) + '%', '#ff3a5c');
       const lv = threat(run);
       if (lv >= 2) G.UI.popup('SYSTEM ' + THREAT_NAME[lv], lv >= 3 ? '#ff2a44' : '#ffb04a');
     }
     const s = st(run);
     s.panicT = 1.4;
+  }
+
+  /* Grey's moment. Deliberately NOT dealShock: black hat is a violent, loud,
+     screen-shaking transaction because it is irreversible and it hurts. Grey is
+     a signature on a document — quiet, formal, and the dread is that nothing
+     happens yet. Making them feel alike would flatten the one axis that
+     separates the doors. */
+  function greyShock(a, ctx, spec) {
+    FX.snd('uiSelect', { vol: 0.9, rate: 0.8 });
+    FX.snd('tick', { vol: 0.7, rate: 0.6 });
+    FX.flash('#c8c8c8', 0.16);
+    FX.parts(a.x, a.y - 18, 22, { color: '#d8d8d8', speed: 90, life: 1.1, size: 2, grav: -18 });
+    FX.popup(a.x, a.y - 40, 'SIGNED', '#e0e0e0');
+    if (spec && G.UI && G.UI.popup) G.UI.popup(spec.brief, '#c8c8c8');
   }
 
   function drawAltar(c, a, style, run) {
@@ -34578,19 +34888,33 @@ G.Pool = function (factory, reset) {
   function drawAltarTag(c, a, style, run) {
     if (a.taken || a.gone || !a.def) return;
     const dark = style === 'devil';
+    const grey = style === 'grey';
     const name = String(a.def.name || a.def.id || '???').toUpperCase();
-    const col = dark ? '#ff5a6a' : style === 'angel' ? '#ffe9a8' : '#8ecfff';
+    const col = dark ? '#ff5a6a' : style === 'angel' ? '#ffe9a8' : grey ? '#c8c8c8' : '#8ecfff';
     const w = Math.max(tww(name, 5) + 10, 46);
     term(c, a.x - w / 2, a.y + 16, w, 11, col, 'rgba(2,4,7,0.88)');
     txt(c, name, a.x, a.y + 19, { size: 5, color: col, align: 'center' });
 
     if (a.cost > 0) {
       const bad = integ(run) - a.cost < MIN_INTEGRITY;
-      const s2 = bad ? 'REFUSED' : '-' + a.cost + '% INTEG';
+      const s2 = bad ? 'REFUSED' : '-' + a.cost + '% COVER';
       const cw = tww(s2, 5) + 10;
       const cc = bad ? '#6a3040' : (a.refuse > 0 ? '#ff9a9a' : '#ff2a44');
       term(c, a.x - cw / 2, a.y + 29, cw, 11, cc, 'rgba(10,0,3,0.9)');
       txt(c, s2, a.x, a.y + 32, { size: 5, color: cc, align: 'center' });
+    }
+
+    /* Grey has no price to print, and printing nothing would read as "free"
+       when it is the opposite of free. It prints the WAGER — and the wager is
+       now staked on the item, so the two altars in a grey room genuinely carry
+       different numbers and a single line on the wall would be a lie about
+       one of them. */
+    if (grey) {
+      const t2 = (G.Bounty && G.Bounty.termsFor(a.stake)) || { gain: 15, burn: 54 };
+      const s3 = '+' + t2.gain + ' / -' + t2.burn;
+      const cw = tww(s3, 5) + 10;
+      term(c, a.x - cw / 2, a.y + 29, cw, 11, '#9aa4ac', 'rgba(6,8,10,0.9)');
+      txt(c, s3, a.x, a.y + 32, { size: 5, color: '#c8c8c8', align: 'center' });
     }
 
     /* hold-to-sign meter */
@@ -34598,9 +34922,9 @@ G.Pool = function (factory, reset) {
       const k = clamp(a.hold / a.need, 0, 1);
       const bw = 46;
       box(c, a.x - bw / 2 - 1, a.y - 50, bw + 2, 6, 'rgba(0,0,0,.85)');
-      box(c, a.x - bw / 2, a.y - 49, bw * k, 4, dark ? '#ff2a44' : '#ffe9a8');
-      txt(c, dark ? 'HOLD TO SIGN' : 'TAKING', a.x, a.y - 60, {
-        size: 5, color: dark ? '#ff8a9a' : '#ffe9a8', align: 'center',
+      box(c, a.x - bw / 2, a.y - 49, bw * k, 4, dark ? '#ff2a44' : grey ? '#c8c8c8' : '#ffe9a8');
+      txt(c, dark ? 'HOLD TO SIGN' : grey ? 'HOLD TO SIGN' : 'TAKING', a.x, a.y - 60, {
+        size: 5, color: dark ? '#ff8a9a' : grey ? '#d8d8d8' : '#ffe9a8', align: 'center',
       });
     }
   }
@@ -35203,7 +35527,7 @@ G.Pool = function (factory, reset) {
   OVER.devil = function (c, room, th, d, run) {
     for (let i = 0; i < d.altars.length; i++) drawAltar(c, d.altars[i], 'devil', run);
     for (let i = 0; i < d.altars.length; i++) drawAltarTag(c, d.altars[i], 'devil', run);
-    const s = 'INTEGRITY ' + Math.round(integ(run)) + '%   ' + THREAT_NAME[threat(run)];
+    const s = 'COVER ' + Math.round(integ(run)) + '%   ' + THREAT_NAME[threat(run)];
     txt(c, s, CX, H - 26, { size: 5, color: '#ff5a6a', align: 'center' });
   };
 
@@ -35227,8 +35551,8 @@ G.Pool = function (factory, reset) {
         FX.flash('#ffffff', 0.35);
         FX.ring(f.x, f.y - 6, { color: '#fff3c0', n: 26, speed: 190 });
         FX.parts(f.x, f.y - 10, 34, { color: '#ffffff', speed: 140, life: 1.0, size: 2.6, grav: -60, add: true });
-        FX.popup(f.x, f.y - 30, '+' + Math.round(integ(run) - before) + '% INTEGRITY', '#fff3c0');
-        if (G.UI && G.UI.popup) G.UI.popup('CERTIFICATE VERIFIED :: INTEGRITY ' + Math.round(integ(run)) + '%', '#ffe9a8');
+        FX.popup(f.x, f.y - 30, '+' + Math.round(integ(run) - before) + '% COVER', '#fff3c0');
+        if (G.UI && G.UI.popup) G.UI.popup('CERTIFICATE VERIFIED :: COVER ' + Math.round(integ(run)) + '%', '#ffe9a8');
         p.heal(2);
       }
     } else if (!f.used) f.charge = Math.max(0, f.charge - dt * 2);
@@ -35348,6 +35672,57 @@ G.Pool = function (factory, reset) {
       txt(c, 'VERIFIED', f.x, f.y + 26, { size: 5, color: '#6a8a5a', align: 'center' });
     }
     txt(c, 'x509 fingerprint ' + d.fp, CX, H - 24, { size: 5, color: 'rgba(120,100,50,0.75)', align: 'center' });
+  };
+
+  /* ============================================================
+     GREY HAT — the disclosure timeline
+     Its visual language is a 90-day clock and an advisory nobody has sent yet.
+     Deliberately the quietest room in the game: no pentagram, no god rays,
+     just a countdown and two pedestals. The dread is administrative.
+     ============================================================ */
+  UPDATE.grey = function (room, d, dt, ctx) {
+    d.clock += dt;
+    if (updateAltars(room, d, dt, ctx)) return;
+  };
+
+  DRAW.grey = function (c, room, th, d, run) {
+    /* the timeline: a rule across the floor with 90 ticks on it, the near end
+       already spent. It is the only decor, and it is the whole idea. */
+    const y = 96;
+    /* Lifted off the first pass's values. #2a3238 rule with #333c42 ticks was
+       invisible against the floor in a 640x360 capture — the whole 90-day-clock
+       idea simply did not land, and a room whose one piece of decor cannot be
+       seen is a room with no identity. Quiet is the intent; absent is not. */
+    box(c, 60, y, W - 120, 1, '#55636d');
+    for (let i = 0; i <= 18; i++) {
+      const x = 60 + (W - 120) * (i / 18);
+      const major = i % 6 === 0;
+      box(c, x, y - (major ? 5 : 3), 1, major ? 6 : 4, major ? '#98a4ac' : '#66727a');
+    }
+    /* the head of the clock creeps while you stand in the room — the timeline
+       is running whether or not you sign anything */
+    const k = clamp((d.clock % 24) / 24, 0, 1);
+    const hx = 60 + (W - 120) * k;
+    box(c, 60, y, hx - 60, 1, '#8a949c');
+    box(c, hx - 1, y - 6, 2, 9, '#c8c8c8');
+    txt(c, 'T+' + Math.round(k * (d.days || 90)) + 'd', hx, y - 15, { size: 5, color: '#8a949c', align: 'center' });
+    txt(c, 'DISCLOSURE WINDOW', CX, y + 10, { size: 5, color: '#7d8890', align: 'center' });
+  };
+
+  OVER.grey = function (c, room, th, d, run) {
+    for (let i = 0; i < d.altars.length; i++) drawAltar(c, d.altars[i], 'grey', run);
+    for (let i = 0; i < d.altars.length; i++) drawAltarTag(c, d.altars[i], 'grey', run);
+    /* the unsent advisory, stated plainly, because a bet the player cannot
+       read is not a bet — it is a trap. Content rule: the terms are on the
+       wall BEFORE the player walks into the altar, not after they sign. */
+    const spec = d.bounty;
+    if (!spec) return;
+    const line = 'CONTRACT :: ' + spec.label;
+    const w = tww(line, 5) + 16;
+    term(c, CX - w / 2, 210, w, 12, '#c8c8c8', 'rgba(6,8,10,0.9)');
+    txt(c, line, CX, 213, { size: 5, color: '#d8d8d8', align: 'center' });
+    txt(c, 'free now  ::  cover back if kept  ::  more than the price if broken',
+      CX, 226, { size: 5, color: '#6a747c', align: 'center' });
   };
 
   /* ============================================================
@@ -36623,13 +36998,20 @@ G.Pool = function (factory, reset) {
   };
 
   /* ============================================================
-     INTEGRITY THREAT — the cost of a devil deal, in mechanics
-       lvl 1 (<75) unstable  : rot begins, glitch bursts
-       lvl 2 (<50) degraded  : enemies buffed, rooms grow bad sectors
-       lvl 3 (<25) critical  : BAD SECTOR sweeps hunt you in fights
-       lvl 4 (<10) panic     : sweeps double, every fight gains a body
+     COVER THREAT — the cost of a deal, in mechanics
+
+     THEME_AND_LEGS §1.1. The ladder below is unchanged; what changed is what
+     it is CALLED, because the mechanic was never arbitrary and the old name
+     made it read that way. Cover runs 100 clean -> 0 burned, so every
+     threshold, Stats.rot(), the rot50/rot20 achievements and the save field
+     keep their arithmetic exactly.
+
+       lvl 1 (<75) unstable  : you tripped something. log noise, glitch bursts
+       lvl 2 (<50) degraded  : they are scanning. processes run hot, sectors rot
+       lvl 3 (<25) critical  : active countermeasures. IDS sweeps hunt you
+       lvl 4 (<10) panic     : root is on the box. two sweeps, one extra body
      ============================================================ */
-  const SKIP_THREAT = { shop: 1, treasure: 1, secret: 1, superSecret: 1, devil: 1, angel: 1, library: 1, start: 1 };
+  const SKIP_THREAT = { shop: 1, treasure: 1, secret: 1, superSecret: 1, devil: 1, angel: 1, grey: 1, library: 1, start: 1 };
 
   function applyThreat(room, ctx) {
     const run = ctx.run, rng = ctx.rng;
@@ -36699,7 +37081,11 @@ G.Pool = function (factory, reset) {
       s.sweeps.push({ x: dir > 0 ? T - 12 : W - T + 12, v: dir * (lv >= 4 ? 132 : 96), warn: 0.75 });
       FX.snd('glitch', { vol: 0.6, rate: 0.55 });
       FX.snd('deny', { vol: 0.35, rate: 0.5 });
-      if (G.UI && G.UI.popup) G.UI.popup('BAD SECTOR SWEEP', '#ff2a44');
+      /* IDS, not BAD SECTOR: a sweep only exists at threat 3+, which is the
+         rung where the fiction becomes active countermeasures rather than
+         decay. updateSweeps returns early below level 3, so this line has
+         no other case to name. */
+      if (G.UI && G.UI.popup) G.UI.popup('IDS SWEEP', '#ff2a44');
     }
     for (let i = s.sweeps.length - 1; i >= 0; i--) {
       const sw = s.sweeps[i];
@@ -36886,6 +37272,11 @@ G.Pool = function (factory, reset) {
       /* cross */
       mark(c, cx, cy) { c.fillRect(cx, cy - 2, 1, 5); c.fillRect(cx - 2, cy - 1, 5, 1); },
     },
+    grey: {
+      text: 'disclose', short: 'CVE', color: '#c8c8c8',
+      /* a clock face — the 90-day timeline, which is the whole idea */
+      mark(c, cx, cy) { c.fillRect(cx - 2, cy - 2, 4, 4); c.fillRect(cx, cy - 1, 1, 2); c.fillRect(cx, cy, 2, 1); },
+    },
     curse: {
       text: 'curse', short: 'CRSE', color: '#ff4a6a',
       mark(c, cx, cy) { c.fillRect(cx - 2, cy, 5, 1); c.fillRect(cx - 1, cy - 2, 1, 2); c.fillRect(cx + 1, cy + 1, 1, 2); },
@@ -36961,10 +37352,44 @@ G.Pool = function (factory, reset) {
     chance = clamp(chance, 0.06, 0.92);
     if (!rng.chance(chance)) return;
 
+    /* THREE DOORS — docs/THEME_AND_LEGS.md §1.2.
+       The first roll (above) decides WHETHER a door opens and is unchanged.
+       This one decides which, and it is now three-way rather than two.
+
+       Grey sits between the other two on purpose. It is offered most when the
+       player has already burned cover — black is the door they can no longer
+       afford, white is the door they have not earned, and grey is the one that
+       will still deal with them. That is the leg §1.2 asks for: the door that
+       gives the run a middle. */
     let angel = 0.04;
     if (s.deals === 0) angel = clamp(0.35 + 0.22 * s.refused, 0.35, 0.8);
-    const type = rng.chance(angel) ? 'angel' : 'devil';
-    if (type === 'devil' && integ(run) - 10 < MIN_INTEGRITY) return;   /* nothing left to sell */
+    /* Can the player afford ANY black altar this floor? The old test assumed a
+       price of 10 and so fired only below 15 cover, while the altar itself
+       refuses at `integ - a.cost < MIN_INTEGRITY` with a.cost pinned near 25 —
+       refusing below 30. Across cover 15..29 a black door therefore opened
+       onto a room whose every altar printed PANIC RISK: a dud, roughly 30% of
+       doors in that band. Ask the same helper the altar prices itself with. */
+    const worstPrice = blackPrice({ quality: 4 }, run.floorIndex || 1, run, 4);
+    const broke = integ(run) - worstPrice < MIN_INTEGRITY;
+    /* one contract at a time: an unresolved bounty means no second bet */
+    const greyOk = !(G.Bounty && G.Bounty.active(run));
+    const wGrey = greyOk ? clamp(0.18 + (100 - integ(run)) * 0.004, 0.18, 0.46) : 0;
+    /* ONE normalised draw over three weights, not a chain of conditional
+       rolls. The chain was wrong and quietly so: `grey / (1 - angel)` is grey's
+       share OF THE REMAINDER, and when angel climbs to its 0.8 ceiling — which
+       it does once the player has refused a couple of devil rooms — that ratio
+       goes to 0.9 and black is squeezed to 2%. `special` caught it as "devil
+       rooms appear" going red over 24 floors.
+       Black also keeps a floor: it is the oldest door in the game and the one
+       the threat ladder is built around, so it may be made rarer by the other
+       two but never crowded out by them. */
+    const wDevil = Math.max(0.20, 1 - angel - wGrey);
+    const total = angel + wGrey + wDevil;
+    const roll = rng.range(0, total);
+    let type = roll < angel ? 'angel' : roll < angel + wGrey ? 'grey' : 'devil';
+    /* nothing left to sell: black is unaffordable, so fall through to the door
+       that charges nothing up front rather than opening no door at all */
+    if (type === 'devil' && broke) type = greyOk ? 'grey' : 'angel';
 
     const room = growDealRoom(floor, bossRoom, type, run, rng);
     if (!room) return;
@@ -36973,11 +37398,13 @@ G.Pool = function (factory, reset) {
 
     /* the reveal */
     const dev = type === 'devil';
-    FX.snd(dev ? 'devilDeal' : 'heal', { vol: 0.9, rate: dev ? 0.7 : 1 });
+    const gry = type === 'grey';
+    const revCol = dev ? '#ff2a44' : gry ? '#c8c8c8' : '#fff3c0';
+    FX.snd(dev ? 'devilDeal' : gry ? 'uiSelect' : 'heal', { vol: 0.9, rate: dev ? 0.7 : gry ? 0.75 : 1 });
     FX.snd('doorOpen', { vol: 0.8, rate: 0.7 });
-    FX.snd(dev ? 'curse' : 'activeReady', { vol: 0.8 });
-    FX.shake(11, 0.6);
-    FX.flash(dev ? '#ff0022' : '#ffffff', 0.32);
+    FX.snd(dev ? 'curse' : gry ? 'tick' : 'activeReady', { vol: 0.8 });
+    FX.shake(gry ? 6 : 11, gry ? 0.35 : 0.6);
+    FX.flash(dev ? '#ff0022' : gry ? '#b0b0b0' : '#ffffff', gry ? 0.2 : 0.32);
     FX.glitch(dev ? 0.8 : 0.25, 0.5);
     FX.zoom(0.05, 0.4);
     for (let i = 0; i < 4; i++) {
@@ -36985,12 +37412,14 @@ G.Pool = function (factory, reset) {
       if (!dd || dd.to !== room) continue;
       const v = DVEC[DIRS[i]];
       const x = CX + v[0] * (W / 2 - 16), y = CY + v[1] * (H / 2 - 16);
-      FX.parts(x, y, 34, { color: dev ? '#ff2a44' : '#fff3c0', speed: 170, life: 0.9, size: 2.8, add: true });
-      FX.ring(x, y, { color: dev ? '#ff2a44' : '#fff3c0', n: 26, speed: 210 });
+      FX.parts(x, y, 34, { color: revCol, speed: 170, life: 0.9, size: 2.8, add: true });
+      FX.ring(x, y, { color: revCol, n: 26, speed: 210 });
     }
     if (G.UI && G.UI.popup) {
-      G.UI.popup(dev ? 'A DOOR OPENS :: /dev/mem' : 'A DOOR OPENS :: signed cert',
-        dev ? '#ff2a44' : '#ffe9a8');
+      G.UI.popup(dev ? 'A DOOR OPENS :: /dev/mem'
+        : gry ? 'A DOOR OPENS :: disclosure'
+          : 'A DOOR OPENS :: signed cert',
+        dev ? '#ff2a44' : gry ? '#c8c8c8' : '#ffe9a8');
     }
     if (G.Render && G.Render.invalidateRooms) { try { G.Render.invalidateRooms(); } catch (e) { } }
   }
@@ -37118,7 +37547,7 @@ G.Pool = function (factory, reset) {
 
     /* the integrity readout, screaming */
     const flash = lv >= 3 && ((G.time * 4) | 0) % 2 === 0;
-    const lbl = 'INTEGRITY ' + Math.round(i) + '%  ' + THREAT_NAME[lv];
+    const lbl = 'COVER ' + Math.round(i) + '%  ' + THREAT_NAME[lv];
     c.globalAlpha = lv >= 2 ? 1 : 0.6;
     txt(c, lbl, G.VW - 6, G.VH - 9, {
       size: 5, align: 'right', color: flash ? '#ffffff' : lv >= 4 ? '#ffc86a' : lv >= 3 ? '#ff2a44' : lv >= 2 ? '#ffb04a' : '#ffd24a',
@@ -37293,6 +37722,10 @@ G.Pool = function (factory, reset) {
       }
       if (room.type === 'devil') s.lastDevil = room;
 
+      if (room.type === 'boss' && G.Bounty) {
+        try { G.Bounty.onBossEnter(room, run); } catch (e) { console.warn('bounty.onBossEnter', e); }
+      }
+
       d.entered++;
       if (d.entered === 1) beat(run, room);
 
@@ -37337,6 +37770,7 @@ G.Pool = function (factory, reset) {
     onClear(room, ctx) {
       if (!room || !ctx || !ctx.run) return;
       const run = ctx.run, s = st(run);
+      if (G.Bounty) { try { G.Bounty.onClear(room, run, s); } catch (e) { console.warn('bounty.onClear', e); } }
       if (room.type !== 'boss') return;
       s.restock = true;
       later(run, 1.5, function () {
@@ -37415,6 +37849,33 @@ G.Pool = function (factory, reset) {
     integrity: integ,
     state: st,
     THREAT_NAME: THREAT_NAME,
+    HAT: HAT,
+    hat: hat,
+    dealt: dealt,
+    hatOf(run) { const h = hat(run); return h ? HAT[h] : null; },
+
+    /* ---- run-scope deal record, for the snapshot ----
+       run.sp was never persisted, so the deal record has always reset on a
+       resume. That was invisible while it only fed door odds. §1.3 makes it
+       the player's IDENTITY — the hat is derived from these three counters and
+       shown in the HUD — so a resume that silently took your hat off is now a
+       visible bug rather than a quiet one. Additive, like the bounty field:
+       an old snapshot has no key and restores as "no deals yet". */
+    saveRun(run) {
+      const s = run && run.sp; if (!s) return null;
+      return {
+        b: s.blackDeals || 0, w: s.whiteDeals || 0, g: s.greyDeals || 0,
+        d: s.deals || 0, rf: s.refused || 0, of: s.offered || 0,
+        cs: s.cleanStreak || 0, pc: s.prevClean ? 1 : 0,
+      };
+    },
+    loadRun(run, o) {
+      if (!run || !o) return;
+      const s = st(run); if (!s) return;
+      s.blackDeals = o.b || 0; s.whiteDeals = o.w || 0; s.greyDeals = o.g || 0;
+      s.deals = o.d || 0; s.refused = o.rf || 0; s.offered = o.of || 0;
+      s.cleanStreak = o.cs || 0; s.prevClean = !!o.pc;
+    },
     MIN_INTEGRITY: MIN_INTEGRITY,
     forceDealDoor(type) {
       const g = G.Game, run = g && g.run;
@@ -37425,8 +37886,394 @@ G.Pool = function (factory, reset) {
       if (r) g.floor.boss.dealDoor = type || 'devil';
       return r;
     },
-    types: ['shop', 'treasure', 'devil', 'angel', 'secret', 'superSecret',
+    types: ['shop', 'treasure', 'devil', 'angel', 'grey', 'secret', 'superSecret',
       'curse', 'sacrifice', 'challenge', 'library', 'arcade', 'hackbay'],
+  };
+})();
+
+
+/* ===== 553_bounty.js ===== */
+/* ============================================================
+   BIND69 — GREY HAT BOUNTIES                    (owner: WORLD2)
+
+   docs/THEME_AND_LEGS.md §1.2. The third door.
+
+   Black hat is a PRICE: you know what it costs at the altar and you can
+   compute whether to pay. White hat is FREE. Grey hat is the only one of the
+   three whose outcome is not known when you sign it — the item is free, and
+   it carries a contract that reaches forward into the next floor.
+
+     honour it -> keep the item AND gain cover
+     fail it   -> keep the item, and burn MORE cover than the equivalent
+                  black-hat deal would have cost
+
+   The item is never taken back. A roguelike that confiscates a pickup teaches
+   players not to take the interesting door, and the interesting door is the
+   entire point of this file.
+
+   Why its own module rather than another section of 550_special.js: that file
+   is 3,794 lines and STRUCTURE_AND_OWNERSHIP.md §2 is about what that costs —
+   a file is a mutex, and every agent who touches deals afterwards would have
+   to read all of it. §1.4 proposed splitting 550 by room type to make room for
+   this work; the deals machinery turned out NOT to cut cleanly (SETUP/UPDATE/
+   DRAW/OVER for devil and angel are five non-adjacent spans sharing the draw
+   helpers and run-scope bookkeeping at the top of the file), so the split was
+   dropped and the NEW subsystem went somewhere new instead. Band 550-599 is
+   WORLD2 either way.
+   ============================================================ */
+(function () {
+  const clamp = G.clamp;
+
+  /* The four contracts of §1.2. Each is a closure over run-scope counters that
+     already exist, which is why this costs a table rather than a system:
+       - `arm`   snapshots whatever the condition measures against
+       - `test`  returns true (honoured), false (failed), or null (still open)
+     A contract is checked at the moment §1.2 says it resolves and never
+     polled, so a bounty costs nothing per frame. */
+  const TABLE = {
+    /* clear the next floor without taking damage */
+    clean: {
+      id: 'clean', at: 'floor',
+      label: 'NO DAMAGE, NEXT FLOOR',
+      brief: 'Clear the next floor without being hit.',
+      arm() { return {}; },
+      test(b, s) { return s.floorDmg === 0; },
+    },
+
+    /* kill the next boss inside N seconds of entering its room */
+    fastboss: {
+      id: 'fastboss', at: 'boss',
+      label: 'BOSS IN 90s',
+      brief: 'Kill the next boss within 90 seconds of entering.',
+      arm() { return { limit: 90, t: -1 }; },
+      test(b) { return b.t >= 0 && b.t <= b.limit; },
+    },
+
+    /* reach the next boss holding no black-hat item you did not already have */
+    nodeals: {
+      id: 'nodeals', at: 'boss',
+      label: 'NO NEW BLACK HAT',
+      brief: 'Reach the next boss taking no new black-hat item.',
+      arm(run) { return { had: blackCount(run) }; },
+      test(b, s, run) { return blackCount(run) <= b.had; },
+    },
+
+    /* clear the next three rooms without pulling the trigger more than N
+       times. Counted in TRIGGER PULLS, not packets: COMBAT increments once per
+       volley (400_player.js fire()), so a shotCount-14 build and a shotCount-1
+       build are asked for the same discipline rather than the multishot build
+       being asked for fourteen times as much. The label says what is counted. */
+    quiet: {
+      id: 'quiet', at: 'rooms',
+      label: '3 ROOMS, FEW PACKETS',
+      brief: 'Clear three rooms without leaning on the trigger.',
+      arm(run) { return { need: 3, done: 0, cap: quietCap(run), shots: shotsFired(run) }; },
+      test(b, s, run) { return shotsFired(run) - b.shots <= b.cap; },
+    },
+  };
+  const ORDER = ['clean', 'fastboss', 'nodeals', 'quiet'];
+
+  /* A flat cap of 120 pulls measured the player's FIRE RATE, not their
+     discipline. Measured by a critic's autopilot over the same rooms and seed:
+     at the base 0.40 fireDelay three rooms cost 68-83 pulls, comfortably
+     inside 120; at a legal 0.12 fireDelay ONE contested room cost 200+. Clear
+     TIMES were near-identical between the two builds (22-27s on the big
+     rooms), so pulls scaled with rate at exactly the fireDelay ratio — 2.4/s
+     against 7.5/s. Pulls-to-clear is time-to-clear x fire rate, so a fixed cap
+     is a time limit divided by a stat every build is rewarded for maximising,
+     and a rapid build failed the contract by playing normally.
+
+     The cap therefore scales with the same term. Snapshot at arm time so the
+     number the altar states is the number the player is held to, and bounded
+     because fireDelay's floor is 0.06 (300_stats.js) and an unbounded ratio
+     would print an absurd figure.
+
+     The honest version of this contract counts SECONDS OF TRIGGER HELD, which
+     needs a counter COMBAT does not keep. This is the cheap correction, not
+     the right one, and it is written down as such. */
+  const QUIET_BASE_DELAY = 0.40, QUIET_BASE_CAP = 120;
+  function quietCap(run) {
+    const p = G.Game && G.Game.player;
+    const fd = (p && p.stats && p.stats.fireDelay) || QUIET_BASE_DELAY;
+    const k = clamp(QUIET_BASE_DELAY / Math.max(0.06, fd), 1, 5);
+    return Math.round(QUIET_BASE_CAP * k);
+  }
+
+  /* How many BLACK-HAT-DOOR items the player is carrying. Counted off the live
+     loadout rather than a tally, so an item removed by any means counts as
+     removed and the contract cannot be gamed by a route this file does not
+     know about.
+
+     Counts pool membership, NOT the `.devil` flag. The `devil` POOL is 24
+     items and only 10 of them carry the flag — the other 14 (vampiretap,
+     panic, oomkiller, zeroday, ...) merely list `devil` in `pools` and are sold
+     from exactly the same altar. Counting the flag meant a player under NO NEW
+     BLACK HAT could walk up to a black altar, buy `oomkiller`, and honour the
+     contract anyway: precisely the route this function's own comment claimed
+     could not exist. What the contract is about is the DOOR you took, so the
+     door's stock is what it counts. */
+  function fromBlackDoor(def) {
+    if (!def) return false;
+    if (def.devil) return true;
+    const pools = def.pools;
+    return !!(pools && pools.indexOf && pools.indexOf('devil') >= 0);
+  }
+  function blackCount(run) {
+    const p = G.Game && G.Game.player;
+    if (!p || !p.items) return 0;
+    let n = 0;
+    for (let i = 0; i < p.items.length; i++) if (fromBlackDoor(p.items[i])) n++;
+    return n;
+  }
+
+  /* Total packets the player has emitted this run. COMBAT owns the counter;
+     absent it, the `quiet` contract cannot be judged and must not be offered
+     (see pick(), which drops any contract whose instrument is missing).
+     "Could not measure" is a failure, never an omission — POLISH_PHASE.md. */
+  function shotsFired(run) {
+    const p = G.Game && G.Game.player;
+    return (p && p.mem && typeof p.mem.shotsFired === 'number') ? p.mem.shotsFired : -1;
+  }
+  /* p.mem.shotsFired resets to 0 in Player.create and is NOT in the snapshot,
+     so a `quiet` contract armed at baseline 300 came back reading live 0 and
+     honoured itself: (0 - 300) <= 120 is trivially true. Free cover on demand,
+     by saving and loading. Rebasing the snapshot onto the restored counter
+     keeps the contract measuring the same DISTANCE it was armed to measure. */
+  function rebase(run) {
+    const b = run && run.bounty;
+    if (!b || b.at !== 'rooms') return;
+    const live = shotsFired(run);
+    if (live < 0) return;
+    if (b.shots == null || live < b.shots) b.shots = live;
+  }
+  function canMeasure(id, run) {
+    return id !== 'quiet' || shotsFired(run) >= 0;
+  }
+
+  /* THE STAKE, and the mistake it exists to stop repeating.
+
+     The first version used a flat BURN = 30, chosen against the 10..25 an
+     altar charges at the door — and missed that a black-hat item ALSO taxes
+     cover in its own onPickup. The real bill is both: measured mean 34.1,
+     median 40, range 23..43 over 60 forced deals. Against that, grey cost 30
+     if you failed EVERY contract, so black was strictly dominated at every win
+     rate including zero and there was never a reason to take it.
+
+     So the stake is DERIVED from what the item taken would actually have cost
+     (SpecialRooms.blackTotal), and the two doors cannot drift apart when item
+     prices change:
+
+       break it  -> burn  stake * 1.6
+       honour it -> gain  stake * 0.45
+
+     which puts the break-even honour rate at ~29%: grey is the right call for
+     a player who can keep a contract three times in ten, and a bad one below
+     that. The multipliers are the design knob; the stake is not a guess. */
+  const BURN_MUL = 1.6;
+  const HONOUR_MUL = 0.45;
+  const STAKE_FALLBACK = 34;   /* the measured mean, if a caller omits it */
+
+  function burnFor(b) { return Math.round((b && b.stake || STAKE_FALLBACK) * BURN_MUL); }
+  function honourFor(b) { return Math.round((b && b.stake || STAKE_FALLBACK) * HONOUR_MUL); }
+
+  function cover(run, d) {
+    if (G.Stats && G.Stats.integrity) { try { return G.Stats.integrity(run, d); } catch (e) { } }
+    run.integrity = clamp((run.integrity == null ? 100 : run.integrity) + d, 0, 100);
+    return run.integrity;
+  }
+  function fx() { return (G.Stats && G.Stats.fx && G.Stats.fx()) || null; }
+  function popup(text, col) { if (G.UI && G.UI.popup) G.UI.popup(text, col); }
+
+  const B = G.Bounty = {
+    TABLE: TABLE,
+    ORDER: ORDER,
+    BURN_MUL: BURN_MUL,
+    HONOUR_MUL: HONOUR_MUL,
+    burnFor: burnFor,
+    honourFor: honourFor,
+    /* what this contract is worth, for the surfaces that must state the terms
+       BEFORE the player signs */
+    termsFor(stake) {
+      const b = { stake: stake };
+      return { gain: honourFor(b), burn: burnFor(b) };
+    },
+
+    /* Seeded, per content rule 5: a bounty is a gameplay roll. */
+    pick(run, rng) {
+      const pool = ORDER.filter(id => canMeasure(id, run));
+      if (!pool.length) return null;
+      const r = rng || (run && run.rng);
+      return TABLE[pool[r ? r.int(pool.length) : 0]];
+    },
+
+    active(run) { return (run && run.bounty) || null; },
+
+    /* pulls spent against a `rooms` contract, for the HUD */
+    shotsSince(run) {
+      const b = B.active(run);
+      if (!b || b.shots == null) return 0;
+      const live = shotsFired(run);
+      return live < 0 ? 0 : Math.max(0, live - b.shots);
+    },
+
+    /* Arm a contract. Called from the altar the instant the item is granted,
+       so a signed contract and a held item can never disagree. */
+    arm(run, spec, stake) {
+      if (!run || !spec) return null;
+      /* One contract at a time. The invariant lived only in the CALLER
+         (tryDealDoor's `greyOk`), so any other route — forceDealDoor, a future
+         second grey source — silently discarded a live bet and its stake.
+         An invariant enforced only by its callers is not an invariant. */
+      if (run.bounty) {
+        console.warn('Bounty.arm: a contract is already live (' + run.bounty.id +
+          '); refusing to overwrite it with ' + spec.id);
+        return run.bounty;
+      }
+      const b = spec.arm(run) || {};
+      b.id = spec.id;
+      b.at = spec.at;
+      /* Stake what the player can actually LOSE. Stats.integrity clamps cover
+         to [0,100], so a nominal burn larger than the cover held truncates
+         while the reward does not — and the effective bet inverts exactly
+         where the player is most desperate. Measured on the unclamped version:
+         at 100 cover the wager was -64/+18, at 15 cover it was -15/+18, a
+         REWARD for signing. And tryDealDoor offers grey hardest at low cover
+         (wGrey rises as cover falls), so the game pushed hardest on the free
+         roll. Clamping the stake to cover-on-hand keeps risk above reward at
+         every point on the curve. */
+      const held = run.integrity == null ? 100 : run.integrity;
+      const want = stake > 0 ? stake : STAKE_FALLBACK;
+      b.stake = Math.max(6, Math.min(want, Math.floor(held / BURN_MUL)));
+      b.floor = run.floorIndex || 1;
+      run.bounty = b;
+      popup('CONTRACT SIGNED :: ' + spec.label, '#c8c8c8');
+      const f = fx(); if (f) f.snd('activeReady', { vol: 0.7, rate: 0.8 });
+      return b;
+    },
+
+    /* ---- the three resolution points ---- */
+
+    /* A new floor began, and `clean` resolves against the floor just LEFT —
+       which is why the arithmetic here is +1 and not 0.
+
+       The obvious guard, `floorIndex <= b.floor`, is wrong and was wrong in a
+       way nothing caught. Game.enterFloor sets run.floorIndex BEFORE calling
+       FloorGen.generate (700_game.js:362), and decorateFloor — which calls
+       this — runs inside that generate. So on the very first transition after
+       signing, floorIndex is already the new floor and the guard passes.
+
+       The grey door grows after the boss dies, so the player signs at the END
+       of floor N. Resolving on arrival at N+1 judged floor N: a floor already
+       finished, zero rooms of "the next floor" played, decided the instant the
+       trapdoor was touched. Worse, it was anti-correlated with skill —
+       tryDealDoor opens at 0.58 when the floor was clean against 0.14 when it
+       was not, so `clean` was mostly offered already-won and, when offered
+       dirty, already lost.
+
+       Judging floor N+1 means resolving on arrival at N+2. s.floorDmg still
+       holds the departing floor's tally at this point (decorateFloor clears it
+       immediately after), so it is the right number at the right moment. */
+    onFloor(run, s) {
+      const b = B.active(run);
+      if (!b || b.at !== 'floor') return;
+      if ((run.floorIndex || 1) <= b.floor + 1) return;
+      B.resolve(run, TABLE[b.id].test(b, s, run));
+    },
+
+    /* a room was cleared. Feeds `rooms`, and closes `boss` on the boss room. */
+    onClear(room, run, s) {
+      const b = B.active(run);
+      if (!b || !room) return;
+      if (b.at === 'rooms') {
+        if (room.type === 'shop' || room.type === 'treasure') return;
+        b.done = (b.done || 0) + 1;
+        if (b.done >= b.need) B.resolve(run, TABLE[b.id].test(b, s, run));
+        return;
+      }
+      if (b.at === 'boss' && room.type === 'boss') {
+        /* `fastboss` is judged on a clock started by onBossEnter. If that hook
+           never fired the elapsed time is UNKNOWN, and the tempting default —
+           treat it as 0 — hands the player a free honour for an instrument
+           that was not running. POLISH_PHASE.md's rule: "could not measure" is
+           a failure, never an omission. Say so loudly and leave the contract
+           open rather than resolving it on a number nobody measured. */
+        if (b.id === 'fastboss' && b.enter == null) {
+          console.warn('Bounty.fastboss: boss cleared with no entry time — onBossEnter never fired');
+          return;
+        }
+        if (b.t == null || b.t < 0) b.t = (run.time || 0) - b.enter;
+        B.resolve(run, TABLE[b.id].test(b, s, run));
+      }
+    },
+
+    /* The NEXT boss room was entered — starts the clock `fastboss` is judged on.
+       Two guards, both learned the hard way.
+
+       `room.cleared`: the trapdoor spawns inside the boss room (700_game.js),
+       and the deal door grows off that same room, so the player MUST walk back
+       into the cleared floor-N boss room to descend. Starting the clock there
+       made the contract read "clear the whole next floor AND its boss in 90
+       seconds" — close to unwinnable, and it fired on every single run.
+
+       `floorIndex > b.floor`: the signing floor's boss is never the next boss,
+       whatever state it is in. */
+    onBossEnter(room, run) {
+      const b = B.active(run);
+      if (!b || b.at !== 'boss') return;
+      if (!room || room.cleared) return;
+      if ((run.floorIndex || 1) <= b.floor) return;
+      if (b.enter == null) b.enter = run.time || 0;
+    },
+
+    /* The run ended with a contract still open. It must not simply vanish —
+       that is a signed bet the game quietly declined to settle, with no cover
+       move and no message. Judged on its own terms where that is possible
+       (`quiet` and `nodeals` are both answerable at any moment), and treated as
+       unfulfilled where it is not: `clean` and `fastboss` name a floor and a
+       boss that never arrived. Winning does not honour a contract you did not
+       complete, and it does not silently forgive one either. */
+    onRunEnd(run) {
+      const b = B.active(run);
+      if (!b) return;
+      const spec = TABLE[b.id];
+      let ok = false;
+      if (spec && (b.at === 'rooms' || b.id === 'nodeals')) {
+        try { ok = !!spec.test(b, (run && run.sp) || {}, run); } catch (e) { ok = false; }
+      }
+      B.resolve(run, ok);
+    },
+
+    resolve(run, ok) {
+      const b = B.active(run);
+      if (!b) return;
+      run.bounty = null;
+      run.bountyDone = (run.bountyDone || 0) + 1;
+      const gain = honourFor(b), burn = burnFor(b);
+      if (ok) {
+        run.bountyKept = (run.bountyKept || 0) + 1;
+        cover(run, +gain);
+        popup('CONTRACT HONOURED :: +' + gain + '% COVER', '#8ef05a');
+        const f = fx();
+        if (f) { f.snd('secretFound', { vol: 0.9 }); f.flash('#8ef05a', 0.22); }
+      } else {
+        cover(run, -burn);
+        popup('CONTRACT BURNED :: -' + burn + '% COVER', '#ff3a5c');
+        const f = fx();
+        if (f) {
+          f.snd('curse', { vol: 0.9 }); f.snd('glitch', { vol: 0.7, rate: 0.6 });
+          f.flash('#ff0022', 0.35); f.shake(12, 0.6); f.glitch(1, 0.9);
+        }
+      }
+    },
+
+    /* ---- save ---- additive: an old snapshot with no field restores as
+       "no contract", so this needs no SNAP_V bump. */
+    save(run) { return run && run.bounty ? run.bounty : null; },
+    load(run, o) {
+      if (!run) return;
+      run.bounty = o || null;
+      rebase(run);
+    },
   };
 })();
 
@@ -37592,6 +38439,7 @@ G.Pool = function (factory, reset) {
     shop: { label: 'SHOP', draw: gCart },
     devil: { label: 'DEAL', draw: gHorns, urgent: true },
     angel: { label: 'CERT', draw: gWing, urgent: true },
+    grey: { label: 'CVE', draw: gClock, urgent: true },
     library: { label: 'DOCS', draw: gBook },
     arcade: { label: 'PLAY', draw: gDie },
     curse: { label: 'CURSE', draw: gSkullSmall },
@@ -37614,6 +38462,7 @@ G.Pool = function (factory, reset) {
     boss: { text: 'boss', short: 'BOSS', color: '#ff3a2a' },
     devil: { text: '/dev/mem', short: 'DEAL', color: '#ff2a44' },
     angel: { text: 'cert', short: 'CERT', color: '#ffe9a8' },
+    grey: { text: 'disclose', short: 'CVE', color: '#c8c8c8' },
     curse: { text: 'curse', short: 'CURSE', color: '#ff4a6a' },
     arcade: { text: 'arcade', short: 'PLAY', color: '#ff6ad8' },
     library: { text: 'man', short: 'MAN', color: '#8ecfff' },
@@ -37687,6 +38536,14 @@ G.Pool = function (factory, reset) {
     px(c, x - 3 * s, y, 2 * s, 2 * s);
     px(c, x + 1 * s, y, 2 * s, 2 * s);
   }
+  function gClock(c, x, y, s) {         /* grey hat: a 90-day clock, hands set */
+    px(c, x - 3 * s, y - 3 * s, 6 * s, 1 * s);
+    px(c, x - 3 * s, y + 2 * s, 6 * s, 1 * s);
+    px(c, x - 3 * s, y - 2 * s, 1 * s, 4 * s);
+    px(c, x + 2 * s, y - 2 * s, 1 * s, 4 * s);
+    px(c, x, y - 1 * s, 1 * s, 2 * s);
+    px(c, x, y, 2 * s, 1 * s);
+  }
   function gBook(c, x, y, s) {          /* open book */
     px(c, x - 3 * s, y - 2 * s, 3 * s, 4 * s);
     px(c, x + 1 * s, y - 2 * s, 3 * s, 4 * s);
@@ -37749,7 +38606,7 @@ G.Pool = function (factory, reset) {
      information the player needs before walking across the floor */
   const DOORCOL = {
     locked: '#ffe36a', boss: '#ff3a5c', secret: '#c08cff',
-    devil: '#ff2a4a', angel: '#fff2b0', bomb: '#cfd8e0',
+    devil: '#ff2a4a', angel: '#fff2b0', grey: '#c8c8c8', bomb: '#cfd8e0',
   };
   function doorCol(d) { return (d && DOORCOL[d.kind]) || 'rgba(180,220,210,.55)'; }
 
@@ -37875,8 +38732,11 @@ G.Pool = function (factory, reset) {
       /* This strip is the whole reason the vignette is punched out over rows
          0..ROOM_Y-2, so the exemption is claimed HERE, where the strip is
          actually drawn. Screens that draw no HUD never raise it and keep the
-         full-frame vignette. Render.beginFrame clears it each frame. */
-      G.Render.hudStrip(true);
+         full-frame vignette. Render.beginFrame clears it each frame.
+         Read through G.Render fresh rather than a module-load capture, and
+         guarded, because UI must survive ART being absent: spine rips both
+         siblings out mid-run, and unguarded this threw once per frame. */
+      if (G.Render && G.Render.hudStrip) G.Render.hudStrip(true);
 
       /* --- storage (half-disk granularity) ---
          data disks first, then scratch. Capped at two rows of six; the
@@ -37942,16 +38802,59 @@ G.Pool = function (factory, reset) {
         txt(c, 'depth ' + fl.index + ' / 8', 168, 20, { size: 5, color: 'rgba(200,230,220,.5)' });
       }
 
-      /* --- integrity bar (devil-deal corruption) --- */
+      /* --- cover bar (what the deals cost you) ---
+         THEME_AND_LEGS §1.1: the ladder was always good, its NAME was the
+         problem. "low integrity spawns a red band that chases you" is
+         arbitrary; "your cover is blown, so they are sweeping for you" is
+         self-explanatory. The field stays run.integrity — it rides the save
+         blob and the arithmetic is unchanged — only the word the player
+         reads moves. */
       const integ = run.integrity != null ? run.integrity : 100;
       if (integ < 100) {
         const w = 74;
-        txt(c, 'INTEGRITY', 168, 32, { size: 5, color: 'rgba(200,230,220,.45)' });
+        txt(c, 'COVER', 168, 32, { size: 5, color: 'rgba(200,230,220,.45)' });
         c.fillStyle = 'rgba(0,0,0,.55)'; c.fillRect(168, 40, w, 5);
         const k = clamp(integ / 100, 0, 1);
         c.fillStyle = k > 0.6 ? '#4af0b0' : k > 0.3 ? '#ffd24a' : '#ff3a5c';
         c.fillRect(168, 40, w * k, 5);
         c.strokeStyle = 'rgba(255,255,255,.15)'; c.strokeRect(168.5, 40.5, w - 1, 4);
+      }
+
+      /* --- the hat, beside cover — docs/THEME_AND_LEGS.md §1.3 ---
+         Derived from the deal record, so it appears the moment the run has
+         actually said something about itself and not before. Drawn to the
+         RIGHT of the bar rather than under it: the bar only exists once cover
+         has been spent, and the hat has to be able to show on a run that took
+         a white deal and is still at 100. */
+      const hatDef = G.SpecialRooms && G.SpecialRooms.hatOf && G.SpecialRooms.hatOf(run);
+      if (hatDef) {
+        txt(c, hatDef.name, 168 + (integ < 100 ? 80 : 0), 32,
+          { size: 5, color: hatDef.color });
+      }
+
+      /* --- a live grey contract ---
+         The terms are on the wall in the grey room and then the player carries
+         the bet into the NEXT floor, where §1.2 says it should colour how that
+         floor is played. It cannot: without a readout the player has two
+         transient popups and then nothing. A bet you cannot see is not a bet
+         you can play toward, it is just a delayed penalty.
+         Shows what is owed and, where the contract counts something, how far
+         along it is. */
+      const bo = G.Bounty && G.Bounty.active(run);
+      if (bo) {
+        const spec = G.Bounty.TABLE[bo.id];
+        const terms = G.Bounty.termsFor(bo.stake);
+        let label = spec ? spec.label : 'CONTRACT';
+        if (bo.at === 'rooms' && bo.need) {
+          label += '  ' + (bo.done || 0) + '/' + bo.need;
+          /* the cap is build-scaled and only knowable at arm time, so print
+             the live count against the real number rather than a constant */
+          const used = (G.Bounty.shotsSince && G.Bounty.shotsSince(run)) || 0;
+          label += '   ' + used + '/' + bo.cap;
+        }
+        txt(c, label, 168, 50, { size: 5, color: '#c8c8c8' });
+        txt(c, '+' + terms.gain + ' / -' + terms.burn, 168 + tw(label, 5) + 8, 50,
+          { size: 5, color: 'rgba(200,200,200,.55)' });
       }
 
       /* --- passive item strip --- */
@@ -38578,16 +39481,32 @@ G.Pool = function (factory, reset) {
     magazine(c, x, y, s, u) {
       for (let i = 0; i < 3; i++) px(c, x + s + u * 0.5, y + u * 2 + i * u * 4, u * 1.5, u * 2.5);
     },
-    /* pact — horns. The cost is the point. */
-    horns(c, x, y, s, u) {
-      px(c, x, y - u * 3, u, u * 3); px(c, x + u, y - u * 2, u, u);
-      px(c, x + s - u, y - u * 3, u, u * 3); px(c, x + s - u * 2, y - u * 2, u, u);
+    /* THE HAT BRIM — docs/THEME_AND_LEGS.md §1.4.
+       One shared bar over the icon says "this came from a deal"; how much of
+       the CROWN above it is filled says which deal. The frame colour is the
+       item's own (see frameColor below), so tint cannot be the channel that
+       separates the three — that is precisely the mistake the memory-pages
+       round spent five attempts proving: "a half-filled square at 8px reads as
+       a slightly dimmer square." A crown that is solid, hollow or split says it
+       structurally, at 1px, in peripheral vision, whatever colour it is. */
+    brim(c, x, y, s, u) { px(c, x + u, y - u * 2, s - u * 2, u); },
+    /* black hat — a solid crown. You paid, and it shows. */
+    brimBlack(c, x, y, s, u) {
+      FRAME.brim(c, x, y, s, u);
+      px(c, x + u * 3, y - u * 5, s - u * 6, u * 3);
     },
-    /* blessing — a halo */
-    halo(c, x, y, s, u) {
-      px(c, x + u * 3, y - u * 3, s - u * 6, u);
-      px(c, x + u * 2, y - u * 2, u, u); px(c, x + s - u * 3, y - u * 2, u, u);
+    /* white hat — an outlined crown, empty: it cost nothing. */
+    brimWhite(c, x, y, s, u) {
+      FRAME.brim(c, x, y, s, u);
+      px(c, x + u * 3, y - u * 5, s - u * 6, u);
+      px(c, x + u * 3, y - u * 4, u, u); px(c, x + s - u * 4, y - u * 4, u, u);
     },
+    /* There is no brimGrey. A grey item IS a black-hat item — same pool, same
+       altar stock, acquired under a contract instead of a price — so it wears
+       the black brim, and the grey identity lives on the RUN (SpecialRooms.hat)
+       rather than on any one pickup. A third frame shipped here for a while
+       referenced by nothing, its comment describing behaviour that did not
+       exist: dead code arguing against the decision actually taken. */
   };
 
   /* exposed so a gate can prove every ARCH frame token has an implementation:
@@ -39872,6 +40791,26 @@ G.Pool = function (factory, reset) {
       const run = Game.run;
       if (run.floorIndex >= 8) {
         run.won = true;
+        /* THREE ENDINGS — docs/THEME_AND_LEGS.md §1.3.
+           One branch on a win condition that already existed, which is why
+           this is the cheapest replayability in that document. The ending is
+           read off the hat the run DERIVED (550_special.js) rather than
+           anything the player was asked to declare, so what you get is a
+           report of how you played, not a menu choice you made an hour ago.
+           A run that took no deal at all has no hat and gets the unaligned
+           ending — which is a real outcome, not a fallback. */
+        /* settle any live grey contract BEFORE the hat is read: honouring one
+           can be the greyDeals-bearing act that decides the ending, and a
+           signed bet must never be silently dropped by winning. */
+        if (G.Bounty && G.Bounty.onRunEnd) {
+          try { G.Bounty.onRunEnd(run); } catch (e) { console.warn('bounty.onRunEnd', e); }
+        }
+        const SR = G.SpecialRooms;
+        const h = (SR && SR.hat && SR.hat(run)) || null;
+        /* `none` means NO DEAL WAS EVER TAKEN. A run that dealt but never
+           committed hard enough to earn a hat is a different outcome and gets
+           its own line — it used to be told it had taken none. */
+        run.ending = h || ((SR && SR.dealt && SR.dealt(run)) ? 'unaligned' : 'none');
         G.setState('victory');
         return;
       }
@@ -41609,6 +42548,16 @@ G.Pool = function (factory, reset) {
         f: run.floorIndex,
         r: {
           c: run.coins, b: run.bombs, k: run.keys, ig: run.integrity,
+          /* the grey-hat contract in flight. THEME_AND_LEGS §8 asked
+             whether a bounty survives save/restore: it must, because it
+             reaches across a floor boundary by design. ADDITIVE — an old
+             snapshot has no `bo` and restores as "no contract", so this
+             needs no SNAP_V bump and cannot damage a run in progress. */
+          bo: (G.Bounty && G.Bounty.save(run)) || null,
+          /* the deal record — WORLD2's run-scope counters. The HAT is
+             derived from these, so without them a resumed run loses its
+             identity and its ending. Additive; absent means no deals. */
+          sp: (G.SpecialRooms && G.SpecialRooms.saveRun(run)) || null,
           ss: run.statStreak || 0, sn: (run.itemsSeen || []).slice(),
           ki: run.kills || 0, rv: run.roomsVisited || 0, t: run.time || 0,
         },
@@ -41666,6 +42615,8 @@ G.Pool = function (factory, reset) {
       run.floorIndex = blob.f;
       run.coins = blob.r.c; run.bombs = blob.r.b; run.keys = blob.r.k;
       run.integrity = blob.r.ig; run.statStreak = blob.r.ss;
+      if (G.Bounty) G.Bounty.load(run, blob.r.bo || null);
+      if (G.SpecialRooms && G.SpecialRooms.loadRun) G.SpecialRooms.loadRun(run, blob.r.sp || null);
       run.itemsSeen = blob.r.sn.slice();
       run.kills = blob.r.ki; run.roomsVisited = blob.r.rv; run.time = blob.r.t;
 
