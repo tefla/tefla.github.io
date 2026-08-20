@@ -21745,6 +21745,87 @@ G.Pool = function (factory, reset) {
 })();
 
 
+/* ===== 324_items_delivery.js ===== */
+/* ============================================================
+   BIND69 — ARCHETYPE FAMILY: DELIVERY                (owner: ITEMS)
+
+   docs/DELIVERY_AND_DEFENCE.md §7. The behaviour lives in COMBAT
+   (420_deliveries.js) because a delivery is a rule of engagement, not a
+   number; this file is only the pickup that installs one.
+
+   The split is deliberate and matches the deployable/ward families: the
+   chassis is code written once, the variants carry none. Adding a seventh
+   delivery means a row in 420 and a row here, and neither is 400_player.js —
+   which is the success test §5 asked for.
+
+   Only the newest delivery is installed, the way weapon drivers already work.
+   Two deliveries at once would be a build with two rules of engagement, which
+   is not a decision — it is both.
+   ============================================================ */
+(function () {
+  const S = G.Stats;
+  if (!S) return;
+
+  function deliveryItem(def, deliveryId) {
+    def.archetype = 'delivery';
+    def.delivery = deliveryId;
+    def.tag = def.tag || 'passive';
+    def.quality = def.quality == null ? 4 : def.quality;
+    const prev = def.onPickup;
+    def.onPickup = function (p, run) {
+      p.mem.delivery = deliveryId;
+      const d = G.Deliveries && G.Deliveries.get(deliveryId);
+      if (!d) console.error('BIND69 items: delivery "' + deliveryId + '" is not registered');
+      S.fx().snd('activeReady', { vol: 0.9, rate: 0.8 });
+      S.fx().flash(def.color, 0.2);
+      if (prev) prev(p, run);
+    };
+    /* A delivery REPLACES the volley, so it must survive a restore: the
+       snapshot replays p.items by id and re-runs onPickup, which reinstalls
+       p.mem.delivery. Nothing extra to persist — the id rides the item list. */
+    return S.add(def);
+  }
+
+  deliveryItem({
+    id: 'raw_socket', name: 'raw socket', quality: 4, color: '#ff4a6a',
+    pools: ['treasure', 'boss', 'shop'], price: 26,
+    desc: 'No handshake, no retransmit. Whatever is in the path is already hit.',
+    effect: 'Your packets stop travelling. Damage lands instantly along the line you fire, ' +
+      'through everything on it. 0.78x damage.',
+    px: [
+      '..rrrrrr....',
+      '.rRRRRRRr...',
+      'rRnnnnnnRr..',
+      'rRn....nRr..',
+      'rRnnnnnnRr..',
+      '.rRRRRRRr...',
+      '..rrrrrr....',
+      '...r..r.....',
+      '..............',
+    ],
+  }, 'trace');
+
+  deliveryItem({
+    id: 'arp_storm', name: 'ARP storm', quality: 4, color: '#8ecfff',
+    pools: ['treasure', 'boss', 'shop'], price: 26,
+    desc: 'Everyone on the segment answers, whether or not you asked them.',
+    effect: 'Your packets stop travelling. Damage jumps to the nearest process and then ' +
+      'through two more. Weakest against one target, strongest against a crowd. 0.55x damage.',
+    px: [
+      '...bb...bb..',
+      '..bttb.bttb.',
+      '.bt..tbt..tb',
+      'bt....b....tb',
+      '.bt..tbt..tb',
+      '..bttb.bttb.',
+      '...bb...bb..',
+      '.....bb.....',
+      '..............',
+    ],
+  }, 'arc');
+})();
+
+
 /* ===== 330_itemdex.js ===== */
 /* ============================================================
    BIND69 — ITEMDEX: what an item IS and what it DOES   (owner: ITEMS)
@@ -21794,6 +21875,12 @@ G.Pool = function (factory, reset) {
       rule: 'Always on. One small standing rule.' },
     'weapon-driver': { badge: 'DRIVER', order: 6, frame: 'barrel',
       rule: 'Replaces your firing pattern. Only the newest one is installed.' },
+    /* docs/DELIVERY_AND_DEFENCE.md. A driver changes the RHYTHM of the packets
+       you emit; a delivery changes whether you emit packets at all. It is the
+       deeper of the two, which is why it is its own family and not a driver
+       variant — an item that stops your shots travelling is not a cadence. */
+    delivery: { badge: 'DELIVERY', order: 7, frame: 'aperture',
+      rule: 'Changes how your damage REACHES the target. Only the newest is installed.' },
     deployable: { badge: 'DEPLOY', order: 7, frame: 'ground',
       rule: 'Press E to place it. Whatever you placed is gone when you leave the room.' },
     'network-node': { badge: 'NODE', order: 8, frame: 'ground',
@@ -21874,7 +21961,8 @@ G.Pool = function (factory, reset) {
      the families whose answer is not `modifier` need a row. */
   const LINE_BY_ARCH = {
     familiar: 'emitter', deployable: 'emitter', 'network-node': 'emitter',
-    'weapon-driver': 'emitter', 'execution-trigger': 'trigger', active: 'key',
+    'weapon-driver': 'emitter', delivery: 'emitter',
+    'execution-trigger': 'trigger', active: 'key',
     curse: 'curse', condition: 'predicate', combinator: 'combinator',
   };
 
@@ -22081,8 +22169,12 @@ G.Pool = function (factory, reset) {
   /* A driver that is no longer installed is dead weight the player cannot
      see: weaponDriver holds only the newest id. */
   Dex.dormant = function (p, def) {
-    if (!p || !def || def.archetype !== 'weapon-driver') return false;
-    return (p.mem && p.mem.weaponDriver) !== def.id;
+    if (!p || !def) return false;
+    if (def.archetype === 'weapon-driver') return (p.mem && p.mem.weaponDriver) !== def.id;
+    /* same rule, same reason: a superseded delivery is dead weight the player
+       otherwise cannot see they are carrying */
+    if (def.archetype === 'delivery') return (p.mem && p.mem.delivery) !== def.delivery;
+    return false;
   };
 
   /* items grouped by family, in ARCH order, for the pause and death grids */
@@ -23159,6 +23251,39 @@ G.Pool = function (factory, reset) {
   }
   Combat.spawnBudget = spawnBudget;
 
+  /* ---------------- the EVENT ceiling ----------------
+     docs/DELIVERY_AND_DEFENCE.md §8.1, decided before any delivery was built
+     because it changes what a delivery is allowed to be.
+
+     spawnBudget above is expressed in ENTITIES — live shots against a 256-slot
+     pool. A TRACE or an ARC emits no shot at all, so a build made entirely of
+     them is invisible to it and has no ceiling whatsoever. The doc offered two
+     answers: give deliveries their own budget, or re-express the whole ceiling
+     in damage events.
+
+     Taken: a SECOND budget, in events, sitting beside the first rather than
+     replacing it. Re-expressing the existing one would have meant re-tuning a
+     number that is currently doing real work at 220/340 and is load-bearing
+     for the packet's feel, to buy nothing the second budget does not.
+
+     They measure genuinely different things and both are engineering limits,
+     not design ones — stackDepth is still the design budget, as the comment on
+     spawnBudget says. A shot costs a pool slot for its whole life; an event
+     costs the frame it resolves in and then is gone. 90 is the cap because a
+     TRACE down the long axis of a room can touch every body in it, and the
+     roster tops out near 40 with an extra pass for a graph walk. */
+  const EVENT_CAP = 90;
+  let eventFrame = -1, eventCount = 0;
+  function eventBudget(n) {
+    if (G.frame !== eventFrame) { eventFrame = G.frame; eventCount = 0; }
+    if (eventCount >= EVENT_CAP) return false;
+    eventCount += (n || 1);
+    return true;
+  }
+  Combat.eventBudget = eventBudget;
+  Combat.EVENT_CAP = EVENT_CAP;
+  Combat.eventsThisFrame = function () { return G.frame === eventFrame ? eventCount : 0; };
+
   /* ---------------- emission budget ----------------
      docs/BUILD_LISTING.md §2.6. Every spawning flag used to guard its cascade
      with a bare `s.gen >= 1`. That number is now the DEPTH BUDGET, and the
@@ -23228,8 +23353,21 @@ G.Pool = function (factory, reset) {
     };
   };
 
-  /* ---------------- spawnShot ---------------- */
-  Combat.spawnShot = function (p, x, y, vx, vy, o) {
+  /* ---------------- spawnShot ----------------
+     docs/DELIVERY_AND_DEFENCE.md §5.2. Everything below builds a record and
+     binds the player's flag set to it; exactly ONE line at the bottom —
+     `g.shots.push(s)` — is what makes that record a travelling projectile.
+     So the function is cut there. `makeEvent` produces a SHOT-SHAPED DAMAGE
+     EVENT: same fields, same flag binding, same onSpawn hooks, same crit roll,
+     and no presence in the world. A delivery that never emits a projectile
+     therefore composes with all 49 shot flags for free, rather than
+     re-authoring one of them.
+
+     The caller owns the record and MUST releaseEvent() it — it comes from the
+     same pool the shots do, and a leak here starves the pool the game plays
+     with. Pooled rather than a single scratch object because a delivery's own
+     onHit can emit, so these nest. */
+  Combat.makeEvent = function (p, x, y, vx, vy, o) {
     const g = G.Game; if (!g) return null;
     o = o || {};
     const st = (p && p.stats) || null;
@@ -23286,6 +23424,14 @@ G.Pool = function (factory, reset) {
     if (!(s.life > 0.05)) s.life = 0.05;
     if (!(s.maxLife > 0.05)) s.maxLife = s.life;
 
+    return s;
+  };
+  Combat.releaseEvent = function (s) { if (s) freeShot(s); };
+
+  Combat.spawnShot = function (p, x, y, vx, vy, o) {
+    const g = G.Game; if (!g) return null;
+    const s = Combat.makeEvent(p, x, y, vx, vy, o);
+    if (!s) return null;
     g.shots.push(s);
     return s;
   };
@@ -23933,18 +24079,7 @@ G.Pool = function (factory, reset) {
           const rr = e.r + s.r;
           if (segDist2(e.x, e.y, px, py, s.x, s.y) > rr * rr) continue;
 
-          s.hits.push(e);
-          Combat.hurtEnemy(e, s.dmg, ctx, {
-            shot: s, crit: s.crit, knock: s.knock, dirx: s.vx, diry: s.vy,
-          });
-          let survive = false;
-          for (let h = 0; h < s.hs.length; h++) {
-            if (s.hs[h].onHit) { const r = s.hs[h].onHit(s, e, ctx); if (r === true) survive = true; }
-          }
-          if (s.pierce > 0) { s.pierce--; survive = true; }
-          /* no addBurst here: hurtEnemy already opened the frame at the
-             contact point, and it does it for a piercing shot too */
-          if (!survive) { s.dead = true; break; }
+          if (!Combat.resolveHit(s, e, ctx)) { s.dead = true; break; }
         }
       }
 
@@ -23962,6 +24097,38 @@ G.Pool = function (factory, reset) {
       }
     }
   };
+
+  /* One enemy, hit by one shot-shaped record. Factored out of updateShots so a
+     DELIVERY resolves damage through the identical path a packet does — same
+     skip list, same hurtEnemy call, same onHit hook loop, same pierce
+     accounting. Returns whether the record survives the hit.
+     If a delivery grew its own copy of this, every future flag would have to
+     be taught about both, which is the special-case trap §5.2 warns about. */
+  Combat.resolveHit = function (s, e, ctx) {
+    s.hits.push(e);
+    Combat.hurtEnemy(e, s.dmg, ctx, {
+      shot: s, crit: s.crit, knock: s.knock, dirx: s.vx, diry: s.vy,
+    });
+    let survive = false;
+    for (let h = 0; h < s.hs.length; h++) {
+      if (s.hs[h].onHit) { const r = s.hs[h].onHit(s, e, ctx); if (r === true) survive = true; }
+    }
+    if (s.pierce > 0) { s.pierce--; survive = true; }
+    /* no addBurst here: hurtEnemy already opened the frame at the contact
+       point, and it does it for a piercing shot too */
+    return survive;
+  };
+
+  /* --- primitives a delivery needs, promoted out of the one place that used
+     them (docs/DELIVERY_AND_DEFENCE.md §5.3). Neither is new code: segDist2
+     was written to sweep a shot's own per-frame step so a fast packet cannot
+     tunnel, and it is already the point-to-segment test a hitscan needs — it
+     was simply never called with the segment set to muzzle -> wall. arc() has
+     had the jump logic, the skip list, the bolt visual and the recursion guard
+     since FH.shock shipped, reachable only from inside a flag that required a
+     projectile to land first. */
+  Combat.segDist2 = segDist2;
+  Combat.arcFrom = arc;
 
   Combat.drawShots = function (c) {
     const g = G.Game; if (!g) return;
@@ -24340,6 +24507,26 @@ G.Pool = function (factory, reset) {
          the burst driver at 1.88x baseline DPS for free. Hooks now Math.max
          or scale the value that actually survives. */
       this.fireTimer = st.fireDelay;
+
+      /* docs/DELIVERY_AND_DEFENCE.md. If the player holds a delivery it
+         replaces the volley entirely — a delivery is a RULE OF ENGAGEMENT, so
+         firing both would be a packet build with a rider rather than a
+         different way of reaching the target.
+         Checked here rather than inside spawnShot so the whole packet path
+         below, including the spawn ceiling and the shotCount fan, is simply
+         not entered. A player holding no delivery runs byte-identical code to
+         the game that shipped. */
+      const dlv = G.Deliveries && G.Deliveries.of(this);
+      if (dlv) {
+        this.mem.shotsFired = (this.mem.shotsFired || 0) + 1;
+        for (let i = 0; i < this.items.length; i++) {
+          const it = this.items[i];
+          if (it && it.onShoot) { try { it.onShoot(this, ctx, dx, dy); } catch (e) { } }
+        }
+        try { dlv.emit(this, dx, dy, ctx); }
+        catch (e) { console.warn('delivery ' + dlv.id, e); }
+        return;
+      }
       /* One counter, incremented per VOLLEY rather than per packet, because
          the grey-hat `quiet` contract (553_bounty.js) asks the player to hold
          their fire and a shotCount-14 build would otherwise fail it fourteen
@@ -24757,6 +24944,323 @@ G.Pool = function (factory, reset) {
   Combat.updateLocalFX = function (dt) { Local.update(dt); tickBursts(dt); };
   Combat.drawLocalFX = function (c) { if (FX.usingLocal()) Local.draw(c); };
   Combat.localParticleCount = function () { return Local.live; };
+})();
+
+
+/* ===== 420_deliveries.js ===== */
+/* ============================================================
+   BIND69 — DELIVERY TYPES                        (owner: COMBAT)
+
+   docs/DELIVERY_AND_DEFENCE.md. A delivery is a RULE OF ENGAGEMENT, not a
+   damage multiplier.
+
+   The diagnosis that started it: the game had exactly one delivery and forty
+   nine costumes on it. A packet leaves the muzzle, crosses the room at a
+   speed, and stops when it touches something — and not one flag changes that
+   journey. `FH.laser` is named for the thing that did not exist: a fast pink
+   projectile that pierces and draws as a bar. It still travels. It can still
+   be outrun.
+
+   A delivery is defined by its answers to five questions:
+
+     Travel      does it cross the room, or arrive the frame you fire?
+     Selection   does it hit what is in front of it, or does it choose?
+     Persistence is it gone on contact, or does it stay in the room?
+     Agency      does it obey the direction you fired, or does it act?
+     Extent      point, line, area, or volume?
+
+     packet  crosses  · aimed    · event · ballistic · point   (today)
+     TRACE   instant  · aimed    · event · ballistic · LINE
+     ARC     instant  · TARGETED · event · ballistic · GRAPH
+
+   TRACE and ARC are the pair, and the pair is the point: they differ from each
+   other on SELECTION while agreeing on everything else, so a registry that
+   expresses both without a special case is one that will express FLOOD. One
+   delivery would have shaped the registry around whatever it happened to need;
+   six would have designed five against a layer nobody had proved. §5.4.
+
+   THE SUCCESS TEST, from §5: a new delivery must be addable as a data row by
+   someone who never opens 400_player.js. Everything a delivery needs is on
+   G.Combat — makeEvent, resolveHit, releaseEvent, segDist2, arcFrom,
+   eventBudget — and every one of those already existed in some form. The work
+   was promotion, not invention.
+   ============================================================ */
+(function () {
+  const clamp = G.clamp, TAU = G.TAU;
+  const C = G.Combat;
+  if (!C) { console.error('BIND69 deliveries: G.Combat is missing — the band loaded out of order'); return; }
+
+  const D = G.Deliveries = {
+    /* id -> definition. A delivery is a data row: a name, the five axes it
+       occupies for the compendium to read, and one emit(). */
+    types: Object.create(null),
+    order: [],
+  };
+
+  D.add = function (def) {
+    if (!def || !def.id) { console.warn('deliveries: a delivery needs an id'); return null; }
+    if (D.types[def.id]) { console.warn('deliveries: duplicate id ' + def.id); return null; }
+    if (typeof def.emit !== 'function') { console.warn('deliveries: ' + def.id + ' has no emit()'); return null; }
+    D.types[def.id] = def;
+    D.order.push(def.id);
+    return def;
+  };
+  D.get = function (id) { return D.types[id] || null; };
+
+  /* The delivery a player is currently firing. `null` means the packet, which
+     is deliberately NOT a row in this table: §1's invariant is that a player
+     who never picks a delivery up plays exactly the game that shipped, and the
+     surest way to guarantee that is for the default path to be untouched code
+     rather than a registry entry that happens to behave the same. */
+  D.of = function (p) {
+    const id = p && p.mem && p.mem.delivery;
+    return id ? D.types[id] || null : null;
+  };
+
+  /* ============================================================
+     THE EMIT PATH — one function, shared by every delivery.
+
+     §5.2 in full: a delivery does not emit a projectile, it emits a damage
+     event that is SHOT-SHAPED. Combat.makeEvent builds a record with the same
+     fields, binds the player's flag set to it, runs the onSpawn hooks and
+     rolls the crit — and never pushes it into Game.shots. Combat.resolveHit
+     lands damage through the identical path a packet uses.
+
+     The consequence is the whole reason to do it this way: all 49 flags
+     compose for free. `explosive` detonates at the trace's end, `poison`
+     poisons everything on the line, `chain` arcs off each body it passed
+     through, `lifesteal` steals, `charged` scales it. Not one is re-authored,
+     and every FUTURE flag composes with every future delivery by construction
+     rather than by a matrix of special cases.
+     ============================================================ */
+  function withEvent(p, x, y, vx, vy, o, fn) {
+    const ev = C.makeEvent(p, x, y, vx, vy, o);
+    if (!ev) return null;
+    try { return fn(ev); }
+    finally {
+      /* onExpire is what `explosive` and friends hang their payload on, and an
+         event that resolved without one would silently drop half the flags it
+         claims to compose with. Run it exactly once, then hand the record back
+         to the pool — a leak here starves the pool the packets play from. */
+      for (let h = 0; h < ev.hs.length; h++) {
+        if (ev.hs[h].onExpire) { try { ev.hs[h].onExpire(ev, o && o.ctx); } catch (e) { } }
+      }
+      C.releaseEvent(ev);
+    }
+  }
+  D.withEvent = withEvent;
+
+  /* Live bodies, nearest-first from a point. Deliveries select rather than
+     collide, so every one of them needs this and none of them should own it. */
+  function bodies(ctx) {
+    const g = G.Game;
+    const room = g && g.room;
+    return (room && room.enemies) || [];
+  }
+
+  /* ============================================================
+     TRACE — the laser that was never there
+     ============================================================ */
+  D.add({
+    id: 'trace',
+    name: 'TRACE',
+    axes: { travel: 'instant', selection: 'aimed', persistence: 'event', agency: 'ballistic', extent: 'line' },
+    /* What it owns: LINING UP. A delivery with no travel time makes the ANGLE
+       the skill where the packet makes the LEAD the skill, and a corridor
+       stops being a corridor. Nothing in flight, nothing to outrun. */
+    desc: 'Everything between you and the wall, on the frame you fire.',
+    color: '#ff4a6a',
+
+    emit(p, dx, dy, ctx) {
+      const st = p.stats;
+      /* PX, not tiles: G.ROOM_W is 17 (010_core.js:13) and a trace measured in
+         tiles would stop 527px short of the wall. */
+      const W = G.ROOM_PX_W || 544, H = G.ROOM_PX_H || 288;
+      /* muzzle -> wall. The segment is the whole delivery: segDist2 was
+         written to sweep a shot's own per-frame step so a fast packet cannot
+         tunnel, and a TRACE is that same sweep with the far end set to the
+         wall instead of to next frame. */
+      const ox = p.x + dx * 11, oy = p.y + dy * 11 - 5;
+      /* STOP AT THE FIRST WALL. Without this a trace crossed obstacles and
+         left the room entirely, which is not a cosmetic bug: §3.1's claim is
+         that instant line-of-sight makes CORRIDORS matter, and a beam that
+         ignores level geometry deletes exactly that. Walked in 4px steps —
+         a whole tile is 32px, so nothing thinner than a wall can be skipped,
+         and it costs ~150 cheap lookups on the longest possible line.
+         `spectral` is honoured for the same reason updateShots honours it. */
+      const maxLen = Math.hypot(W, H);
+      const g = G.Game;
+      let len = maxLen;
+      if (g && g.solidAtPx) {
+        for (let d = 4; d <= maxLen; d += 4) {
+          if (g.solidAtPx(ox + dx * d, oy + dy * d, true)) { len = d - 4; break; }
+        }
+      }
+      if (len < 0) len = 0;
+      const ex = ox + dx * len, ey = oy + dy * len;
+
+      return withEvent(p, ox, oy, dx, dy, {
+        kind: 'trace', ctx: ctx,
+        r: 3.2 * (st.shotSize || 1),
+        dmg: st.damage * 0.78,
+        life: 0.05, knock: (st.knockback || 1) * 0.5,
+        color: '#ff4a6a', glow: '#ffd0dc',
+      }, (ev) => {
+        /* A TRACE is EVERYTHING between the muzzle and the wall — that is what
+           makes its extent a LINE rather than a point, and it is the axis the
+           whole delivery exists to occupy. Without this it stopped at the
+           first body and was a packet that skipped its flight, measured
+           touching 1 of 5 bodies stood in a row.
+           `+=` and not `=`: a flag that granted pierce contributed to the
+           event before this ran, and overwriting would make `piercing` a
+           downgrade on the one delivery it should mean nothing to. */
+        ev.pierce += 99;
+        const list = bodies(ctx);
+        /* nearest-first, so any flag reading hit ORDER sees the line the way
+           the player would draw it rather than room-array order */
+        const hits = [];
+        for (let i = 0; i < list.length; i++) {
+          const e = list[i];
+          if (!e.alive || e.noHit) continue;
+          const rr = e.r + ev.r;
+          if (C.segDist2(e.x, e.y, ox, oy, ex, ey) > rr * rr) continue;
+          hits.push({ e: e, d: (e.x - ox) * dx + (e.y - oy) * dy });
+        }
+        hits.sort((a, b) => a.d - b.d);
+
+        let stop = null;
+        for (let i = 0; i < hits.length; i++) {
+          if (!C.eventBudget()) break;
+          const e = hits[i].e;
+          const survive = C.resolveHit(ev, e, ctx);
+          if (!survive) { stop = hits[i]; break; }
+        }
+        /* the beam ends where it stopped, so the player can SEE what absorbed
+           it — a line that always reaches the wall says nothing about pierce */
+        const endD = stop ? Math.min(stop.d, len) : len;
+        ev.x = ox + dx * endD; ev.y = oy + dy * endD;
+        D.addBeam(ox, oy, ev.x, ev.y, ev.color, ev.crit);
+        return ev;
+      });
+    },
+  });
+
+  /* ============================================================
+     ARC — electricity, promoted
+     ============================================================ */
+  D.add({
+    id: 'arc',
+    name: 'ARC',
+    axes: { travel: 'instant', selection: 'targeted', persistence: 'event', agency: 'ballistic', extent: 'graph' },
+    /* What it owns: CROWDS, and the decision to let them form. Against one
+       body it is the worst delivery in the game; against six it is the best.
+       That is a positional decision by construction, which is content rule 1
+       satisfied without a number being touched.
+       Cheapest of the six because arc() has shipped since FH.shock — the jump
+       logic, the skip list, the bolt visual and the recursion guard are all
+       written. What was missing was an entry point that did not require a
+       projectile to have landed first. */
+    desc: 'Jumps the nearest bodies. Useless alone, best in a crowd.',
+    color: '#8ecfff',
+
+    emit(p, dx, dy, ctx) {
+      const st = p.stats;
+      const list = bodies(ctx);
+      /* it SELECTS: nearest live body within reach of the player, not whatever
+         happens to be under the aim */
+      /* Reach, and why it is this number. A packet travels ~247px before it
+         expires (0.95s at 260px/s), so an ARC that reached 150 was markedly
+         SHORTER than the thing it replaced and simply failed at ranges the
+         player reads as normal — measured silently doing nothing against a row
+         of bodies 163px away. 210 keeps it clearly shorter than a packet, so
+         closing distance is still the price of the graph, without the delivery
+         being dead at the range most fights actually happen at. */
+      let best = null, bestD = ARC_REACH * ARC_REACH;
+      for (let i = 0; i < list.length; i++) {
+        const e = list[i];
+        if (!e.alive || e.noHit) continue;
+        const d = G.dist2(p.x, p.y, e.x, e.y);
+        if (d < bestD) { bestD = d; best = e; }
+      }
+      /* NO ROUTE. Firing into empty air must say so: a delivery that silently
+         does nothing is indistinguishable from a broken one, and ARC selects
+         rather than aims, so the player cannot see why by looking at where
+         they pointed. Cheap, rate-limited by the fire timer already. */
+      if (!best) { D.fizzle(p, dx, dy, '#5a7a8a'); return null; }
+      if (!C.eventBudget(2)) { D.fizzle(p, dx, dy, '#8a6a3a'); return null; }
+
+      const ox = p.x + dx * 11, oy = p.y + dy * 11 - 5;
+      return withEvent(p, ox, oy, dx, dy, {
+        kind: 'arc', ctx: ctx,
+        r: 4 * (st.shotSize || 1),
+        dmg: st.damage * 0.55,
+        life: 0.05, knock: (st.knockback || 1) * 0.35,
+        color: '#8ecfff', glow: '#dff0ff',
+      }, (ev) => {
+        ev.x = best.x; ev.y = best.y;
+        D.addBeam(ox, oy, best.x, best.y, ev.color, ev.crit);
+        C.resolveHit(ev, best, ctx);
+        /* then the graph. arcFrom owns the jump list, the no-re-hit rule and
+           the recursion guard; a delivery that reimplemented them would be a
+           second thing for every future flag to be taught about. */
+        C.arcFrom(ev, best, ctx, ev.dmg * 0.7, 2);
+        return ev;
+      });
+    },
+  });
+
+  /* ============================================================
+     THE BEAM — one visual language for the whole family.
+     A delivery that arrives instantly has no travelling body to look at, so
+     the LINE is the only thing the player can read. Kept here rather than in
+     the renderer so a new delivery ships its own look without an ART edit,
+     the way archetype overlays already do.
+     ============================================================ */
+  const ARC_REACH = 210;
+  D.ARC_REACH = ARC_REACH;
+
+  /* the delivery fired and reached nothing — a short stub off the muzzle,
+     visibly NOT a beam, so "out of range" and "hit something" never look
+     alike */
+  D.fizzle = function (p, dx, dy, col) {
+    D.addBeam(p.x + dx * 9, p.y + dy * 9 - 5, p.x + dx * 20, p.y + dy * 20 - 5, col, false);
+    const S = G.Stats && G.Stats.fx && G.Stats.fx();
+    if (S && S.snd) S.snd('deny', { vol: 0.28, rate: 1.5 });
+  };
+
+  const beams = [];
+  D.addBeam = function (x0, y0, x1, y1, col, crit) {
+    if (beams.length > 24) beams.shift();
+    beams.push({ x0, y0, x1, y1, col: col || '#ff4a6a', t: 0, dur: crit ? 0.20 : 0.13, w: crit ? 3 : 2 });
+  };
+  D.update = function (dt) {
+    for (let i = beams.length - 1; i >= 0; i--) {
+      beams[i].t += dt;
+      if (beams[i].t >= beams[i].dur) beams.splice(i, 1);
+    }
+  };
+  D.draw = function (c) {
+    for (let i = 0; i < beams.length; i++) {
+      const b = beams[i];
+      const k = clamp(1 - b.t / b.dur, 0, 1);
+      c.save();
+      c.globalCompositeOperation = 'lighter';
+      c.globalAlpha = k;
+      c.strokeStyle = b.col;
+      c.lineWidth = Math.max(1, b.w * k);
+      c.beginPath(); c.moveTo(b.x0, b.y0); c.lineTo(b.x1, b.y1); c.stroke();
+      /* a hot core, so a beam reads as energy rather than as a drawn line */
+      c.globalAlpha = k * 0.8;
+      c.strokeStyle = '#ffffff';
+      c.lineWidth = Math.max(0.5, b.w * k * 0.35);
+      c.stroke();
+      c.restore();
+    }
+  };
+  D.clear = function () { beams.length = 0; };
+  /* for the gate: "did the delivery draw anything at all" is the only way to
+     tell an out-of-range fizzle from a delivery that silently did nothing */
+  D.beamCount = function () { return beams.length; };
 })();
 
 
@@ -39477,6 +39981,14 @@ G.Pool = function (factory, reset) {
       px(c, x - u * 2, y + u, u * 2.5, u);
       px(c, x - u * 2, y + s - u * 2, u * 2.5, u);
     },
+    /* delivery — an aperture: two brackets with the beam passing between them.
+       The family is about HOW damage reaches the target, so the mark is the
+       gap it comes through rather than anything about the item itself. */
+    aperture(c, x, y, s, u) {
+      px(c, x - u * 2, y + u * 2, u, s - u * 4);
+      px(c, x + s + u, y + u * 2, u, s - u * 4);
+      px(c, x - u * 2, y + s / 2 - u / 2, s + u * 4, u);
+    },
     /* ammo — rounds in a magazine, down the edge */
     magazine(c, x, y, s, u) {
       for (let i = 0; i < 3; i++) px(c, x + s + u * 0.5, y + u * 2 + i * u * 4, u * 1.5, u * 2.5);
@@ -40743,6 +41255,7 @@ G.Pool = function (factory, reset) {
       };
       if (!Game.restoring && G.Unlocks && G.Unlocks.startRun) G.Unlocks.startRun();
       Game.shots.length = 0; Game.enemyShots.length = 0;
+      if (G.Deliveries) G.Deliveries.clear();
       Game.bombs.length = 0; Game.bolts.length = 0; Game.blasts.length = 0;
       Game.pan = null; Game.doorCd = 0; Game.deathTimer = 0;
       if (G.Cinema && G.Cinema.resetRun) { try { G.Cinema.resetRun(); } catch (e) { } }
@@ -40834,6 +41347,9 @@ G.Pool = function (factory, reset) {
       Game.enemyShots.length = 0;
       Game.bombs.length = 0;
       Game.bolts.length = 0;
+      /* room-local, like the bolts above it: a beam left across a doorway
+         would be drawn into the next room it never touched */
+      if (G.Deliveries) G.Deliveries.clear();
       Game.blasts.length = 0;
 
       /* one-off decoration / pedestals */
@@ -41474,6 +41990,7 @@ G.Pool = function (factory, reset) {
 
       /* ---- projectiles ---- */
       C.updateShots(dt, ctx);
+      if (G.Deliveries) G.Deliveries.update(dt);
       C.updateEnemyShots(dt, ctx);
 
       /* ---- bombs ---- */
@@ -41847,6 +42364,10 @@ G.Pool = function (factory, reset) {
 
     if (current) {
       C.drawShots(c);
+      /* beams over the packets: a delivery that arrives instantly has no
+         travelling body, so the LINE is the only thing the player can read,
+         and it must not be buried under a room full of shots. */
+      if (G.Deliveries) G.Deliveries.draw(c);
       C.drawEnemyShots(c);
       /* chain lightning */
       for (let i = 0; i < Game.bolts.length; i++) {
