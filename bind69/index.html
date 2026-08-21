@@ -312,6 +312,33 @@ Input.endFrame = function () {
   Input.anyKeyFrame = false;
 };
 
+/* ---------- interact: the E key, shared ----------
+   Contact used to be consent. Walking into a pedestal took the item, brushing
+   a shelf spent the coins, and clipping the reroll terminal on the way past
+   bought a reroll — so the room punished a mis-step with the run's money. All
+   three now wait for `use`, which already fires the active item, so the one
+   key does two jobs by CLAIM: anything the player stands in reach of claims
+   the press for that beat, whether or not it could act on it, and the active
+   only fires on a beat nobody claimed. A denied purchase therefore does not
+   also dump your active.
+
+   The claim is a short hold rather than a frame flag, the same shape UI's
+   pedestal preview uses, because the frames that update the world and the
+   frames that read the key are not the same set: hitstop and a room pan both
+   return out of Game.update before a pedestal is ever consulted, and a
+   frame-local flag would read those as "nothing in reach". */
+const Interact = G.interact = {
+  hold: 0,
+  tick(dt) { if (Interact.hold > 0) Interact.hold -= dt; },
+  claimed() { return Interact.hold > 0; },
+  /* Ping every frame the player stands in a thing's reach. True only on the
+     frame `use` goes down; the claim is made either way. */
+  offer() {
+    Interact.hold = 0.1;
+    return !!Input.pressed.use;
+  },
+};
+
 /* ---------- tiny event bus ---------- */
 G.on = function (ev, fn) { (G.hooks[ev] || (G.hooks[ev] = [])).push(fn); };
 G.emit = function (ev, a, b, c) {
@@ -593,9 +620,9 @@ G.Pool = function (factory, reset) {
    already earned its achievement, instead of being unreachable.
    ============================================================ */
 (function () {
-  /* Roughly this share of the roster is available on a fresh volume. High
-     enough that a first run feels like the real game, low enough that there
-     is a lot of roster left to find. */
+  /* The old hash share. It no longer decides what starts open — see
+     startsUnlocked below — and survives only as the stable fallback for an id
+     that is not on the roster at all. */
   const START_SHARE = 55;
 
   /* Achievements. Every one of these is reachable by a run that ends in
@@ -639,10 +666,132 @@ G.Pool = function (factory, reset) {
   const BY_ID = Object.create(null);
   for (let i = 0; i < TRIGGERS.length; i++) BY_ID[TRIGGERS[i].id] = TRIGGERS[i];
 
-  /* Whether an item starts open is a pure function of its id, so it never
-     moves as the roster grows. */
+  /* Ordering for the round-robin grant below. It used to decide what starts
+     open too; it no longer does, and it is worth saying why rather than
+     leaving a reader to wonder what a hash is still doing here. */
   function slotOf(id) { return G.hashStr('unlock:' + id) % 100; }
-  function startsUnlocked(id) { return slotOf(id) < START_SHARE; }
+
+  /* WHAT A FRESH VOLUME HOLDS — docs/BUILD_LISTING.md §9.
+
+     This was `hashStr('unlock:' + id) % 100 < 55`: 55% of the roster, chosen
+     at random with respect to what the item DOES. It is a curation decision
+     and a hash cannot make one. What it actually produced was a first-time
+     player holding a hundred arbitrary items — including every combinatorial
+     piece — which is why a fresh profile could assemble a run-ending build
+     before it had unlocked anything.
+
+     Curated by QUALITY instead, which is the field that already says how big
+     a thing an item is, and which rollItem now treats as real rarity. Quality
+     1 and 2 start open; 3 and 4 are earned. The consequences are deliberate
+     and they are the whole design:
+
+       - no `ulimit -s` (q4), so a fresh run nests exactly ONE level deep;
+       - no `-fomit-frame-pointer` (q3) and no `%r8-%r15` (q4), so root is
+         SIX lines wide and stays there;
+       - one multiplier — `writev()` (q2). `repeat x2`, `sendmmsg()` and
+         `segmentation offload` are all earned;
+       - five emitters and three conditions, so blocks can be built at all.
+
+     That is "some combinatorial effect, but you have to go to the hack bay":
+     six registers and one stack level is enough rope to build something and
+     not enough to coast, and a seventh pickup is a line that does not run
+     until you go and arrange it.
+
+     A quality rule stays a pure function of the DEF, so it does not move as
+     the roster grows — the property the hash was chosen for is kept, and the
+     arbitrariness is not. An id that is not on the roster (a save from a
+     build that had it, or a probe) still needs a stable answer rather than a
+     throw, and falls back to the old hash. */
+  const START_QUALITY = 2;
+
+  /* EVERY POOL HAS TO BE SERVABLE, and the quality rule alone does not make
+     it so. Measured on the first cut: zero boss-pool and zero angel-pool items
+     started open, because both pools are stocked entirely from quality 3 and
+     4. rollItem's empty-pool path then widens to the whole unlocked roster —
+     it does not throw and it does not warn, so a fresh profile would have got
+     a generic treasure item off every boss for its first several runs and
+     nothing anywhere would have said why.
+
+     So each pool keeps a FLOOR: it must have at least POOL_FLOOR members open,
+     counting the ones the quality rule already opened, and it is topped up
+     cheapest-first from whatever is still locked.
+
+     MINIMUM COVERAGE, not "+2 per pool", and the difference is what the gates
+     found. A blanket two opened exactly two members of every NARROW pool while
+     leaving the wide ones untouched, so `devil` went down to `zombieproc` and
+     `oomscore` — neither of which carries `def.devil`. Three gates failed on
+     the same fact from three directions: grey deal rooms stocked nothing that
+     bills cover, black-hat purchases charged nothing, and the pity rule ran
+     out of attack-changing items to break a streak with. A pool is not
+     servable because something is in it; it is servable when what comes out of
+     it is representative.
+
+     Six because a shop shelf carries up to four item slots and `itemsSeen`
+     suppresses repeats within a run — a pool with fewer open members than that
+     hands out its whole contents and then falls through to the roster-wide
+     path anyway, which is the hole this exists to close.
+
+     Derived from the roster rather than listed by id, so a new pool or a new
+     item cannot quietly reintroduce it. Cheapest-first, ties broken by id, so
+     it is stable across builds. */
+  const POOL_FLOOR = 6;
+  /* Infinity, not 1, for the same fail-closed reason startsUnlocked reads the
+     field rather than defaulting it: an item with no declared quality must not
+     sort to the front of its pool and take a floor slot. */
+  function qOf(def) { return typeof def.quality === 'number' ? def.quality : Infinity; }
+  function openByQuality(def) {
+    return typeof def.quality === 'number' && def.quality <= START_QUALITY;
+  }
+
+  /* WHAT COUNTS AS A BUCKET, and why it is not just `pools`.
+
+     A deal room stocks its altars from the `devil` FLAG, not the devil POOL —
+     `def.devil` is set by the helper in 317_items_devil.js and is what bills
+     cover, what `Dex.archKey` reads to return 'blackhat', and what
+     critic/grey_gate.js asserts. The two sets are genuinely different, and
+     553_bounty.js:112 already records that they are.
+
+     Flooring the POOL alone therefore left the flag empty: the six cheapest
+     devil-pool members were `zombieproc`, `oomscore` and friends, none of
+     which carries the flag, so a grey room stocked two items that charge
+     nothing and the gate was right to fail. A bucket is any set the game
+     DRAWS FROM, and the black-hat family is one of those whether or not it
+     lines up with a pool name. */
+  function bucketsOf(def) {
+    const out = (def.pools && def.pools.length) ? def.pools.slice() : ['treasure'];
+    if (def.devil) out.push('flag:devil');
+    return out;
+  }
+  let FLOOR_SET = null, FLOOR_N = -1;
+  function floorSet() {
+    const items = G.items || [];
+    if (FLOOR_SET && FLOOR_N === items.length) return FLOOR_SET;
+    const byPool = Object.create(null);
+    for (const it of items) {
+      for (const b of bucketsOf(it)) (byPool[b] || (byPool[b] = [])).push(it);
+    }
+    FLOOR_SET = Object.create(null);
+    for (const pool in byPool) {
+      const members = byPool[pool];
+      let open = 0;
+      for (const it of members) if (openByQuality(it) || FLOOR_SET[it.id]) open++;
+      if (open >= POOL_FLOOR) continue;
+      members
+        .filter((it) => !openByQuality(it) && !FLOOR_SET[it.id] && isFinite(qOf(it)))
+        .sort((a, b) => (qOf(a) - qOf(b)) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+        .slice(0, POOL_FLOOR - open)
+        .forEach((it) => { FLOOR_SET[it.id] = 1; });
+    }
+    FLOOR_N = items.length;
+    return FLOOR_SET;
+  }
+
+  function startsUnlocked(id) {
+    const def = G.itemById && G.itemById[id];
+    if (!def) return slotOf(id) < START_SHARE;
+    if (typeof def.quality === 'number' && def.quality <= START_QUALITY) return true;
+    return !!floorSet()[id];
+  }
 
   /* Which achievement grants a locked item is assigned round-robin over the
      hash *rank* of the locked set, not by bucketing the hash directly.
@@ -735,6 +884,11 @@ G.Pool = function (factory, reset) {
       t: Math.round(run.time || 0),
       w: won ? 1 : 0,
       i: ids,
+      /* Wall clock, purely so 030_net.js can order two machines' histories
+         against each other. Nothing in the game reads it — `t` is the run's
+         duration and always has been — and rows written before this existed
+         merge fine without it, they just sort last. */
+      ts: Date.now(),
     });
     if (d.hist.length > 10) d.hist.length = 10;
   }
@@ -1310,6 +1464,821 @@ G.Pool = function (factory, reset) {
       return ch;
     },
   });
+})();
+
+
+/* ===== 030_net.js ===== */
+/* ============================================================
+   BIND69 — NET : THE SEAM                        (owner: PERSISTENCE)
+
+   One interface, three backends. The game asks this module for an
+   identity, a place to put a score and a place to record a mark;
+   it never learns which of those is a localStorage key and which
+   is an HTTP round trip.
+
+   Registered transports today:
+     - the built-in LOCAL one below (no account, no network)
+     - 031_net_supabase.js (Google sign-in, cloud profile, boards)
+
+   A third — Steamworks, through a desktop wrapper — is the reason
+   the seam exists at all rather than the game calling fetch()
+   directly. Nothing here may reference fetch, a URL, or a token.
+
+   THE RULE THIS IS BUILT ON: the network is never load-bearing.
+   Every call degrades to the local answer, the failure is recorded
+   in Net.err for the account panel to show, and the run keeps
+   running. A dropped connection must never cost a descent.
+   ============================================================ */
+(function () {
+  /* ---------- merge ----------
+     020_save.js stores meta progress in a shape that happens to be
+     mergeable without a conflict dialog, and it is worth naming why:
+
+       meta.unlocks   grow-only set     -> union
+       meta.marks     grow-only set     -> union
+       meta.stats.*   monotonic numbers -> max (min for lowInteg)
+
+     MAX, NOT SUM, and the reason is idempotence. Sum looks more
+     correct — two devices that each killed 100 things offline did
+     kill 200 — but sync is not a one-shot: pull, merge, push runs
+     on every sign-in and every run end. Summing means the shared
+     history is counted again on every pass and a kill count doubles
+     each time you open the game. Max converges, re-running it
+     changes nothing, and its error is in the safe direction: it
+     UNDER-counts across a genuine offline split, so an achievement
+     is never awarded for work nobody did.
+
+     The one field that cannot merge is profile.run, the suspended
+     run. Two half-finished descents are not combinable and picking
+     silently would throw one away, so it is left to the caller. */
+
+  const MIN_KEYS = { lowInteg: 1 };          // lower is the achievement
+  const LWW_KEYS = { dlt: 1 };               // measured deltas — either is true
+
+  function mergeNum(k, a, b) {
+    if (typeof a !== 'number') return b;
+    if (typeof b !== 'number') return a;
+    return MIN_KEYS[k] ? Math.min(a, b) : Math.max(a, b);
+  }
+
+  /* union of two id lists, order-stable on the local one so the UI
+     does not reshuffle under the player when a sync lands */
+  function mergeSet(a, b) {
+    const out = (a || []).slice();
+    const seen = Object.create(null);
+    for (let i = 0; i < out.length; i++) seen[out[i]] = 1;
+    const bb = b || [];
+    for (let i = 0; i < bb.length; i++) if (!seen[bb[i]]) { seen[bb[i]] = 1; out.push(bb[i]); }
+    return out;
+  }
+
+  /* Ten rows, newest first, from two machines that never agreed a clock.
+     Rows written before this module existed have no `ts` and sort last —
+     they are still real history, they just cannot be ordered against a
+     stamped row, and dropping them would lose runs the player made. */
+  function mergeHist(a, b) {
+    const out = (a || []).concat(b || []);
+    const seen = Object.create(null), uniq = [];
+    for (let i = 0; i < out.length; i++) {
+      const r = out[i];
+      if (!r) continue;
+      const k = (r.s || '') + '|' + (r.f || 0) + '|' + (r.t || 0) + '|' + (r.w || 0);
+      if (seen[k]) continue;
+      seen[k] = 1; uniq.push(r);
+    }
+    uniq.sort((x, y) => (y.ts || 0) - (x.ts || 0));
+    if (uniq.length > 10) uniq.length = 10;
+    return uniq;
+  }
+
+  function mergeStats(a, b) {
+    const out = {};
+    const keys = Object.create(null);
+    for (const k in a) keys[k] = 1;
+    for (const k in b) keys[k] = 1;
+    for (const k in keys) {
+      const av = a ? a[k] : undefined, bv = b ? b[k] : undefined;
+      if (av === undefined) { out[k] = bv; continue; }
+      if (bv === undefined) { out[k] = av; continue; }
+      if (Array.isArray(av) || Array.isArray(bv)) { out[k] = mergeHist(av, bv); continue; }
+      if (av && bv && typeof av === 'object' && typeof bv === 'object') {
+        /* one level of nesting is all meta.stats has (stats.dex), and a
+           generic deep merge would be a licence for a future writer to
+           bury something unmergeable three levels down */
+        const sub = {};
+        const sk = Object.create(null);
+        for (const j in av) sk[j] = 1;
+        for (const j in bv) sk[j] = 1;
+        for (const j in sk) {
+          if (j === 'hist') { sub[j] = mergeHist(av[j], bv[j]); continue; }
+          if (LWW_KEYS[j]) { sub[j] = Object.assign({}, bv[j] || {}, av[j] || {}); continue; }
+          const x = av[j], y = bv[j];
+          if (x && y && typeof x === 'object' && typeof y === 'object') {
+            const m = {};
+            for (const q in y) m[q] = y[q];
+            for (const q in x) m[q] = mergeNum(q, x[q], y[q]);
+            sub[j] = m;
+          } else sub[j] = (x === undefined) ? y : (y === undefined) ? x : mergeNum(j, x, y);
+        }
+        out[k] = sub;
+        continue;
+      }
+      out[k] = mergeNum(k, av, bv);
+    }
+    return out;
+  }
+
+  /* The three known fields merge by rule. Everything ELSE on meta is
+     carried through with the local value winning, and that matters:
+     021_difficulty.js and 023_chars.js both park a preference directly
+     on meta (meta.diff, meta.char), so a merge that returned only the
+     three fields below would reset the player's difficulty and their
+     character every time a sync landed. Preferences are not progress —
+     the machine in front of you is right about them. */
+  function mergeMeta(local, remote) {
+    if (!remote) return local;
+    if (!local) return remote;
+    const out = {};
+    for (const k in remote) out[k] = remote[k];
+    for (const k in local) out[k] = local[k];
+    out.unlocks = mergeSet(local.unlocks, remote.unlocks);
+    out.marks = mergeSet(local.marks, remote.marks);
+    out.stats = mergeStats(local.stats || {}, remote.stats || {});
+    return out;
+  }
+
+  /* ---------- the LOCAL backend ----------
+     Not a stub and not a mock. It is a real backend that happens to
+     answer from this machine, and it is what makes every screen above
+     testable with no account and no connection: the daily board fills
+     in with your own attempts, achievements record, the profile
+     persists. Signing in later merges that history up rather than
+     replacing it, so a guest never loses what they played.
+
+     It is also the second consumer that earns this interface. One
+     implementation behind an interface is a guess; two is a seam. */
+  const BKEY = 'bind69.board.';
+
+  function readBoard(id) {
+    try { return JSON.parse(localStorage.getItem(BKEY + id) || '[]') || []; }
+    catch (e) { console.warn('BIND69 net: local board ' + id + ' unreadable —', e && e.message); return []; }
+  }
+
+  const Local = {
+    name: 'local',
+    ready() { return !!(G.Save && G.Save.available); },
+    user() { return null; },
+    signIn() { return false; },
+    signOut() { },
+    pullMeta(cb) { cb(null, null); },       // nothing above this machine
+    pushMeta(meta, cb) { cb(null); },       // 020_save.js already wrote it
+    canSignIn() { return 'no network backend in this build'; },
+
+    /* A board row is keyed by profile, not by player: three volumes on one
+       machine are three different descents and each deserves its own line. */
+    submit(board, entry, cb) {
+      const rows = readBoard(board);
+      rows.push(entry);
+      rows.sort(N.rank);
+      if (rows.length > 100) rows.length = 100;
+      try { localStorage.setItem(BKEY + board, JSON.stringify(rows)); }
+      catch (e) { return cb('local board full: ' + (e && e.message)); }
+      cb(null, entry);
+    },
+    fetchBoard(id, cb) { cb(null, readBoard(id)); },
+    award() { },                            // marks already live in meta.marks
+  };
+
+  /* ---------- the seam ---------- */
+  const N = G.Net = {
+    backend: Local,
+    err: '',            // last failure, shown by the account panel
+    busy: 0,            // outstanding calls, for the spinner
+    lastSync: 0,
+
+    /* A transport registers itself. It does NOT get to decide it is
+       active — it must say it is ready, so a misconfigured deploy or an
+       expired token falls back to Local instead of hanging the screen. */
+    use(b) {
+      if (!b || typeof b.ready !== 'function') { console.error('BIND69 net: bad backend'); return; }
+      N.backend = b;
+    },
+    local() { return N.backend === Local; },
+
+    /* ---------- identity ---------- */
+    user() { try { return N.backend.user(); } catch (e) { return null; } },
+    signedIn() { return !!N.user(); },
+    status() {
+      if (N.local()) return 'local';
+      if (N.busy > 0) return 'busy';
+      if (N.err) return 'error';
+      return N.signedIn() ? 'in' : 'out';
+    },
+    /* Why this backend cannot start a sign-in right now, or '' if it can.
+       A backend that does not answer is assumed able — the call itself
+       still reports its own failure, and a silent false here would hide
+       a working door. */
+    signInBlocked(provider) {
+      if (N.local()) return 'no network backend in this build';
+      if (!N.backend.canSignIn) return '';
+      try { return N.backend.canSignIn(provider) || ''; } catch (e) { return ''; }
+    },
+    signIn(provider) { N.err = ''; return N.backend.signIn(provider); },
+    signOut() { N.backend.signOut(); },
+
+    /* ---------- ranking ----------
+       Deeper wins; at equal depth the faster run wins; a win beats a
+       death at the same floor because reaching the bottom and dying on
+       it are not the same run. Kept here rather than in the backend so
+       the local board and the server order rows identically — two
+       different sorts would make signing in look like cheating. */
+    rank(a, b) {
+      if ((b.w || 0) !== (a.w || 0)) return (b.w || 0) - (a.w || 0);
+      if ((b.f || 0) !== (a.f || 0)) return (b.f || 0) - (a.f || 0);
+      return (a.t || 0) - (b.t || 0);
+    },
+
+    /* ---------- profile sync ----------
+       Pull, merge, push — in that order, always all three. Pulling
+       without pushing would let a device drift; pushing without
+       pulling would let the last device to close its tab win. The
+       merge is idempotent (see the top of this file), so running the
+       whole cycle on a schedule is safe and needs no dirty flag.
+
+       The suspended run is NOT synced. It is the one unmergeable
+       field, it is the largest thing in the blob, and a run resumed
+       on a second machine while the first still holds it would let
+       one descent be played twice. Meta progress travels; the run
+       stays where it was left. */
+    sync(cb) {
+      cb = cb || function () {};
+      const prof = G.Save && G.Save.profile;
+      if (!prof) return cb('no volume mounted');
+      if (N.local()) return cb(null, prof.meta);
+      N.busy++;
+      N.backend.pullMeta(function (err, remote) {
+        if (err) {
+          N.busy--; N.err = String(err);
+          console.error('BIND69 net: pull failed —', err);
+          return cb(err);
+        }
+        const merged = mergeMeta(prof.meta, remote);
+        prof.meta = merged;
+        if (G.Save.flush) G.Save.flush();
+        N.backend.pushMeta(merged, function (perr) {
+          N.busy--;
+          if (perr) {
+            N.err = String(perr);
+            console.error('BIND69 net: push failed —', perr);
+            return cb(perr);
+          }
+          N.err = '';
+          N.lastSync = Date.now();
+          cb(null, merged);
+        });
+      });
+    },
+
+    /* ---------- boards ----------
+       Always written locally first. The local board is the record the
+       player can always see, the remote one is the record other people
+       can see, and a submit that only reached the server would vanish
+       from your own screen the moment you went offline. */
+    submit(board, entry, cb) {
+      cb = cb || function () {};
+      Local.submit(board, entry, function () {});
+      if (N.local()) return cb(null, entry);
+      N.busy++;
+      N.backend.submit(board, entry, function (err, row) {
+        N.busy--;
+        if (err) { N.err = String(err); console.error('BIND69 net: submit failed —', err); }
+        cb(err, row);
+      });
+    },
+
+    /* `scope` is 'global' or 'me'. A board nobody can reach still shows
+       your own attempts rather than an empty panel with an error in it —
+       the local rows are real rows, not a placeholder. */
+    board(id, scope, cb) {
+      cb = cb || function () {};
+      if (N.local() || scope === 'me') return Local.fetchBoard(id, cb);
+      N.busy++;
+      N.backend.fetchBoard(id, function (err, rows) {
+        N.busy--;
+        if (err) {
+          N.err = String(err);
+          console.error('BIND69 net: board ' + id + ' failed —', err);
+          return Local.fetchBoard(id, cb);
+        }
+        cb(null, rows);
+      });
+    },
+
+    /* ---------- achievements ----------
+       022_unlocks.js has already written the mark into meta.marks by the
+       time this runs; this is the announcement, not the record. On a
+       backend that has its own achievement service (Steam) this is where
+       the toast comes from. */
+    award(ids) {
+      if (!ids || !ids.length) return;
+      try { N.backend.award(ids); } catch (e) { console.error('BIND69 net: award failed —', e); }
+    },
+
+    /* The single call the game makes when a run ends. 022_unlocks.js
+       owns what a run MEANS; this owns where that goes. */
+    afterRun(run, won, result) {
+      if (result && result.earned && result.earned.length) {
+        N.award(result.earned.map((e) => e.trigger.id));
+      }
+      if (G.Daily && G.Daily.afterRun) { try { G.Daily.afterRun(run, won); } catch (e) { console.error('BIND69 daily:', e); } }
+      N.sync(function () {});
+    },
+  };
+})();
+
+
+/* ===== 031_net_supabase.js ===== */
+/* ============================================================
+   BIND69 — NET : SUPABASE                        (owner: PERSISTENCE)
+
+   Google sign-in, cloud profile and shared boards, against the same
+   Supabase project the tuft pattern maker uses
+   (~/brain-garden/nursery/tuft-pattern-maker/src/js/cloud.js). Same
+   project, same publishable key, separate tables — one auth setup to
+   keep alive instead of two, and an account that already exists.
+
+   HAND-ROLLED REST, NOT @supabase/supabase-js, and that is a decision
+   rather than an oversight. tools/build.js concatenates src/ into ONE
+   self-contained HTML file with zero external assets — no CDN, no
+   script tags, runnable from file://. Vendoring the 120KB UMD client
+   to use four endpoints would trade that property for convenience.
+   GoTrue and PostgREST are both plain REST and what we need of them
+   is below in full:
+
+     GET  /auth/v1/settings                    which providers exist
+     GET  /auth/v1/authorize?provider=google   redirect out
+     POST /auth/v1/token?grant_type=refresh_token
+     GET  /auth/v1/user
+     POST /auth/v1/logout
+     GET/POST /rest/v1/<table>                 rows
+
+   The publishable key below is public by design: it identifies the
+   project and nothing else. Every table it can reach is guarded by
+   row-level security keyed on auth.uid() — see supabase/*.sql. A
+   player holding this key can read the boards, which is the point,
+   and can write only their own rows, which is the RLS policy.
+   ============================================================ */
+(function () {
+  const URL_BASE = 'https://nrfeojccyejcflfjuyqv.supabase.co';
+  const PUBKEY = 'sb_publishable_YmGsIGakesw-Xb_rnN_ouQ_jdjBVgfc';
+  const SKEY = 'bind69.session';
+
+  /* Where Google sends the player back. Supabase's redirect allowlist
+     globs do not match across `/`, so the trailing slash is stripped:
+     `/bind69` passes an allowlist entry that `/bind69/` does not. GitHub
+     Pages 301s `/bind69` back to `/bind69/` and the browser carries the
+     token fragment across the hop — this is exactly the dance cloud.js
+     documents, and it is load-bearing on both apps. */
+  function pageUrl() {
+    return location.origin +
+      (location.pathname === '/' ? '/' : location.pathname.replace(/\/$/, ''));
+  }
+
+  let session = null;      // { access_token, refresh_token, expires_at, user }
+  let providers = null;    // /auth/v1/settings, once
+
+  function loadSession() {
+    try { return JSON.parse(localStorage.getItem(SKEY) || 'null'); }
+    catch (e) { return null; }
+  }
+  function saveSession(s) {
+    session = s;
+    try {
+      if (s) localStorage.setItem(SKEY, JSON.stringify(s));
+      else localStorage.removeItem(SKEY);
+    } catch (e) { console.warn('BIND69 net: could not persist session —', e && e.message); }
+  }
+
+  function headers(auth) {
+    const h = { apikey: PUBKEY, 'Content-Type': 'application/json' };
+    if (auth && session) h.Authorization = 'Bearer ' + session.access_token;
+    return h;
+  }
+
+  /* Every response body is read as text first and parsed second. A
+     PostgREST error and a gateway's HTML 502 both arrive as non-JSON,
+     and JSON.parse throwing inside a .then() would surface as an
+     unhandled rejection with the actual failure nowhere on screen. */
+  function req(path, opt, cb) {
+    opt = opt || {};
+    fetch(URL_BASE + path, {
+      method: opt.method || 'GET',
+      headers: Object.assign(headers(opt.auth !== false), opt.headers || {}),
+      body: opt.body ? JSON.stringify(opt.body) : undefined,
+    }).then(function (r) {
+      return r.text().then(function (txt) {
+        let data = null;
+        if (txt) { try { data = JSON.parse(txt); } catch (e) { data = { raw: txt }; } }
+        if (!r.ok) {
+          const m = (data && (data.message || data.error_description || data.error || data.msg)) ||
+            ('HTTP ' + r.status);
+          return cb(m, null, r.status);
+        }
+        cb(null, data, r.status);
+      });
+    }, function (e) {
+      cb('network unreachable: ' + (e && e.message ? e.message : e));
+    });
+  }
+
+  /* ---------- session ----------
+     GoTrue hands the tokens back in the URL FRAGMENT, not the query —
+     the fragment never leaves the browser, so the access token is not
+     written into GitHub Pages' logs on the way in. It is read once and
+     the hash is cleared immediately, because a token sitting in the
+     address bar is a token that gets pasted into a bug report. */
+  function stamp(tok) {
+    return {
+      access_token: tok.access_token,
+      refresh_token: tok.refresh_token,
+      expires_at: Date.now() + ((tok.expires_in || 3600) * 1000),
+      user: tok.user || (session && session.user) || null,
+    };
+  }
+
+  function readRedirect() {
+    const h = location.hash || '';
+    if (h.indexOf('access_token=') < 0 && h.indexOf('error=') < 0) return false;
+    const p = new URLSearchParams(h.replace(/^#/, ''));
+    const err = p.get('error_description') || p.get('error');
+    history.replaceState(null, '', pageUrl() + location.search);
+    if (err) {
+      G.Net.err = 'sign-in refused: ' + err;
+      console.error('BIND69 net: OAuth returned —', err);
+      return false;
+    }
+    saveSession(stamp({
+      access_token: p.get('access_token'),
+      refresh_token: p.get('refresh_token'),
+      expires_in: parseInt(p.get('expires_in') || '3600', 10),
+    }));
+    return true;
+  }
+
+  function fresh(cb) {
+    if (!session) return cb('signed out');
+    /* refresh a minute early: a token that expires mid-request costs a
+       round trip and a confusing error the player cannot act on */
+    if (session.expires_at - 60000 > Date.now()) return cb(null);
+    req('/auth/v1/token?grant_type=refresh_token', {
+      method: 'POST', auth: false, body: { refresh_token: session.refresh_token },
+    }, function (err, data) {
+      if (err) {
+        /* A refresh token the server rejects is not a transient failure —
+           it is a session that is over. Clearing it drops the player back
+           to the local backend rather than retrying forever. */
+        console.warn('BIND69 net: session expired —', err);
+        saveSession(null);
+        return cb('session expired — sign in again');
+      }
+      saveSession(stamp(data));
+      cb(null);
+    });
+  }
+
+  /* A stored session the server REFUSES is dead, and has to be dropped rather
+     than retried. Without this a token that arrives corrupt — a truncated
+     fragment, a half-written localStorage entry, a project whose JWT secret was
+     rotated — sticks in storage forever: every boot re-sends it, gets the same
+     401, and paints the account screen with a JWT parse error the player can do
+     nothing about. Clearing it puts them back on a working SIGN IN row.
+
+     Only 401 and 403. A 500, a timeout or an unreachable network is the server
+     having a bad day and must NOT cost the player their session — that would
+     turn a train tunnel into a forced re-login. */
+  function loadUser(cb) {
+    fresh(function (e) {
+      if (e) return cb(e);
+      req('/auth/v1/user', {}, function (err, u, status) {
+        if (err) {
+          if (status === 401 || status === 403) {
+            console.warn('BIND69 net: stored session rejected, dropping it —', err);
+            saveSession(null);
+            return cb('session rejected — sign in again');
+          }
+          return cb(err);
+        }
+        session.user = u; saveSession(session);
+        cb(null, u);
+      });
+    });
+  }
+
+  /* ---------- rows ----------
+     PROFILES ARE PER SLOT, keyed (user_id, slot), not one blob per
+     player. Three volumes are three save games and the whole point of
+     the second one is starting clean; folding them into a single cloud
+     profile would push a veteran's unlocks into a fresh /vol1 and
+     delete the only reason that slot exists. So /vol0 here syncs with
+     /vol0 there, and the slots keep meaning what the volume picker
+     says they mean.
+
+     ACHIEVEMENTS GET NO TABLE. They live in meta.marks, meta.marks
+     syncs, and a second copy on the server would be a second source of
+     truth to keep agreeing with the first. */
+  function displayName() {
+    const u = session && session.user;
+    if (!u) return 'anon';
+    const m = u.user_metadata || {};
+    const n = m.full_name || m.name || m.preferred_username;
+    if (n) return String(n).slice(0, 24);
+    return String(u.email || 'anon').split('@')[0].slice(0, 24);
+  }
+
+  const Supa = {
+    name: 'supabase',
+    ready() { return typeof fetch === 'function'; },
+    user() { return session ? session.user : null; },
+
+    /* OAuth needs a redirect target the project can allowlist, and a page
+       opened straight off disk has none: location.origin is the string
+       'file://' and the round trip dies on Supabase's error page rather
+       than coming back here. Reads still work from a downloaded file —
+       the boards are public — so only the sign-in door closes. */
+    canSignIn(provider) {
+      if (location.protocol === 'file:') return 'sign-in needs the hosted game, not a downloaded file';
+      const p = provider || 'google';
+      if (providers && !providers[p]) return p + ' sign-in is not enabled on this project';
+      return '';
+    },
+
+    signIn(provider) {
+      const p = provider || 'google';
+      const why = Supa.canSignIn(p);
+      if (why) { G.Net.err = why; return false; }
+      location.href = URL_BASE + '/auth/v1/authorize?provider=' + encodeURIComponent(p) +
+        '&redirect_to=' + encodeURIComponent(pageUrl());
+      return true;
+    },
+
+    signOut() {
+      const had = session;
+      saveSession(null);
+      G.Net.err = '';
+      /* the local session is dropped FIRST and the server told second: if
+         the request fails the player is still signed out on this machine,
+         which is what they asked for */
+      if (had) req('/auth/v1/logout', { method: 'POST' }, function (e) {
+        if (e) console.warn('BIND69 net: server logout failed —', e);
+      });
+    },
+
+    pullMeta(cb) {
+      if (!session) return cb(null, null);
+      const slot = G.Save && G.Save.slot;
+      if (!(slot >= 0)) return cb('no volume mounted');
+      fresh(function (e) {
+        if (e) return cb(e);
+        req('/rest/v1/bind69_profiles?select=meta&user_id=eq.' + session.user.id +
+          '&slot=eq.' + slot, {}, function (err, rows) {
+            if (err) return cb(err);
+            cb(null, rows && rows.length ? rows[0].meta : null);
+          });
+      });
+    },
+
+    pushMeta(meta, cb) {
+      if (!session) return cb(null);
+      const slot = G.Save && G.Save.slot;
+      if (!(slot >= 0)) return cb('no volume mounted');
+      fresh(function (e) {
+        if (e) return cb(e);
+        req('/rest/v1/bind69_profiles', {
+          method: 'POST',
+          headers: { Prefer: 'resolution=merge-duplicates,return=minimal' },
+          body: { user_id: session.user.id, slot: slot, meta: meta, name: displayName() },
+        }, function (err) { cb(err || null); });
+      });
+    },
+
+    submit(board, entry, cb) {
+      if (!session) return cb('sign in to post a score');
+      fresh(function (e) {
+        if (e) return cb(e);
+        req('/rest/v1/bind69_scores', {
+          method: 'POST',
+          headers: { Prefer: 'return=minimal' },
+          body: {
+            user_id: session.user.id, board: board, name: displayName(),
+            f: entry.f | 0, t: Math.round(entry.t || 0), w: entry.w ? 1 : 0,
+            k: entry.k | 0, seed: String(entry.s || ''), diff: String(entry.d || ''),
+            ch: String(entry.ch || ''),
+          },
+        }, function (err) { cb(err || null, entry); });
+      });
+    },
+
+    /* Ordered server-side by the same three keys G.Net.rank uses, so a
+       board fetched from here and a board sorted on this machine cannot
+       disagree about who won. */
+    fetchBoard(id, cb) {
+      req('/rest/v1/bind69_scores?select=name,f,t,w,k,seed,diff,ch,created_at' +
+        '&board=eq.' + encodeURIComponent(id) +
+        '&order=w.desc,f.desc,t.asc&limit=50', { auth: !!session }, function (err, rows) {
+          if (err) return cb(err);
+          cb(null, (rows || []).map(function (r) {
+            return { n: r.name, f: r.f, t: r.t, w: r.w, k: r.k, s: r.seed, d: r.diff, ch: r.ch };
+          }));
+        });
+    },
+
+    /* Supabase has no achievement service — the mark is already in
+       meta.marks and pushMeta carries it. This is where Steamworks'
+       SetAchievement will go. */
+    award() { },
+  };
+
+  /* ---------- boot ----------
+     Registering the transport is not the same as being signed in. Supa
+     takes over from Net's local backend whenever fetch exists, because
+     a signed-out player still needs to READ the boards; only the write
+     paths require a session, and each says so. */
+  function boot() {
+    if (!Supa.ready()) {
+      console.warn('BIND69 net: no fetch — staying local');
+      return;
+    }
+    const arrived = readRedirect();
+    if (!session) session = loadSession();
+    G.Net.use(Supa);
+
+    /* Which providers the project actually has enabled. Asked once, so
+       the account panel can hide a Google button on a deploy where
+       Google is off rather than offering a door into an error. */
+    req('/auth/v1/settings', { auth: false }, function (err, s) {
+      if (err) { console.warn('BIND69 net: settings unreachable —', err); return; }
+      providers = (s && s.external) || {};
+    });
+
+    if (!session) return;
+    loadUser(function (e) {
+      if (e) {
+        G.Net.err = String(e);
+        return;
+      }
+      /* An arriving redirect is the one moment the player is definitely
+         waiting on us, so the first sync happens now rather than at the
+         next run end. A returning session syncs too — that is how a
+         second machine catches up on what the first one earned. */
+      if (G.Save && G.Save.profile) G.Net.sync(function () {});
+      else if (arrived) console.log('BIND69 net: signed in, waiting for a volume');
+    });
+  }
+
+  /* The seam is defined in 030_net.js, which sorts before this file, so
+     G.Net is already there. Guarded anyway: build.js orders by filename
+     and a rename must fail loudly rather than silently going offline. */
+  if (!G.Net) { console.error('BIND69 net: 030_net.js did not load — no backend registered'); return; }
+  boot();
+})();
+
+
+/* ===== 032_daily.js ===== */
+/* ============================================================
+   BIND69 — DAILY                                    (owner: META)
+
+   One seed a day, the same seed for everybody, one attempt per
+   volume. The run you get is the run everyone else got, so the
+   board underneath it compares play rather than luck.
+
+   This is the feature the codebase was already built for and never
+   collected on: 500_floorgen.js takes a seed and contains zero
+   unseeded RNG calls, ?seed= has always been parsed, and
+   022_unlocks.js has been writing the seed into every history row
+   since it existed. All that was missing was agreeing on WHICH seed
+   and where the results go.
+
+   THE CLOCK LIVES HERE. 020_save.js takes `now` as an argument and
+   reads no clock on purpose; a daily is inherently a date, so this
+   file is where that dependency is admitted rather than smuggled
+   into the save layer.
+   ============================================================ */
+(function () {
+  /* UTC, not local time. A daily that rolls over at midnight in your
+     own zone gives whoever lives furthest east first crack at it and
+     makes "today's board" mean a different run depending on who is
+     reading it. One planet, one seed, one changeover. */
+  function dayId(now) {
+    const d = new Date(now == null ? Date.now() : now);
+    const p = (n) => (n < 10 ? '0' : '') + n;
+    return d.getUTCFullYear() + '-' + p(d.getUTCMonth() + 1) + '-' + p(d.getUTCDate());
+  }
+
+  /* The seed string the run actually uses. Uppercase and short because
+     240_cinema.js's SEED field filters to [A-Z0-9-_] and caps at 12,
+     so a daily seed can be typed back in by hand and re-run — which is
+     also how anyone verifies the board is honest. */
+  function seedFor(day) { return 'D' + day.replace(/-/g, '').slice(2); }
+
+  /* Everyone plays the same tuning or the board compares nothing. HARD
+     is the anchor tier — 021_difficulty.js calls it "the original
+     descent" — and the baseline character is the one every volume has
+     from its first boot, so the daily never depends on what you have
+     unlocked. */
+  const DIFF = 'hard';
+  const CHAR = 'kiddie';
+
+  const D = G.Daily = {
+    DIFF: DIFF,
+    CHAR: CHAR,
+
+    day(now) { return dayId(now); },
+    seed(now) { return seedFor(dayId(now)); },
+    board(now) { return 'daily-' + dayId(now); },
+
+    /* Seconds until the seed changes, for the countdown on the panel.
+       A player deciding whether to spend their one attempt deserves to
+       know whether "tomorrow" is in twenty hours or twenty minutes. */
+    secondsLeft(now) {
+      const t = now == null ? Date.now() : now;
+      const d = new Date(t);
+      const next = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() + 1);
+      return Math.max(0, Math.round((next - t) / 1000));
+    },
+
+    /* ---------- one attempt per day ----------
+       Recorded under meta.stats, which 244_archive.js:23 establishes as
+       the free-form dictionary that needs no Save.VERSION bump — every
+       profile ever written already has it, so this ships without
+       reporting a single existing volume as DAMAGED. */
+    record(now) {
+      const m = G.Save && G.Save.meta && G.Save.meta();
+      if (!m) return null;
+      return (m.stats.daily || (m.stats.daily = {}));
+    },
+    playedToday(now) {
+      const r = D.record();
+      return !!(r && r.day === dayId(now));
+    },
+    /* A run STARTED is a run spent. Ending the attempt on death would
+       make the daily farmable by closing the tab on a bad opening room,
+       which is the one thing a shared-seed board cannot survive.
+       022_unlocks.js:367 counts `runs` at start for the same reason. */
+    claim(now) {
+      const r = D.record();
+      if (!r) return false;
+      const day = dayId(now);
+      if (r.day === day) return false;
+      r.day = day; r.result = null;
+      if (G.Save.flush) G.Save.flush();
+      return true;
+    },
+    /* what today's attempt scored, once it is over */
+    resultToday(now) {
+      const r = D.record();
+      return (r && r.day === dayId(now)) ? r.result : null;
+    },
+
+    /* ---------- the fold ----------
+       Called by G.Net.afterRun for every run, and this file decides
+       which boards a run belongs on. Routing lives here rather than in
+       030_net.js because "which board" is a rule about the game and the
+       seam is deliberately ignorant of the game.
+
+       Two boards, two different questions:
+
+         daily-<day>  same seed for everyone, so it compares PLAY
+         all-time     different seeds, so it compares the best descent
+                      anyone ever had
+
+       ALL TIME TAKES HARD RUNS ONLY. 021_difficulty.js calls HARD "the
+       original descent" and EASY halves incoming damage — a single
+       ladder mixing the tiers would rank the tier, not the player, and
+       the top of it would be entirely EASY runs within a week. A daily
+       is always HARD by construction, so every daily is eligible. */
+    afterRun(run, won) {
+      if (!run) return;
+      const entry = {
+        f: run.deepest || run.floorIndex || 1,
+        t: Math.round(run.time || 0),
+        w: won ? 1 : 0,
+        k: run.kills || 0,
+        s: run.seedStr || String(run.seed || ''),
+        d: run.diffId || DIFF,
+        ch: run.charId || CHAR,
+        ts: Date.now(),
+      };
+
+      if (run.daily) {
+        const day = run.dailyDay || dayId();
+        const r = D.record();
+        if (r) { r.day = day; r.result = entry; if (G.Save.flush) G.Save.flush(); }
+        G.Net.submit('daily-' + day, entry, function () {});
+      }
+
+      if (entry.d === 'hard') G.Net.submit('all-time', entry, function () {});
+    },
+  };
 })();
 
 
@@ -11230,12 +12199,29 @@ G.Pool = function (factory, reset) {
      the top because a player who left mid-descent came back for exactly that.
      Rebuilt on every title entry rather than cached — a run can be abandoned
      or finished between visits. */
-  const BASE_MENU = ['START', 'DIFFICULTY', 'SEED', '/proc', 'OPTIONS'];
+  /* DAILY sits directly under START because it is a second way to press
+     start, not a submenu — and it opens the board rather than launching,
+     so the row is worth taking even on a day you have already spent your
+     attempt. ACCOUNT is last before OPTIONS: it is the least-pressed row
+     on the screen and the only one that does nothing to the game. */
+  const BASE_MENU = ['START', 'DAILY', 'DIFFICULTY', 'SEED', '/proc', 'ACCOUNT', 'OPTIONS'];
   let MENU = BASE_MENU;
   function rebuildMenu() {
     const resumable = !!(G.Save && G.Save.profile && G.Save.getRun());
     MENU = resumable ? ['CONTINUE'].concat(BASE_MENU) : BASE_MENU;
     return MENU;
+  }
+
+  /* The plate has to hold eight rows on a 360px screen without walking
+     through the subtitle above it or the footer bar below. Pitch and top
+     edge both move with the row count rather than the plate growing
+     downwards off the screen — measured against VH, not guessed. */
+  function menuBox() {
+    const n = MENU.length;
+    if (n <= 5) return { my: 158, rowH: 26 };
+    if (n === 6) return { my: 158, rowH: 23 };
+    if (n === 7) return { my: 140, rowH: 22 };
+    return { my: 132, rowH: 21 };
   }
   function row(i) { return MENU[i]; }
 
@@ -11405,6 +12391,11 @@ G.Pool = function (factory, reset) {
             return null;
           case 'SEED': S.seedEntry = true; S.seedBuf = ''; snd('uiSelect', { vol: 0.5 }); return null;
           case '/proc': openArchive('title'); return null;
+          /* Opens the board; the board is where you press play. One attempt
+             a day means this row is usually not a start button, and offering
+             it as one would spend the attempt on a misread. */
+          case 'DAILY': snd('uiSelect', { vol: 0.7 }); S.lastAction = 'boards'; return 'boards';
+          case 'ACCOUNT': snd('uiSelect', { vol: 0.6 }); S.lastAction = 'account'; return 'account';
           case 'OPTIONS':
             S.opts.mute = !S.opts.mute;
             if (G.Audio && G.Audio.setMute) { try { G.Audio.setMute(S.opts.mute); } catch (e) { } }
@@ -11482,7 +12473,8 @@ G.Pool = function (factory, reset) {
       /* /proc made the base menu five rows, and CONTINUE makes it six. At
          26 the six-row plate pushed the DIFFICULTY blurb through the footer
          bar, so the pitch tightens only when the sixth row exists. */
-      const mw = 300, mx = ((VW - mw) / 2) | 0, my = 158, rowH = MENU.length > 5 ? 23 : 26;
+      const box = menuBox(), my = box.my, rowH = box.rowH;
+      const mw = 300, mx = ((VW - mw) / 2) | 0;
       c.fillStyle = 'rgba(3,8,11,0.88)';
       c.fillRect(mx - 8, my - 12, mw + 16, rowH * MENU.length + 20);
       R.panel(c, mx - 8, my - 12, mw + 16, rowH * MENU.length + 20, { color: rgba(accent, 0.55), bg: 'rgba(0,0,0,0)' });
@@ -11495,6 +12487,25 @@ G.Pool = function (factory, reset) {
         if (label === 'SEED') value = S.seedEntry ? (S.seedBuf + (((t * 3) | 0) % 2 ? '_' : ' ')) : (S.seedBuf || 'RANDOM');
         if (label === 'OPTIONS') value = S.opts.mute ? 'OFF' : 'ON';
         if (label === 'DIFFICULTY') value = G.Difficulty ? ('< ' + G.Difficulty.current().name + ' >') : 'NORMAL';
+        /* What the row is worth pressing FOR, on the row itself. DAILY
+           without its state is a mystery button: whether today's attempt
+           is still there is the entire question the player has, and
+           making them open the screen to find out is a wasted press. */
+        if (label === 'DAILY') {
+          const D = G.Daily;
+          if (!D) value = null;
+          else if (!(G.Save && G.Save.profile)) value = 'NO VOLUME';
+          else if (D.playedToday()) {
+            const r = D.resultToday();
+            value = r ? (r.w ? 'ROOT' : 'FLOOR ' + r.f) : 'SPENT';
+          } else value = 'READY';
+        }
+        if (label === 'ACCOUNT') {
+          const N = G.Net;
+          const st = N ? N.status() : 'local';
+          value = st === 'in' ? 'SYNCED' : st === 'busy' ? 'SYNCING' :
+            st === 'error' ? 'ERROR' : st === 'local' ? 'THIS MACHINE' : 'SIGN IN';
+        }
         if (label === 'CONTINUE') {
           const b = G.Save && G.Save.getRun();
           /* short on purpose — CONTINUE is a wide label at this size, and the
@@ -11533,7 +12544,7 @@ G.Pool = function (factory, reset) {
         txt(c, d.sub, VW / 2, pb + 8, { size: 1, color: accent, align: 'center' });
         txt(c, d.blurb, VW / 2, pb + 20, { size: 1, color: 'rgba(190,230,215,0.62)', align: 'center' });
       } else {
-        txt(c, 'WASD MOVE   ARROWS FIRE   SPACE BOMB   E ACTIVE   TAB MAP', VW / 2, hintY,
+        txt(c, 'WASD MOVE   ARROWS FIRE   SPACE BOMB   E TAKE/USE   TAB MAP', VW / 2, hintY,
           { size: 1, color: 'rgba(160,210,195,0.42)', align: 'center' });
       }
 
@@ -14258,6 +15269,381 @@ G.Pool = function (factory, reset) {
 })();
 
 
+/* ===== 251_account.js ===== */
+/* ============================================================
+   BIND69 — ACCOUNT                                   (owner: UI)
+
+   The sign-in door. One screen, at most four rows, and it exists to
+   answer exactly two questions: is my progress anywhere but this
+   laptop, and if not, why not.
+
+   It draws in the same plain register as 242_profile.js rather than
+   the title's: this is the terminal, not the game. Nothing here
+   knows what Supabase is — every row goes through G.Net, which is
+   the whole reason 030_net.js is a seam.
+   ============================================================ */
+(function () {
+  const VW = G.VW, VH = G.VH;
+  const R = G.Render;
+  const ACCENT = '#4af0b0';
+  const DIM = 'rgba(150,205,185,0.5)';
+  const FAINT = 'rgba(150,200,185,0.32)';
+  const BAD = '#ff8a9a';
+
+  function txt(c, s, x, y, o) { if (R && R.text) R.text(c, s, x, y, o); }
+  function snd(n, o) { if (G.Audio && G.Audio.play) { try { G.Audio.play(n, o); } catch (e) { } } }
+  function rgba(hex, a) {
+    const h = hex.replace('#', '');
+    return 'rgba(' + parseInt(h.slice(0, 2), 16) + ',' + parseInt(h.slice(2, 4), 16) + ',' +
+      parseInt(h.slice(4, 6), 16) + ',' + a + ')';
+  }
+
+  const S = { sel: 0, t: 0, note: '' };
+
+  function nameOf(u) {
+    if (!u) return '';
+    const m = u.user_metadata || {};
+    return String(m.full_name || m.name || u.email || 'signed in').slice(0, 28);
+  }
+
+  /* Rows are built per frame from what is actually possible right now.
+     A row that cannot do anything is not drawn greyed — it is not
+     drawn: unlike the pause menu's BUILD LISTING there is no lesson to
+     teach here about a screen that exists elsewhere. */
+  function rows() {
+    const N = G.Net;
+    const out = [];
+    if (!N) return [{ id: 'back', label: 'BACK' }];
+    if (N.signedIn()) {
+      out.push({ id: 'sync', label: 'SYNC NOW', hint: 'push this volume up and pull anything the other machine earned' });
+      out.push({ id: 'out', label: 'SIGN OUT', hint: 'this machine keeps everything it already has' });
+    } else {
+      /* cloud.js makes the same argument about an unconfigured deploy: a
+         button that cannot work is worse than no button, because pressing
+         it teaches the player the game is broken rather than that the door
+         is elsewhere. The reason takes the row's place. */
+      const why = N.signInBlocked('google');
+      if (why) out.push({ id: 'none', label: 'NO SIGN-IN HERE', hint: why });
+      else out.push({ id: 'google', label: 'SIGN IN WITH GOOGLE', hint: 'opens google, comes back here' });
+    }
+    out.push({ id: 'back', label: 'BACK', hint: '' });
+    return out;
+  }
+
+  const A = G.AccountScreen = {
+    enter() { S.sel = 0; S.t = 0; S.note = ''; },
+
+    /* returns 'back' when the screen is done, else null */
+    update(dt) {
+      S.t += dt;
+      const pr = G.input.pressed;
+      const rs = rows();
+      const n = rs.length;
+      if (pr.up || pr.fup) { S.sel = (S.sel + n - 1) % n; snd('uiMove', { vol: 0.4 }); }
+      if (pr.down || pr.fdown) { S.sel = (S.sel + 1) % n; snd('uiMove', { vol: 0.4 }); }
+      if (pr.pause || pr.back) { snd('uiBack', { vol: 0.5 }); return 'back'; }
+      if (!(pr.confirm || pr.bomb || pr.use)) return null;
+
+      const r = rs[Math.min(S.sel, n - 1)];
+      switch (r.id) {
+        case 'google':
+          snd('uiSelect', { vol: 0.7 });
+          S.note = 'opening google…';
+          /* the browser navigates away; 031_net_supabase.js picks the
+             session up out of the fragment on the way back in */
+          G.Net.signIn('google');
+          return null;
+        case 'sync':
+          snd('uiSelect', { vol: 0.6 });
+          S.note = 'syncing…';
+          G.Net.sync(function (err) { S.note = err ? '' : 'synced'; });
+          return null;
+        case 'out':
+          snd('glitch', { vol: 0.5 });
+          G.Net.signOut();
+          S.note = 'signed out';
+          S.sel = 0;
+          return null;
+        case 'back': snd('uiBack', { vol: 0.5 }); return 'back';
+      }
+      return null;
+    },
+
+    render(c) {
+      const N = G.Net, t = S.t;
+      c.fillStyle = '#03070a'; c.fillRect(0, 0, VW, VH);
+      c.fillStyle = 'rgba(0,0,0,0.22)';
+      for (let y = 0; y < VH; y += 3) c.fillRect(0, y, VW, 1);
+
+      txt(c, 'ACCOUNT', 20, 18, { size: 2, big: true, color: ACCENT });
+      txt(c, 'WHERE THIS VOLUME LIVES', 20, 52, { size: 1, color: FAINT });
+
+      /* ---- status plate: the answer to "is my progress anywhere else" ---- */
+      const u = N && N.user();
+      const st = N ? N.status() : 'local';
+      R.panel(c, 40, 74, VW - 80, 58, { color: rgba(ACCENT, 0.55), title: 'STATUS' });
+      if (u) {
+        txt(c, nameOf(u), 54, 90, { size: 2, big: true, color: '#e9fff5' });
+        const slot = G.Save && G.Save.slot >= 0 ? '/vol' + G.Save.slot : 'no volume';
+        txt(c, slot + ' syncs to this account on every run end', 54, 114, { size: 1, color: rgba(ACCENT, 0.75) });
+      } else if (st === 'local') {
+        txt(c, 'THIS MACHINE ONLY', 54, 90, { size: 2, big: true, color: DIM });
+        txt(c, 'no backend in this build — nothing leaves the browser', 54, 114, { size: 1, color: FAINT });
+      } else {
+        txt(c, 'NOT SIGNED IN', 54, 90, { size: 2, big: true, color: DIM });
+        txt(c, 'progress is saved, but only in this browser on this machine', 54, 114, { size: 1, color: FAINT });
+      }
+
+      /* the failure, in full, where the player can act on it */
+      if (N && N.err) {
+        txt(c, String(N.err).slice(0, 70).toLowerCase(), 54, 128, { size: 1, color: BAD });
+      } else if (S.note) {
+        txt(c, S.note, 54, 128, { size: 1, color: ACCENT });
+      }
+
+      /* ---- rows ---- */
+      const rs = rows();
+      /* 32, not 30: the label is F7 at size 2 = 18px tall (200_art.js:328)
+         and the hint underneath it was landing on its baseline. */
+      const mx = 40, mw = VW - 80, my = 154, rowH = 32;
+      R.panel(c, mx - 8, my - 10, mw + 16, rowH * rs.length + 16, { color: rgba(ACCENT, 0.4) });
+      for (let i = 0; i < rs.length; i++) {
+        const sel = i === Math.min(S.sel, rs.length - 1);
+        const y = my + i * rowH;
+        if (sel) {
+          c.fillStyle = rgba(ACCENT, 0.13); c.fillRect(mx, y - 4, mw, rowH - 6);
+          c.fillStyle = ACCENT; c.fillRect(mx, y - 4, 2, rowH - 6);
+          if (((t * 6) | 0) % 2) c.fillRect(mx - 9, y + 6, 6, 6);
+        }
+        const dead = rs[i].id === 'none';
+        txt(c, rs[i].label, mx + 12, y, {
+          size: 2, big: true, color: dead ? FAINT : sel ? '#e9fff5' : DIM,
+        });
+        if (rs[i].hint) txt(c, rs[i].hint, mx + 12, y + 20, { size: 1, color: sel ? rgba(ACCENT, 0.7) : FAINT });
+      }
+
+      /* ---- what sync actually does, said once, plainly ---- */
+      const fy = my + rowH * rs.length + 22;
+      txt(c, 'UNLOCKS AND RECORDS MERGE ACROSS MACHINES · A SUSPENDED RUN STAYS WHERE YOU LEFT IT',
+        VW / 2, fy, { size: 1, color: FAINT, align: 'center' });
+
+      c.fillStyle = 'rgba(0,0,0,0.6)'; c.fillRect(0, VH - 16, VW, 16);
+      c.fillStyle = ACCENT; c.globalAlpha = 0.35; c.fillRect(0, VH - 16, VW, 1); c.globalAlpha = 1;
+      txt(c, '> id -un', 8, VH - 11, { size: 1, color: 'rgba(150,200,185,0.6)' });
+      txt(c, 'ENTER SELECT   ESC BACK', VW - 8, VH - 11, { size: 1, color: FAINT, align: 'right' });
+    },
+  };
+})();
+
+
+/* ===== 252_boards.js ===== */
+/* ============================================================
+   BIND69 — BOARDS                                    (owner: UI)
+
+   Today's descent, and the ladder under it.
+
+   Two tabs over one list. TODAY is the daily seed everybody is
+   playing; ALL TIME is every daily result this volume — or this
+   account — has ever posted. The tab is a filter over a board id,
+   not two screens, because the row format is identical and two
+   renderers would drift.
+
+   Rows arrive asynchronously and the screen has to be honest about
+   which of the three states it is in — never loaded, loading, empty —
+   because an empty panel that means "still fetching" and an empty
+   panel that means "nobody has played" are different news.
+   ============================================================ */
+(function () {
+  const VW = G.VW, VH = G.VH;
+  const R = G.Render;
+  const ACCENT = '#4af0b0';
+  const DIM = 'rgba(150,205,185,0.5)';
+  const FAINT = 'rgba(150,200,185,0.32)';
+  const GOLD = '#ffd479';
+
+  function txt(c, s, x, y, o) { if (R && R.text) R.text(c, s, x, y, o); }
+  function snd(n, o) { if (G.Audio && G.Audio.play) { try { G.Audio.play(n, o); } catch (e) { } } }
+  function rgba(hex, a) {
+    const h = hex.replace('#', '');
+    return 'rgba(' + parseInt(h.slice(0, 2), 16) + ',' + parseInt(h.slice(2, 4), 16) + ',' +
+      parseInt(h.slice(4, 6), 16) + ',' + a + ')';
+  }
+
+  /* mm:ss — run times are minutes, and a bare second count is unreadable
+     as a comparison, which is the only thing this column is for */
+  function clock(sec) {
+    const s = Math.max(0, Math.round(sec || 0));
+    const m = (s / 60) | 0;
+    return m + ':' + (s % 60 < 10 ? '0' : '') + (s % 60);
+  }
+  function countdown(sec) {
+    const h = (sec / 3600) | 0, m = ((sec % 3600) / 60) | 0;
+    return h > 0 ? h + 'H ' + m + 'M' : m + 'M';
+  }
+
+  const S = {
+    t: 0, tab: 0, sel: 0,
+    rows: null,          // null = never asked, [] = asked and empty
+    loading: false,
+    scope: 'global',     // 'global' | 'me'
+  };
+  const TABS = ['TODAY', 'ALL TIME'];
+
+  function boardId() { return S.tab === 0 ? (G.Daily ? G.Daily.board() : 'daily') : 'all-time'; }
+
+  function load() {
+    if (!G.Net) { S.rows = []; return; }
+    S.loading = true;
+    const want = boardId() + '|' + S.scope;
+    G.Net.board(boardId(), S.scope, function (err, rows) {
+      /* a reply for a tab the player has already left must not land in
+         the list they are now looking at */
+      if (want !== boardId() + '|' + S.scope) return;
+      S.loading = false;
+      S.rows = rows || [];
+      S.sel = 0;
+    });
+  }
+
+  const B = G.BoardsScreen = {
+    enter() { S.t = 0; S.tab = 0; S.sel = 0; S.rows = null; load(); },
+
+    /* returns 'back' | 'play' | null */
+    update(dt) {
+      S.t += dt;
+      const pr = G.input.pressed;
+      if (pr.pause || pr.back) { snd('uiBack', { vol: 0.5 }); return 'back'; }
+
+      const left = pr.left || pr.fleft, right = pr.right || pr.fright;
+      if (left || right) {
+        S.tab = (S.tab + (right ? 1 : TABS.length - 1)) % TABS.length;
+        S.rows = null; snd('uiMove', { vol: 0.45 }); load();
+      }
+      /* Q flips whose board this is. Kept off confirm because the row a
+         player wants is usually their own and a global board they cannot
+         place themselves on is discouraging rather than motivating. */
+      if (pr.drop) {
+        S.scope = S.scope === 'global' ? 'me' : 'global';
+        S.rows = null; snd('uiMove', { vol: 0.45 }); load();
+      }
+      const n = S.rows ? S.rows.length : 0;
+      if (n) {
+        if (pr.up || pr.fup) { S.sel = (S.sel + n - 1) % n; snd('uiMove', { vol: 0.35 }); }
+        if (pr.down || pr.fdown) { S.sel = (S.sel + 1) % n; snd('uiMove', { vol: 0.35 }); }
+      }
+
+      if (pr.confirm || pr.bomb || pr.use) {
+        if (B.playable()) { snd('uiSelect', { vol: 0.8 }); return 'play'; }
+        snd('deny', { vol: 0.5 });
+      }
+      return null;
+    },
+
+    /* One attempt per volume per day, and no attempt at all without a
+       volume to spend it from — an unmounted browser would post a score
+       nothing could ever be compared against. */
+    playable() {
+      const D = G.Daily;
+      if (!D || !(G.Save && G.Save.profile)) return false;
+      return !D.playedToday();
+    },
+
+    render(c) {
+      const t = S.t, D = G.Daily;
+      c.fillStyle = '#03070a'; c.fillRect(0, 0, VW, VH);
+      c.fillStyle = 'rgba(0,0,0,0.22)';
+      for (let y = 0; y < VH; y += 3) c.fillRect(0, y, VW, 1);
+
+      txt(c, 'BOARDS', 20, 14, { size: 2, big: true, color: ACCENT });
+      if (D) {
+        txt(c, 'SEED ' + D.seed() + '   ·   NEW SEED IN ' + countdown(D.secondsLeft()),
+          VW - 20, 20, { size: 1, color: FAINT, align: 'right' });
+      }
+
+      /* ---- tabs ---- */
+      let tx = 20;
+      for (let i = 0; i < TABS.length; i++) {
+        const on = i === S.tab;
+        const w = R.textWidth(TABS[i], { size: 1 }) + 16;
+        c.fillStyle = on ? rgba(ACCENT, 0.18) : 'rgba(255,255,255,0.03)';
+        c.fillRect(tx, 40, w, 14);
+        if (on) { c.fillStyle = ACCENT; c.fillRect(tx, 40, w, 1); }
+        txt(c, TABS[i], tx + 8, 43, { size: 1, color: on ? ACCENT : FAINT });
+        tx += w + 6;
+      }
+      txt(c, S.scope === 'global' ? 'EVERYONE  (Q: JUST ME)' : 'JUST ME  (Q: EVERYONE)',
+        VW - 20, 43, { size: 1, color: FAINT, align: 'right' });
+
+      /* ---- the play band ---- */
+      const D2 = D && G.Save && G.Save.profile ? D.resultToday() : null;
+      /* 38 tall, not 34: F7 at size 2 is 18px (200_art.js:328), and the
+         band's own bottom edge and the list panel's title were landing on
+         the same row at 34. */
+      R.panel(c, 20, 62, VW - 40, 38, { color: rgba(B.playable() ? ACCENT : '#5b7a70', 0.55) });
+      if (!G.Save || !G.Save.profile) {
+        txt(c, "MOUNT A VOLUME TO PLAY TODAY'S DESCENT", 34, 74, { size: 1, color: DIM });
+      } else if (B.playable()) {
+        txt(c, "PLAY TODAY'S DESCENT", 34, 70, { size: 2, big: true, color: '#e9fff5' });
+        txt(c, 'HARD · SCRIPT KIDDIE · ONE ATTEMPT', VW - 34, 78, { size: 1, color: rgba(ACCENT, 0.8), align: 'right' });
+        if (((t * 3) | 0) % 2) { c.fillStyle = ACCENT; c.fillRect(24, 72, 5, 5); }
+      } else if (D2) {
+        txt(c, D2.w ? 'YOU REACHED ROOT' : 'YOU FELL ON FLOOR ' + D2.f, 34, 70,
+          { size: 2, big: true, color: D2.w ? GOLD : DIM });
+        txt(c, clock(D2.t) + ' · ' + (D2.k | 0) + ' KILLS', VW - 34, 78, { size: 1, color: FAINT, align: 'right' });
+      } else {
+        txt(c, "TODAY'S ATTEMPT IS SPENT", 34, 70, { size: 2, big: true, color: DIM });
+      }
+
+      /* ---- the list ---- */
+      const lx = 20, lw = VW - 40, ly = 118, rowH = 15;
+      /* 13 rows is what fits between the band and the footer bar at VH-16 */
+      const cap = 13;
+      R.panel(c, lx, ly - 10, lw, rowH * cap + 20, { color: rgba(ACCENT, 0.35), title: boardId().toUpperCase() });
+
+      txt(c, '#', lx + 10, ly, { size: 1, color: FAINT });
+      txt(c, 'PLAYER', lx + 34, ly, { size: 1, color: FAINT });
+      txt(c, 'FLOOR', lx + 300, ly, { size: 1, color: FAINT, align: 'right' });
+      txt(c, 'TIME', lx + 380, ly, { size: 1, color: FAINT, align: 'right' });
+      txt(c, 'KILLS', lx + 450, ly, { size: 1, color: FAINT, align: 'right' });
+      txt(c, 'RESULT', lx + lw - 10, ly, { size: 1, color: FAINT, align: 'right' });
+
+      if (S.rows === null) {
+        txt(c, S.loading ? 'READING…' : '', VW / 2, ly + 40, { size: 1, color: FAINT, align: 'center' });
+      } else if (!S.rows.length) {
+        /* the three empty states are different news and say so */
+        const why = S.scope === 'me' ? 'YOU HAVE NOT POSTED TO THIS BOARD YET'
+          : (G.Net && G.Net.local()) ? 'NO BACKEND IN THIS BUILD — SHOWING THIS MACHINE ONLY'
+            : (G.Net && !G.Net.signedIn()) ? 'NOBODY HAS POSTED TODAY — SIGN IN TO BE FIRST'
+              : 'NOBODY HAS POSTED TODAY';
+        txt(c, why, VW / 2, ly + 40, { size: 1, color: FAINT, align: 'center' });
+      } else {
+        const start = Math.max(0, Math.min(S.sel - (cap >> 1), S.rows.length - cap));
+        for (let i = 0; i < Math.min(cap, S.rows.length); i++) {
+          const idx = start + i;
+          const r = S.rows[idx];
+          const y = ly + 14 + i * rowH;
+          const sel = idx === S.sel;
+          if (sel) { c.fillStyle = rgba(ACCENT, 0.12); c.fillRect(lx + 4, y - 3, lw - 8, rowH - 2); }
+          const col = r.w ? GOLD : sel ? '#e9fff5' : DIM;
+          txt(c, String(idx + 1), lx + 10, y, { size: 1, color: idx < 3 ? GOLD : FAINT });
+          txt(c, String(r.n || 'this machine').slice(0, 22).toLowerCase(), lx + 34, y, { size: 1, color: col });
+          txt(c, String(r.f | 0), lx + 300, y, { size: 1, color: col, align: 'right' });
+          txt(c, clock(r.t), lx + 380, y, { size: 1, color: col, align: 'right' });
+          txt(c, String(r.k | 0), lx + 450, y, { size: 1, color: col, align: 'right' });
+          txt(c, r.w ? 'ROOT' : 'DIED', lx + lw - 10, y, { size: 1, color: col, align: 'right' });
+        }
+      }
+
+      c.fillStyle = 'rgba(0,0,0,0.6)'; c.fillRect(0, VH - 16, VW, 16);
+      c.fillStyle = ACCENT; c.globalAlpha = 0.35; c.fillRect(0, VH - 16, VW, 1); c.globalAlpha = 1;
+      txt(c, '> sort -k2 -rn /proc/board', 8, VH - 11, { size: 1, color: 'rgba(150,200,185,0.6)' });
+      txt(c, (B.playable() ? 'ENTER PLAY   ' : '') + 'LEFT/RIGHT TAB   Q SCOPE   ESC BACK',
+        VW - 8, VH - 11, { size: 1, color: FAINT, align: 'right' });
+    },
+  };
+})();
+
+
 /* ===== 300_stats.js ===== */
 /* ============================================================
    BIND69 — STATS + ITEM FRAMEWORK              (owner: ITEMS)
@@ -14497,6 +15883,24 @@ G.Pool = function (factory, reset) {
        property on the scope object so that stacking, clamping and the readout
        all come free from the pipeline that already exists. */
     emitCount: 1,
+    /* REGISTER PRESSURE — how many lines the ROOT scope can actually run.
+       docs/BUILD_LISTING.md §9.
+
+       The listing's depth budget says how deep you may nest. This says how
+       WIDE root may be, and it is the reason to nest at all. Lines past it
+       SPILL: they sit in the listing, they are drawn, and they do nothing.
+
+       Root is the process's register file; a block is what you spill to, and
+       the stack's size is `stackDepth`. Two budgets, two meanings — which is
+       why this one is root-only. A block has no width limit of its own
+       because a block already pays narrowing: what you demote into one stops
+       reaching your main shot and only flavours what that block makes. You
+       cannot escape the cost, you can only choose where to pay it.
+
+       ACTIVES DO NOT COUNT. LINE.key's rule is that an active is a keypress
+       and where it sits changes nothing (330_itemdex.js); a budget that
+       counted them would make that rule true only until you held six. */
+    regCount: 6,
   };
   const LIMITS = {
     /* shotSpeed 720 was reached by the strongest 4 of its 11 sources, so the
@@ -14515,6 +15919,10 @@ G.Pool = function (factory, reset) {
        400_player.js is what stops it being a problem; this is what stops it
        being a design one. */
     emitCount: [1, 4],
+    /* 3 is punishing but playable — a starting build is four or five lines.
+       16 is past the point where a listing stops fitting the panel, so the
+       ceiling is the screen's, not the arithmetic's. */
+    regCount: [3, 16],
   };
   Stats.DEF = DEF; Stats.LIMITS = LIMITS;
 
@@ -14607,6 +16015,9 @@ G.Pool = function (factory, reset) {
        item's value silently evaporates */
     s.stackDepth = clamp(Math.round(s.stackDepth), 1, 4);
     s.emitCount = clamp(Math.round(s.emitCount), 1, 4);
+    /* an integer for the same reason stackDepth is: a 6.5 truncates to 6 and
+       half of whatever raised it evaporates without saying so */
+    s.regCount = clamp(Math.round(s.regCount), 3, 16);
     /* Two shots 1.7 degrees apart diverge ~6px over 200px and render as one
        projectile — the old `<= 0.001` guard never fired against a +0.03
        spread, so shotCount 2 was invisible. Every multishot build gets a
@@ -21521,6 +22932,66 @@ G.Pool = function (factory, reset) {
     ],
   });
 
+  /* THE OTHER BUDGET — docs/BUILD_LISTING.md §9.
+
+     `ulimit -s` buys DEPTH; these buy WIDTH. They are priced against each
+     other on purpose: depth is exponential and costs a real slice of your
+     gun, width is linear and costs a sliver. A run that wants to hold more
+     lines at root buys these; a run that wants to nest what it already holds
+     buys the stack. Neither makes the other pointless, because a register you
+     do not have is a line you must nest, and a stack level you do not have is
+     a line you cannot nest.
+
+     Both are REAL compiler and ISA facts, which is the whole naming rule for
+     this family: -fomit-frame-pointer genuinely frees %rbp for allocation,
+     and x86-64 genuinely added eight general-purpose registers. */
+  S.add({
+    id: 'omitfp', name: '-fomit-frame-pointer', quality: 3, color: '#8de0c8',
+    desc: 'No frame pointer. %rbp is a general register again, and nothing can walk the stack.',
+    effect: '+1 register: root runs one more line before it spills.',
+    line: 'modifier',
+    pools: ['treasure', 'shop'], tint: '#8de0c8', tintW: 0.5,
+    add: { regCount: 1 }, mul: { fireDelay: 1.06 },
+    synergies: ['-fomit-frame-pointer + any emitter => one more line stays at root instead of nesting'],
+    px: [
+      '.gggggggggg.',
+      '.g44444444g.',
+      '.gggggggggg.',
+      '............',
+      '.gggggggggg.',
+      '.g44444444g.',
+      '.gggggggggg.',
+      '............',
+      '.gggggggggg.',
+      '.g66666666g.',
+      '.gggggggggg.',
+    ],
+  });
+
+  S.add({
+    id: 'r8r15', name: '%r8-%r15', quality: 4, color: '#b9ffe2',
+    desc: 'Long mode. Eight more general-purpose registers than the machine used to have.',
+    effect: '+2 registers: root runs two more lines before it spills.',
+    line: 'modifier',
+    pools: ['treasure', 'boss'], tint: '#b9ffe2', tintW: 0.6,
+    add: { regCount: 2 }, mul: { damage: 0.9 },
+    synergies: ['%r8-%r15 + a long listing => two lines that were spilled start running'],
+    px: [
+      '.GGGG..GGGG.',
+      '.G44G..G44G.',
+      '.GGGG..GGGG.',
+      '.GGGG..GGGG.',
+      '.G44G..G44G.',
+      '.GGGG..GGGG.',
+      '.GGGG..GGGG.',
+      '.G66G..G66G.',
+      '.GGGG..GGGG.',
+      '.GGGG..GGGG.',
+      '.G66G..G66G.',
+      '.GGGG..GGGG.',
+    ],
+  });
+
   /* =========================================================
      CURSES
      ========================================================= */
@@ -21951,6 +23422,81 @@ G.Pool = function (factory, reset) {
       '.pp...6666.',
       '..ppppp.66.',
       '.........6.',
+    ],
+  });
+
+  /* THE MULTIPLIER FAMILY — docs/BUILD_LISTING.md §9.
+
+     `repeat x2` was shipped alone under §2.8's decision that the family waits
+     "until the depth budget has been tuned against real play rather than
+     against a spreadsheet". critic/reports/listing-aha-r01.md is that real
+     play, and what it measured is why the family exists now: of six
+     arrangements the format can express, emitCount was the ONLY one whose
+     delta cleared its own error bar (+45..52%), and exactly one item in 188
+     carried it. A payoff surface of one item is not a format.
+
+     They are a CURVE, not three copies. More emissions, each worth less —
+     which is what segmentation actually does to a packet, and which keeps the
+     choice between them real rather than a strict ordering by quality. */
+  comb({
+    id: 'writev', name: 'writev()', quality: 2,
+    desc: 'Vectored I/O. One call, a whole array of buffers, no copy between them.',
+    effect: 'Indent this INSIDE a block: that block emits one extra time. At the top level it does nothing.',
+    add: { emitCount: 1 },
+    pools: ['treasure', 'shop'],
+    synergies: ['writev() + any emitter => the block fires twice for one trigger pull'],
+    px: [
+      '.pppp.......',
+      '.p..p.......',
+      '.pppp.66666.',
+      '............',
+      '.pppp.......',
+      '.p..p.66666.',
+      '.pppp.......',
+      '............',
+      '.pppp.......',
+      '.p..p.66666.',
+      '.pppp.......',
+    ],
+  });
+
+  comb({
+    id: 'sendmmsg', name: 'sendmmsg()', quality: 3,
+    desc: 'Many messages, one syscall. The kernel stops charging you per packet.',
+    effect: 'Indent this INSIDE a block: that block emits one extra time, each a little lighter.',
+    add: { emitCount: 1 }, mul: { damage: 0.9 },
+    pools: ['treasure', 'shop'],
+    synergies: ['sendmmsg() + repeat x2 => the block emits three times over'],
+    px: [
+      '..PPPPPPPP..',
+      '..P666666P..',
+      '..PPPPPPPP..',
+      '.PPPPPPPP...',
+      '.P666666P...',
+      '.PPPPPPPP...',
+      'PPPPPPPP....',
+      'P666666P....',
+      'PPPPPPPP....',
+    ],
+  });
+
+  comb({
+    id: 'gso', name: 'segmentation offload', quality: 4,
+    desc: 'Hand the card one oversized buffer and let it do the cutting.',
+    effect: 'Indent this INSIDE a block: that block emits twice more, and everything it makes is smaller.',
+    add: { emitCount: 2 }, mul: { damage: 0.75 },
+    pools: ['treasure', 'boss'],
+    synergies: ['segmentation offload + any emitter => a block that fires three times for one pull'],
+    px: [
+      '.pppppppppp.',
+      '.p66666666p.',
+      '.pppppppppp.',
+      '.....44.....',
+      '.pp..pp..pp.',
+      '.pp..pp..pp.',
+      '.pp..pp..pp.',
+      '.66..66..66.',
+      '.pp..pp..pp.',
     ],
   });
 
@@ -22520,12 +24066,15 @@ G.Pool = function (factory, reset) {
    above it and describe what that line produced rather than what the player
    does.
 
-   The invariant the whole feature stands on, and what critic/program_gate.js
-   exists to hold:
+   THE INVARIANT IS RETIRED. This used to read "a listing with every depth at 0
+   is the game exactly as it ships", and docs/BUILD_LISTING.md §9 ended it on
+   purpose: root has a REGISTER BUDGET now (Program.width), so a flat listing
+   past stats.regCount lines drops the overflow instead of running it. A flat
+   build being permanently viable is exactly what made the hack bay optional,
+   and the feature is only a feature if arranging your program is how you
+   afford your program.
 
-       a listing with every depth at 0 is the game exactly as it ships.
-
-   It is true by construction rather than by care, because of one rule:
+   What survives, and what the arithmetic below still rests on, is one rule:
 
        every line contributes its own add/mul/flags to the scope it SITS IN.
        a line that opens a block additionally creates a CHILD scope, seeded
@@ -22580,6 +24129,38 @@ G.Pool = function (factory, reset) {
     return d < lim[0] ? lim[0] : d > lim[1] ? lim[1] : d;
   };
   Program.maxDepth = Program.budget;
+
+  /* HOW WIDE ROOT MAY BE — docs/BUILD_LISTING.md §9.
+
+     Summed over the FLAT item list for exactly the reason the depth budget is
+     (see above), and the reason is sharper here: a `regCount` item that
+     SPILLS would stop granting the width that decided whether it spilled. The
+     fixpoint does not just oscillate, it is undefined. So the kernel decides
+     how many registers the process gets, once, before any line runs — and
+     where you put the item cannot change it.
+
+     LIMITS.regCount is applied here rather than trusted from recompute,
+     because this runs BEFORE recompute has produced a stat block. */
+  Program.width = function (p) {
+    const lim = (S.LIMITS && S.LIMITS.regCount) || [3, 16];
+    const def = (S.DEF && typeof S.DEF.regCount === 'number') ? S.DEF.regCount : 6;
+    let w = (p && p.base && typeof p.base.regCount === 'number') ? p.base.regCount : def;
+    const items = (p && p.items) || [];
+    for (let i = 0; i < items.length; i++) {
+      const it = items[i];
+      const a = it && it.add;
+      if (a && typeof a.regCount === 'number') w += a.regCount;
+    }
+    w = Math.round(w);
+    return w < lim[0] ? lim[0] : w > lim[1] ? lim[1] : w;
+  };
+
+  /* How many root lines actually consume a register. Actives never do
+     (LINE.key), so the screen and the compiler agree on the count without
+     either re-deriving the rule. */
+  Program.rootCost = function (def) {
+    return Dex.lineOf(def) === Dex.LINE.key ? 0 : 1;
+  };
 
   /* =========================================================
      THE LISTING — p.items plus one depth per line
@@ -22787,7 +24368,7 @@ G.Pool = function (factory, reset) {
         const nd = nodes[i], last = i === nodes.length - 1;
         out.push({ node: nd, def: nd.def, depth: nd.depth, i: nd.i, kind: nd.kind,
           last: last, guides: guides, dead: !!nd.dead, dark: !!nd.dark,
-          off: !!nd.off, lost: !!nd.lost, twice: !!nd.twice,
+          off: !!nd.off, lost: !!nd.lost, twice: !!nd.twice, spill: !!nd.spill,
           pinned: Program.pinned(nd.def) });
         if (nd.children.length) walk(nd.children, guides.concat(!last));
       }
@@ -23096,10 +24677,15 @@ G.Pool = function (factory, reset) {
        a line that opens a block additionally creates a CHILD scope, seeded
        from its own scope's result, holding whatever is indented under it.
 
-   The invariant falls straight out of it. A flat listing puts every line in
-   root, nothing has children, no child scope is ever built — so the arithmetic
-   is the flat list it always was. That is docs/BUILD_LISTING.md §1, and it is
-   true by construction rather than by care.
+   A flat listing puts every line in root, nothing has children, and no child
+   scope is ever built — so the arithmetic is the flat list it always was.
+
+   That USED to make it the shipped game (§1's invariant). It no longer does:
+   §9 gives root a register budget, and compileScope charges each root line
+   against it, so a flat listing past stats.regCount lines SPILLS the overflow.
+   Root only — a block has no width limit, because a block already pays
+   narrowing, and charging it rent twice would make nesting a punishment
+   instead of a choice about where to pay.
 
    Strict narrowing (§2.7): a nested modifier applies to its block and below,
    never beside or above. Indenting therefore NARROWS a modifier — that is the
@@ -23308,8 +24894,15 @@ G.Pool = function (factory, reset) {
     (scope.emitById || (scope.emitById = Object.create(null)))[def.id] = child;
   }
 
-  function compileScope(p, nodes, view, scope, base) {
+  /* `width` is the register budget for THIS scope. Root gets Program.width(p);
+     every block gets Infinity, and that asymmetry is the design rather than an
+     omission — see the DEF.regCount comment in 300_stats.js. A block already
+     pays narrowing, so charging it rent twice would make nesting a punishment
+     instead of a choice about where to pay. */
+  function compileScope(p, nodes, view, scope, base, width) {
     const stats = scope.stats;
+    const cap = (typeof width === 'number') ? width : Infinity;
+    let used = 0;
     /* `halt` is SIGABRT (322_items_listing.js): everything BELOW it in its own
        scope stops running. Implemented by truncating the list this scope
        applies — not by a flag every consumer has to remember to check — and the
@@ -23323,12 +24916,21 @@ G.Pool = function (factory, reset) {
       const nd = nodes[i];
       nd.dead = halted;
       nd.off = false; nd.dark = false; nd.lost = false; nd.twice = false; nd.orphan = false;
+      nd.spill = false;
       if (halted) continue;
       /* A LOST line is left out of the list this scope applies, exactly the
          way a halted one is — and then skipped entirely, which is what makes a
          raced SIGABRT stop aborting and a raced `else` stop pairing. The line
          did not run; nothing it says about the listing is true this room. */
       if (race && i === race.lost) { nd.lost = true; markDark(nd.children); continue; }
+      /* SPILL — the line is past the register budget, so it does not run.
+         Charged in listing ORDER, which is what makes `move` a real verb at
+         root and not only a tidying one: the lines you put first are the lines
+         that get a register. Its block goes dark with it, because a block
+         whose opener never ran is not a block. */
+      const cost = Program.rootCost(nd.def);
+      if (used + cost > cap) { nd.spill = true; markDark(nd.children); continue; }
+      used += cost;
       defs.push(nd.def);
       if (race && i === race.twice) { nd.twice = true; defs.push(nd.def); }
       if (nd.def.halt) halted = true;
@@ -23361,11 +24963,15 @@ G.Pool = function (factory, reset) {
         if (!paired || !prev.off) { nd.off = true; markDark(nd.children); }
       }
     }
+    /* what the gauge draws, and what a probe reads back. Stamped on the scope
+       rather than recomputed by the screen, so there is one count and the
+       screen cannot disagree with the compiler about it. */
+    scope.regUsed = used; scope.regCap = cap;
     const acc = S.applyScope(view, defs, stats, base);
 
     for (let i = 0; i < nodes.length; i++) {
       const nd = nodes[i];
-      if (nd.dead || nd.off || nd.lost || !nd.children.length) continue;
+      if (nd.dead || nd.off || nd.lost || nd.spill || !nd.children.length) continue;
       /* `isolate()` is §2.2's opt-out, and it isolates FLAGS, not stats — the
          same choice Stats.famShoot already makes with `o.inherit`. Isolating
          the stats too would hand the block a 3.5-damage gun and make the item
@@ -23373,6 +24979,7 @@ G.Pool = function (factory, reset) {
       const iso = holds(nd.children, 'isolate');
       const v = shadow(p, stats, iso ? EMPTY_FLAGS : view.flags);
       const child = makeScope(v.stats, v.flags);
+      /* no width argument: a block has no register budget of its own */
       compileScope(p, nd.children, v, child, stats);
       claimOwn(child, view.flags);
       /* after claimOwn, never before: `own` is a fresh set only once the
@@ -23395,7 +25002,7 @@ G.Pool = function (factory, reset) {
     p.flags.clear();
     const roots = Program.tree(p);
     const root = makeScope(s, p.flags);
-    const acc = compileScope(p, roots, p, root, b);
+    const acc = compileScope(p, roots, p, root, b, Program.width(p));
     /* applyScope accumulated stackDepth into root the same way it accumulates
        every other add, and root is the wrong answer whenever a `ulimit -s` is
        itself indented — its contribution would vanish from the number the HUD
@@ -35362,7 +36969,7 @@ G.Pool = function (factory, reset) {
     const why = {};
     const ped = {
       x: x, y: y, def: rollItem(pool, rng, why), taken: false, pool: pool || 'treasure',
-      price: price || 0, t: 0, delay: 0.45, hat: why.hat,
+      price: price || 0, t: 0, delay: 0.45, hat: why.hat, near: 0,
     };
     room.pedestals.push(ped);
     return ped;
@@ -36264,7 +37871,9 @@ G.Pool = function (factory, reset) {
       s.near = near ? Math.min(1, s.near + dt * 8) : Math.max(0, s.near - dt * 8);
       if (near) {
         hover = s;
-        if (buySlot(room, d, s, ctx)) return;
+        /* the shelf claims `use` while you stand at it — brushing past a
+           shelf on the way to the door must not spend the run's coins */
+        if (G.interact.offer() && buySlot(room, d, s, ctx)) return;
       }
     }
     /* reroll terminal */
@@ -36274,9 +37883,9 @@ G.Pool = function (factory, reset) {
     if (r.spin > 0) r.spin -= dt;
     const rNear = !p.dead && G.dist2(p.x, p.y, r.x, r.y - 4) < 19 * 19;
     r.near = rNear ? Math.min(1, r.near + dt * 8) : Math.max(0, r.near - dt * 8);
-    if (rNear && r.spin <= 0) {
-      if (!r.armed) { r.armed = true; doReroll(room, d, ctx); }
-    } else if (!rNear) r.armed = false;
+    /* claimed for the whole time you stand on it, mid-spin included, so a
+       press during the animation is swallowed rather than firing your active */
+    if (rNear && G.interact.offer() && r.spin <= 0) doReroll(room, d, ctx);
 
     if (hover && k.moodT <= 0) {
       say(d, hover.kind === 'item' ? ('Get:1 ' + hover.name + ' [' + hover.price + 'c]')
@@ -36512,6 +38121,7 @@ G.Pool = function (factory, reset) {
     const w = tww(label, 5) + 10;
     term(c, s.x - w / 2, s.y + 12, w, 11, pc, bad ? 'rgba(60,0,10,0.95)' : 'rgba(2,6,4,0.9)');
     txt(c, label, s.x, s.y + 15, { size: 5, color: pc, align: 'center' });
+    if (G.UI && G.UI.grabPrompt) G.UI.grabPrompt(c, s.x, s.y - 46 + bob - lift, s.near);
   }
 
   function pickupCol(k) {
@@ -36554,6 +38164,8 @@ G.Pool = function (factory, reset) {
       txt(c, 'REROLL STOCK', r.x, r.y - 40, { size: 5, color: '#8ecfff', align: 'center' });
       c.globalAlpha = 1;
     }
+    /* above the label, not below it — the player is standing ON the terminal */
+    if (!spin && G.UI && G.UI.grabPrompt) G.UI.grabPrompt(c, r.x, r.y - 54, r.near);
   }
 
   function drawKeeper(c, d) {
@@ -40910,7 +42522,7 @@ G.Pool = function (factory, reset) {
 
       const lines = [
         'WASD  move          ARROWS  fire',
-        'SPACE bomb          E  active item',
+        'SPACE bomb          E  take / active',
         'TAB   map           ESC  pause',
       ];
       for (let i = 0; i < lines.length; i++) {
@@ -40982,6 +42594,25 @@ G.Pool = function (factory, reset) {
       c.fillStyle = 'rgba(0,0,0,.6)';
       rr(c, x - w / 2, y, w, 9, 2);
       txt(c, s, x, y + 2, { size: 5, color: canAfford ? '#ffd24a' : '#ff6a7a', align: 'center' });
+    },
+
+    /* The keycap over anything that waits for the key instead of taking on
+       contact — plinth, shelf, reroll terminal. World space, and `a` is the
+       caller's own eased in-reach value, so the cap rises on the same curve
+       the shelf already lifts its stock on. The face follows the last device
+       touched, because a pad player pressing E is not a thing that happens. */
+    grabPrompt(c, x, y, a) {
+      if (!(a > 0.05)) return;
+      const lbl = (G.input && G.input.lastInputWasPad) ? 'X' : 'E';
+      const w = 11, h = 11, lift = (1 - a) * 4;
+      c.save();
+      c.globalAlpha = Math.min(1, a) * (0.72 + 0.28 * Math.sin(G.time * 6));
+      c.fillStyle = 'rgba(4,10,8,.85)';
+      rr(c, x - w / 2, y + lift, w, h, 2);
+      c.strokeStyle = acc();
+      c.strokeRect(x - w / 2 + 0.5, y + lift + 0.5, w - 1, h - 1);
+      txt(c, lbl, x, y + lift + 3, { size: 5, color: accLt(), align: 'center' });
+      c.restore();
     },
   };
 
@@ -41823,7 +43454,7 @@ G.Pool = function (factory, reset) {
     txt(c, 'your build, as the program it already is', 14 + tw('LISTING', { size: 2, big: true }) + 12, 16,
       { size: 1, color: 'rgba(180,215,205,0.5)' });
 
-    drawStack(c, p, VW - 14, 12, a);
+    drawBudgets(c, p, VW - 14, 6);
     drawRows(c, p, a);
     /* the three readouts beside the listing live in 621 — see its header */
     UI.drawListingLine(c, rows[sel], PANEL, a, KIND_COL);
@@ -41832,21 +43463,46 @@ G.Pool = function (factory, reset) {
   };
 
   /* The budget as pips, not a number: how many you have and how many are left
-     is the decision, and a bar answers it in one glance. */
-  function drawStack(c, p, rx, y, a) {
-    const cap = Pr.budget(p);
-    const lim = (G.Stats.LIMITS && G.Stats.LIMITS.stackDepth) || [1, 4];
-    let deepest = 0;
-    for (let i = 0; i < rows.length; i++) if (rows[i].depth > deepest) deepest = rows[i].depth;
-    const label = 'STACK ' + deepest + '/' + cap;
-    const pipW = 7, n = lim[1];
-    const w = n * pipW;
-    for (let i = 0; i < n; i++) {
-      const on = i < cap, used = i < deepest;
-      c.fillStyle = used ? '#ffd24a' : on ? 'rgba(140,224,200,0.45)' : 'rgba(255,255,255,0.10)';
+     is the decision, and a bar answers it in one glance.
+
+     Two budgets are drawn, and they are deliberately the same shape because
+     they are the same kind of fact: STACK is how DEEP you may go, REG is how
+     WIDE root may be. One function so they cannot drift apart visually — the
+     player has to read them as a pair, since spending one is how you afford
+     the other. */
+  function drawGauge(c, label, used, cap, max, rx, y, pipW) {
+    const w = max * pipW;
+    for (let i = 0; i < max; i++) {
+      const on = i < cap, lit = i < used;
+      c.fillStyle = lit ? '#ffd24a' : on ? 'rgba(140,224,200,0.45)' : 'rgba(255,255,255,0.10)';
       px(c, rx - w + i * pipW, y + 1, pipW - 2, 6);
     }
-    txt(c, label, rx - w - 6, y, { size: 1, align: 'right', color: deepest >= cap ? '#ffd24a' : 'rgba(190,225,215,0.7)' });
+    txt(c, label + ' ' + used + '/' + cap, rx - w - 6, y,
+      { size: 1, align: 'right', color: used >= cap ? '#ffd24a' : 'rgba(190,225,215,0.7)' });
+  }
+
+  function drawBudgets(c, p, rx, y) {
+    const S = G.Stats, L = (S && S.LIMITS) || {};
+    let deepest = 0, spilled = 0;
+    for (let i = 0; i < rows.length; i++) {
+      if (rows[i].depth > deepest) deepest = rows[i].depth;
+      if (rows[i].spill) spilled++;
+    }
+    const dLim = L.stackDepth || [1, 4];
+    drawGauge(c, 'STACK', deepest, Pr.budget(p), dLim[1], rx, y, 7);
+
+    /* REG reads off the SCOPE rather than recounting the rows, because the
+       compiler already decided which lines got a register and a second count
+       here is a second opinion waiting to disagree with it. */
+    const rLim = L.regCount || [3, 16];
+    const sc = p && p.scope;
+    const cap = (sc && typeof sc.regCap === 'number') ? sc.regCap : Pr.width(p);
+    const used = (sc && typeof sc.regUsed === 'number') ? sc.regUsed : 0;
+    drawGauge(c, 'REG', used, cap, rLim[1], rx, y + 12, 5);
+    if (spilled) {
+      txt(c, spilled + ' line' + (spilled > 1 ? 's' : '') + ' spilled — nest to fit',
+        rx, y + 24, { size: 1, align: 'right', color: '#ff5c78' });
+    }
   }
 
   function drawRows(c, p, a) {
@@ -41899,7 +43555,12 @@ G.Pool = function (factory, reset) {
          opposite is where the two are told apart. TWICE is the other half and
          is the only mark here that is not a loss, so it takes the emitter
          yellow the stack gauge already uses for "this is costing you". */
-      const off = row.dead || row.lost;
+      /* SPILL is the third way a line can be not-running, and it belongs with
+         DEAD and LOST rather than with IDLE: the line did not run, and the
+         repair is an edit. What separates it is only the WORD — a spilled line
+         is not broken, it is unaffordable — and the panel opposite is where
+         that distinction gets made. */
+      const off = row.dead || row.lost || row.spill;
       c.fillStyle = off ? 'rgba(255,92,120,0.45)' : row.dark ? 'rgba(159,228,255,0.35)' : col;
       if (row.pinned) { px(c, tx - 1, y, 5, 5); c.fillStyle = '#05060a'; px(c, tx, y + 1, 3, 1); }
       else px(c, tx, y + 1, 3, 3);
@@ -41920,8 +43581,8 @@ G.Pool = function (factory, reset) {
         c.fillStyle = 'rgba(255,92,120,0.55)';
         px(c, nx, y + 3, tw(row.def.name, { size: 1 }), 1);
       }
-      txt(c, row.dead ? 'DEAD' : row.lost ? 'LOST' : row.twice ? 'TWICE'
-        : row.dark ? 'IDLE' : kind.tag, P.lx + P.lw - 8, y, {
+      txt(c, row.dead ? 'DEAD' : row.lost ? 'LOST' : row.spill ? 'SPILL'
+        : row.twice ? 'TWICE' : row.dark ? 'IDLE' : kind.tag, P.lx + P.lw - 8, y, {
         size: 1, align: 'right',
         color: off ? '#ff5c78' : row.twice ? '#ffd24a' : row.dark ? 'rgba(159,228,255,0.6)'
           : isSel ? col : 'rgba(140,224,200,0.32)',
@@ -41990,6 +43651,15 @@ G.Pool = function (factory, reset) {
        with. TWICE is the only mark on this screen that is not a loss. */
     } else if (row.lost) {
       y = wrap(c, 'NOT RUNNING — a data race lost this write. It lands on a different line every room.',
+        P.rx + 8, y, P.rw - 16, '#ff8a9a') + 3;
+    /* SPILL says the repair out loud, because it is the one mark whose fix is
+       not obvious from the row. DEAD wants a line moved down; LOST wants the
+       race starved. This wants the line put INSIDE something — which is the
+       whole reason the register budget exists, so the panel had better say so
+       rather than leaving the player to infer it from a gauge. */
+    } else if (row.spill) {
+      y = wrap(c, 'SPILLED — root is out of registers, so this line does not run. '
+        + 'Indent it into a block to make room, or move it up past a line you need less.',
         P.rx + 8, y, P.rw - 16, '#ff8a9a') + 3;
     } else if (row.twice) {
       y = wrap(c, 'RUNNING TWICE — a data race landed this write twice. It moves every room.',
@@ -42596,6 +44266,15 @@ G.Pool = function (factory, reset) {
       run.counted = true;
       if (!G.Unlocks || !G.Unlocks.endRun) return null;
       Game.lastGains = G.Unlocks.endRun(run, !!won);
+      /* Everything OFF this machine happens after the local fold, never
+         instead of it: the volume is already written and flushed by the
+         line above, so a board that will not accept the score and a sync
+         that cannot reach the network both cost the player nothing.
+         030_net.js owns where it goes; this only says when. */
+      if (G.Net && G.Net.afterRun) {
+        try { G.Net.afterRun(run, !!won, Game.lastGains); }
+        catch (e) { console.error('BIND69: afterRun', e); }
+      }
       return Game.lastGains;
     },
 
@@ -42776,7 +44455,7 @@ G.Pool = function (factory, reset) {
       const def = Game.rollItem(pool || 'treasure', why);
       const ped = {
         x: x, y: y, def: def, taken: false, pool: pool || 'treasure',
-        price: price || 0, t: 0, delay: 0.4, hat: why.hat,
+        price: price || 0, t: 0, delay: 0.4, hat: why.hat, near: 0,
       };
       room.pedestals.push(ped);
       return ped;
@@ -42850,11 +44529,28 @@ G.Pool = function (factory, reset) {
         if (flagged.length) src = flagged;
       }
 
-      /* Quality RAISES presence, and more so the deeper you are. This was
-         inverted (4 - quality), giving a 7.5:1 bias toward the cheapest items. */
+      /* QUALITY IS RARITY, and the gap CLOSES as you descend.
+
+         It was `0.6 + qw * quality` — linear, with an additive floor, and it
+         measured as almost nothing: 3000 draws per floor put quality 4 at
+         18.9% of the draw against 19.7% of the roster. Being top tier bought
+         no scarcity at all, so a run's best item was as easy to find on floor
+         1 as its worst, and "mega combos from the start" followed directly.
+
+         Geometric, so each step up is a real step: weight is step^(q-1). The
+         STEP is what moves with depth — 0.55 near the surface, 0.90 at the
+         bottom — which is the whole curve in one number. Early floors are
+         mean and deep floors are generous, and the same table does both.
+
+         It deliberately does NOT go back to `4 - quality`. That inversion is
+         the one this file already fixed once: it biased 7.5:1 toward the
+         cheapest items and turned 20 quality-1 items into most of what a run
+         ever saw. Measured here at floor 1 this lands quality 1 at ~23% of
+         draws against 10.6% of the roster — a 2.2x lean, not a 7.5x one — and
+         quality 4 at ~9%, down from 19%. */
       const depth = clamp((run.floorIndex || 1) / 8, 0, 1);
-      const qw = 0.5 + depth * 0.9;
-      const def = run.rng.weighted(src, (it) => 0.6 + qw * (it.quality || 0));
+      const step = 0.55 + depth * 0.35;
+      const def = run.rng.weighted(src, (it) => Math.pow(step, Math.max(0, (it.quality || 1) - 1)));
       if (def) {
         run.itemsSeen.push(def.id);
         run.statStreak = changesAttack(def) ? 0 : (run.statStreak || 0) + 1;
@@ -43750,16 +45446,25 @@ G.Pool = function (factory, reset) {
     for (let i = 0; i < room.pedestals.length; i++) {
       const pd = room.pedestals[i];
       pd.t += dt;
-      if (pd.taken || !pd.def || p.dead) continue;
-      if (pd.delay > 0) { pd.delay -= dt; continue; }
+      /* the prompt fades on every path that is not "in reach and offerable",
+         so a taken plinth or a dead player never leaves one hanging */
+      if (pd.taken || !pd.def || p.dead) { pd.near = Math.max(0, pd.near - dt * 8); continue; }
+      if (pd.delay > 0) { pd.delay -= dt; pd.near = Math.max(0, pd.near - dt * 8); continue; }
       const dx = p.x - pd.x, dy = p.y - (pd.y - 6);
       const d2 = dx * dx + dy * dy;
-      /* Read before you buy. A pedestal grabs on contact, so the only place a
-         preview can be seen is the ring outside the grab radius — and it is
-         only offered where taking the item costs coins or blood. */
+      /* Read before you buy: the card comes up from a ring wider than the
+         reach, so you can price the thing and walk away from it. Still only
+         offered where taking the item costs coins or blood — a free treasure
+         drop stays a surprise until you press for it. */
       const cost = pedestalCost(pd);
       if (cost && d2 < 40 * 40 && G.UI && G.UI.itemPreview) G.UI.itemPreview(pd.def, cost);
-      if (d2 > 15 * 15) continue;
+      const reach = d2 < 15 * 15;
+      pd.near = reach ? Math.min(1, pd.near + dt * 8) : Math.max(0, pd.near - dt * 8);
+      if (!reach) continue;
+      /* In reach: raise the prompt, claim the key, and do nothing until it is
+         actually pressed. A free drop asks for the press too — reaching a
+         treasure pedestal and taking its item are separate decisions. */
+      if (!G.interact.offer()) continue;
       if (pd.price > 0) {
         if (run.coins < pd.price) {
           if (!pd.denied || G.time - pd.denied > 0.8) {
@@ -43824,6 +45529,7 @@ G.Pool = function (factory, reset) {
     if (pd.price > 0 && G.UI && G.UI.drawPrice) {
       G.UI.drawPrice(c, pd.x, pd.y + 10, pd.price, Game.run.coins >= pd.price);
     }
+    if (G.UI && G.UI.grabPrompt) G.UI.grabPrompt(c, pd.x, pd.y - 44 + bob, pd.near);
   }
   function fallbackIcon(c, def) {
     c.fillStyle = def.color || '#4af0b0';
@@ -44025,6 +45731,9 @@ G.Pool = function (factory, reset) {
         }
         return;
       }
+      if (action === 'daily') { unlockAudio(); startDaily(); return; }
+      if (action === 'boards') { unlockAudio(); G.setState('boards'); return; }
+      if (action === 'account') { unlockAudio(); G.setState('account'); return; }
       if (action !== 'start') return;
       unlockAudio();
       /* START's character step. It exists only once the volume has earned a
@@ -44048,9 +45757,60 @@ G.Pool = function (factory, reset) {
     G.setState('play');
   }
 
+  /* TODAY'S DESCENT. Everyone gets the same seed, the same tier and the
+     same character, because a board under a run nobody shared compares
+     nothing.
+
+     newRun's diffId/charId overrides already existed for the restore path,
+     which has to reinstate what a suspended run was played on rather than
+     what the menus say now — the daily needs exactly that and gets it for
+     free. Going through G.Difficulty.set() instead would have written HARD
+     into meta.diff and left the player's own tier changed after one daily,
+     which is the bug that argument was added to avoid. */
+  function startDaily() {
+    const D = G.Daily;
+    if (!D) { startRun(); return; }
+    const day = D.day();
+    D.claim();                       // spends the attempt at START, not at death
+    Game.started = true;
+    Game.newRun(D.seed(), D.DIFF, D.CHAR);
+    Game.run.daily = true;
+    Game.run.dailyDay = day;
+    G.setState('play');
+  }
+
   /* The character picker. Delegates to 243_charselect.js the same way the
      volume picker delegates to 242_profile.js — a missing module degrades to
      starting the run as whoever is already selected, which still plays. */
+  /* Two front-end screens that read and write meta, never a run. Both
+     follow the volume picker's contract — a module that owns its own
+     input and drawing, and a state here that only routes the result —
+     so a build with either file missing walks straight back to the
+     title instead of stranding the player on a black screen. */
+  STATES.account = {
+    enter() { const A = G.AccountScreen; if (A) A.enter(); FX.music('title'); },
+    update(dt) {
+      globalKeys();
+      const A = G.AccountScreen;
+      if (!A) { G.setState('title'); return; }
+      if (A.update(dt) === 'back') G.setState('title');
+    },
+    render(c) { const A = G.AccountScreen; if (A) A.render(c); },
+  };
+
+  STATES.boards = {
+    enter() { const B = G.BoardsScreen; if (B) B.enter(); FX.music('title'); },
+    update(dt) {
+      globalKeys();
+      const B = G.BoardsScreen;
+      if (!B) { G.setState('title'); return; }
+      const r = B.update(dt);
+      if (r === 'back') { G.setState('title'); return; }
+      if (r === 'play') startDaily();
+    },
+    render(c) { const B = G.BoardsScreen; if (B) B.render(c); },
+  };
+
   STATES.charselect = {
     enter() { const P = G.CharSelect; if (P) P.enter(); },
     update(dt) {
@@ -44075,9 +45835,15 @@ G.Pool = function (factory, reset) {
       if (pr.map) { FX.snd('uiSelect', { vol: 0.5 }); G.setState('map'); return; }
       if (pr.listing) { openListing(); return; }
       if (pr.bomb) Game.placeBomb();
-      if (pr.use && Game.player) Game.player.useActive(Game.ctx());
       if (pr.drop && Game.player) Game.player.cycleActive();
+      /* `use` is decided AFTER the world, not before it: pedestals and shop
+         shelves claim the key while the player stands in reach (G.interact),
+         and the active item only fires on a press nobody claimed. Reading it
+         first would fire the active on the same frame the shelf took the
+         press. */
+      G.interact.tick(dt);
       Game.update(dt);
+      if (pr.use && !G.interact.claimed() && Game.player) Game.player.useActive(Game.ctx());
     },
     render(c) { Game.render(c); },
   };
@@ -44514,7 +46280,7 @@ G.Pool = function (factory, reset) {
       /* pedestals placed after setup — a boss reward, say — are rebuilt whole */
       room.pedestals.push({
         x: s[0], y: s[1], def: G.itemById[s[2]] || null, taken: !!s[3],
-        pool: s[5], price: s[4], t: 0, delay: 0,
+        pool: s[5], price: s[4], t: 0, delay: 0, near: 0,
       });
     }
 
