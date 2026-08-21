@@ -44250,6 +44250,16 @@ G.Pool = function (factory, reset) {
         rooms[r.gx + ',' + r.gy] = o;
       }
 
+      /* WHERE THE PLAYER IS, once a doorway is in flight. changeRoom switches
+         Game.room to the destination and autosaves on the spot, but p.x/p.y
+         are still the threshold they crossed in the room they LEFT — and once
+         the pan is running they are not even room-local, they are lerped in
+         pan space. Recorded against the destination room those coordinates
+         land in its OPPOSITE border tile, which has no door in it, so the run
+         resumed with the player sealed inside a wall. The pan already carries
+         the answer: p1x/p1y is the entry point they are walking to. */
+      const pos = Game.pan || { p1x: p.x, p1y: p.y };
+
       return {
         v: SNAP_V,
         seed: run.seedStr,
@@ -44274,7 +44284,7 @@ G.Pool = function (factory, reset) {
         },
         p: {
           hp: p.hp, mh: p.maxHp, so: p.soul || 0, ar: p.armor || 0, sh: p.shield || 0,
-          x: r0(p.x), y: r0(p.y),
+          x: r0(pos.p1x), y: r0(pos.p1y),
           rm: Game.room ? (Game.room.gx + ',' + Game.room.gy) : null,
           /* p.items is the master list — actives and trinkets are in it too,
              so replaying it rebuilds all three collections */
@@ -44374,8 +44384,39 @@ G.Pool = function (factory, reset) {
       Game.enterRoom(target, null);
       p.x = blob.p.x; p.y = blob.p.y; p.vx = 0; p.vy = 0;
       Game.pan = null;
+      unstick(p);
       return true;
     }
+  }
+
+  /* THE LAST CHANCE TO NOTICE. Blobs written by a build that recorded the
+     doorway threshold instead of the entry point hold a coordinate that is a
+     border tile in the room they name, and Combat.moveBox rejects both axes
+     from inside one — it only flips the velocity, so the player jitters where
+     they stand and the resumed run is unplayable. Those saves are already on
+     disk and cannot be rewritten, so the invariant is enforced here rather
+     than trusted: after a restore the player stands somewhere they could have
+     walked to. It is not silent — a save that had to be moved says so. */
+  function unstick(p) {
+    const C = G.Combat;
+    if (!C || !C.boxSolid || !C.boxSolid(p.x, p.y, p.hw, p.hh, false)) return;
+    const T = G.TILE, RW = G.ROOM_W, RH = G.ROOM_H;
+    let bx = null, by = null, best = Infinity;
+    for (let gy = 1; gy < RH - 1; gy++) {
+      for (let gx = 1; gx < RW - 1; gx++) {
+        const x = gx * T + T / 2, y = gy * T + T / 2;
+        if (C.boxSolid(x, y, p.hw, p.hh, false)) continue;
+        const d = (x - p.x) * (x - p.x) + (y - p.y) * (y - p.y);
+        if (d < best) { best = d; bx = x; by = y; }
+      }
+    }
+    if (bx == null) {
+      console.error('BIND69 restore: no standable tile in this room — the player is left where the save put them');
+      return;
+    }
+    console.warn('BIND69 restore: the save placed the player inside a wall at ' +
+      Math.round(p.x) + ',' + Math.round(p.y) + ' — moved to ' + bx + ',' + by);
+    p.x = bx; p.y = by; p.vx = 0; p.vy = 0;
   }
 
   /* Re-adding an item fires its pickup ceremony — a sound and a banner each.
