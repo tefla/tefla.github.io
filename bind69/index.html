@@ -17914,8 +17914,14 @@ G.Pool = function (factory, reset) {
       for (let i = 0; i < rm.pedestals.length; i++) {
         const pd = rm.pedestals[i];
         if (pd.taken) continue;
-        const d = G.Game.rollItem(pd.pool || 'treasure');
-        if (d) { pd.def = d; n++; FX().parts(pd.x, pd.y - 20, 12, { color: '#c48cff', speed: 110, life: 0.4, size: 2, add: true }); }
+        /* `why` carries the hat mark back with the roll. Reassigning pd.def
+           without it left the OLD mark on the NEW item, so a brim painted a
+           lie in both directions: kept over an ordinary reroll, missing over
+           a black-hat one. The mark is a property of the def on the plinth,
+           so every writer of pd.def owns it. */
+        const why = {};
+        const d = G.Game.rollItem(pd.pool || 'treasure', why);
+        if (d) { pd.def = d; pd.hat = why.hat; n++; FX().parts(pd.x, pd.y - 20, 12, { color: '#c48cff', speed: 110, life: 0.4, size: 2, add: true }); }
       }
       FX().snd(n ? 'itemGet' : 'deny', { vol: 0.7 });
       FX().glitch(0.6, 0.25);
@@ -20223,8 +20229,17 @@ G.Pool = function (factory, reset) {
       cd: 0, mem: {}, dead: false,
     };
     list.push(d);
-    S.fx().ring(d.x, d.y, { color: spec.color, n: 12, speed: 90 });
-    S.fx().snd('activeUse', { vol: 0.5, rate: 1.15 });
+    /* Two ceremonies, because there are now two ways to place one. An active
+       is a KEYPRESS and gets the ring and `activeUse`; a delivery deploys at
+       the player's fire rate, and a full active-item flourish two and a half
+       times a second is the same sound stacked on itself. */
+    if (opts && opts.quiet) {
+      S.fx().parts(d.x, d.y, 5, { color: spec.color, speed: 70, life: 0.2, size: 1.6, add: true });
+      S.fx().snd('shootAlt', { vol: 0.2, rate: 1.5 });
+    } else {
+      S.fx().ring(d.x, d.y, { color: spec.color, n: 12, speed: 90 });
+      S.fx().snd('activeUse', { vol: 0.5, rate: 1.15 });
+    }
     return d;
   };
 
@@ -20286,6 +20301,84 @@ G.Pool = function (factory, reset) {
           S.fx().snd('deny', { vol: 0.18, rate: 1.5 });
         }
       }
+    },
+  };
+
+  /* docs/DELIVERY_AND_DEFENCE.md §3.3 — the worker half of the SWARM delivery.
+     The delivery row (420_deliveries.js) decides WHEN one is deployed; this
+     decides what one IS.
+
+     It is a deployable rather than a new family because §5.3 named this
+     registry as the primitive an `occupant` delivery should be built on, and
+     it was right: the cap and its eviction, the life countdown, the draw pass
+     and content rule 6's discard on room change are all already written above.
+     SWARM cost one row here, one row in 420 and one pickup in 324 — and no
+     edit to 400_player.js, which is the success test §5 asked for. */
+  const NANITE_SPEED = 95, NANITE_BITE = 0.5, NANITE_REACH = 7;
+  A.deployableTypes.nanite = {
+    color: '#8ef05a', cap: 6, life: 9,
+    draw(c, d) {
+      const w = 1.4 + Math.sin(d.t * 14 + d.id) * 0.5;
+      c.fillStyle = '#3f7a2a';
+      c.beginPath();
+      for (let k = -1; k <= 1; k += 2) {
+        c.rect(d.x + k * 2, d.y - 3, 1, 2); c.rect(d.x + k * 2, d.y + 1, 1, 2);
+      }
+      c.fill();
+      c.fillStyle = '#8ef05a'; c.fillRect(d.x - 2, d.y - 2, 4, 4);
+      c.fillStyle = '#e8ffd0'; c.fillRect(d.x - w * 0.5, d.y - w * 0.5, w, w);
+    },
+    update(d, p, dt, ctx) {
+      const m = d.mem;
+      /* AUTONOMOUS, which is the axis SWARM occupies: it re-chooses a target
+         every frame and never consults where the player is pointing. Nothing
+         about the trigger pull that made it survives past its first step.
+         With nothing to eat it falls back on the player, so a swarm regroups
+         between fights instead of dissolving into the corners. */
+      const t = nearestOther(d.x, d.y, ctx, null, 400);
+      const to = t || p;
+      /* Each worker keeps a fixed angle on the golden turn and steers at a
+         point on the RING around its target rather than at the target. Six
+         workers all solving the identical steering problem arrive stacked and
+         render as one mark — measured, and for a delivery whose extent axis is
+         VOLUME that is the axis failing rather than a cosmetic complaint. The
+         ring sits inside NANITE_REACH, so surrounding a body and biting it are
+         the same position. */
+      const ph = m.ph != null ? m.ph : (m.ph = (d.id * 2.39996) % G.TAU);
+      const orb = t ? t.r + 3 : 26;
+      const tx = to.x + Math.cos(ph) * orb, ty = to.y + Math.sin(ph) * orb;
+      const a = Math.atan2(ty - d.y, tx - d.x);
+      const sp = t ? NANITE_SPEED : NANITE_SPEED * 0.5;
+      const k = Math.min(1, dt * 6);
+      m.vx = (m.vx || 0) + (Math.cos(a) * sp - (m.vx || 0)) * k;
+      m.vy = (m.vy || 0) + (Math.sin(a) * sp - (m.vy || 0)) * k;
+      /* crosswise wobble, so six of these read as a swarm rather than as a
+         queue of pellets all solving the same steering problem */
+      const wob = Math.sin(d.t * 9 + d.id * 1.7) * 30;
+      d.x = G.clamp(d.x + (m.vx - Math.sin(a) * wob) * dt, G.PF.x0 + 4, G.PF.x1 - 4);
+      d.y = G.clamp(d.y + (m.vy + Math.cos(a) * wob) * dt, G.PF.y0 + 4, G.PF.y1 - 4);
+
+      d.cd -= dt;
+      if (!t || d.cd > 0) return;
+      const rr = t.r + NANITE_REACH;
+      if (G.dist2(d.x, d.y, t.x, t.y) > rr * rr) return;
+      d.cd = NANITE_BITE;
+      /* CONSUME — through the delivery layer's own emit path, so a bite is a
+         shot-shaped damage event and every one of the 49 flags composes with
+         it exactly as it does with a TRACE (§5.2). A hand-rolled hurtEnemy
+         here would be the special case the whole layer exists to avoid.
+         The player's FIRING hooks deliberately do not run: withEvent only
+         arms them for a trigger pull, and §3.3's whole claim is that this
+         damage is not delivered by you. */
+      const D = G.Deliveries;
+      if (!D || !D.withEvent) return;
+      const l = Math.hypot(m.vx, m.vy) || 1;
+      D.withEvent(p, d.x, d.y, m.vx / l, m.vy / l, {
+        kind: 'nanite', ctx: ctx,
+        dmg: p.stats.damage * 0.22, knock: (p.stats.knockback || 1) * 0.25,
+        r: 3, life: 0.05, color: '#8ef05a', glow: '#e8ffd0',
+      }, (ev) => { G.Combat.resolveHit(ev, t, ctx); return ev; });
+      S.fx().parts(d.x, d.y, 3, { color: '#8ef05a', speed: 60, life: 0.18, size: 1.4, add: true });
     },
   };
 
@@ -21531,6 +21624,97 @@ G.Pool = function (factory, reset) {
       'mm.mm.m.mmmmm',
     ],
   });
+
+  /* docs/BUILD_LISTING.md §8's first deferred curse. §7 called it `race
+     condition` and deferred it until phase 4's emission ceiling had been tuned
+     against real play; that shipped, so it can.
+
+     TWO RENAMES' WORTH OF THE SAME LESSON. `racecond` / "race condition" is
+     already an item (313_items_shot_b.js:283, the overclock one), and
+     G.registerItem refuses a duplicate id with a console warning and no item —
+     which is finding 2 exactly, and would have shipped as a missing curse a
+     second time. `double free` is the fault this actually models: the same
+     write lands twice and something else's write is gone.
+
+     §8's sketch was "one line runs twice", and shipping only that half would
+     have been a free multiplier wearing a curse's colour. The lost write is
+     what makes it cost something. The mechanic and the reasoning for its shape
+     — scope-local, deterministic, actives exempt — are in 342_program_scope.js
+     at pickRace, because that is where it is enforced.
+
+     It rolls on room CLEAR, like bitrot, for the same reason bitrot does: you
+     are told after the fight, with a doorway between you and needing it. */
+  curse({
+    id: 'doublefree', name: 'double free', quality: 3,
+    desc: 'The same pointer released twice. Something else was living in that memory.',
+    effect: 'In whatever block this sits in, one line runs TWICE and another does not run at all. Both move every time you clear a room.',
+    race: true,
+    onRoomClear(p) {
+      p.mem.dfT = ((p.mem.dfT | 0) + 1) | 0;
+      if (p.recompute) p.recompute();
+      const FX = S.fx();
+      FX.snd('glitch', { vol: 0.45, rate: 1.35 });
+      FX.popup(p.x, p.y - 30, 'DOUBLE FREE', '#ff5c78');
+    },
+    px: [
+      '..RRRRRRR....',
+      '.R.......R...',
+      'R..RR.RR..R..',
+      'R.RRRRRRR.R..',
+      'R.RRRRRRR.R..',
+      'R..RRRRR..R..',
+      '.R..RRR..R...',
+      '..RR.R.RR....',
+      '...R...R.....',
+      '..R.....R....',
+      '.R.......R...',
+      'R..RR.RR..R..',
+      '.RRRRRRRRR...',
+    ],
+  });
+
+  /* docs/BUILD_LISTING.md §8's other deferred curse, and §7's reason for
+     deferring it: "a second order-mutating source before the first has been
+     lived with". bitrot has been. This is the other axis — bitrot redraws
+     DEPTHS and leaves the order alone, this redraws ORDER and carries the
+     depths with it — and between them the two cover both dimensions the format
+     has. The move itself, and why it obeys move()'s rules rather than a looser
+     set, is Program.swap in 340_program.js.
+
+     IT IS SILENT, and that is §7's word and a decision rather than an
+     oversight. bitrot announces itself because bitrot changes EVERYTHING and a
+     player who is not told has no reason to go and look. One adjacent pair is
+     small enough that the honest experience is finding it next time you open
+     the listing — the card told you it happens, and the screen is where you
+     find out what. A popup naming the pair would do the diagnosis for you and
+     turn the only curse in the family with a quiet failure mode into another
+     notification. It keeps the sound, because something moving with no
+     feedback at all is indistinguishable from a bug. */
+  curse({
+    id: 'reorder', name: 'reordering hazard', quality: 3,
+    desc: 'The store buffer drains out of order. What you wrote is there. It is not in that order.',
+    effect: 'Two adjacent lines swap places every time you clear a room, and it does not tell you which. A pinned line never moves, and nothing swaps past one.',
+    onRoomClear(p, room, ctx) {
+      const Pr = G.Program; if (!Pr || !Pr.swap) return;
+      const rng = (ctx && ctx.rng) || G.rnd;
+      if (Pr.swap(p, rng) === false) return;
+      S.fx().snd('glitch', { vol: 0.3, rate: 1.7 });
+    },
+    px: [
+      '..RRRRRRRR...',
+      '.R........R..',
+      'R..........R.',
+      '....RRRR.....',
+      '...R....R....',
+      '..R......R...',
+      '..R......R...',
+      '...R....R....',
+      '....RRRR.....',
+      'R..........R.',
+      '.R........R..',
+      '..RRRRRRRR...',
+    ],
+  });
 })();
 
 
@@ -21588,7 +21772,11 @@ G.Pool = function (factory, reset) {
     d.archetype = d.archetype || 'condition';
     d.pools = d.pools || ['treasure', 'shop'];
     d.color = d.color || '#9fe4ff';
-    d.update = poll(d);
+    /* `} else {` is in this family and has no cond of its own — it reads the
+       sibling above it, which only the scope compiler can see. So the poll is
+       conditional: an item with nothing to test has nothing to latch, and the
+       `if` it pairs with already polls for both of them. */
+    if (d.cond) d.update = poll(d);
     return S.add(d);
   };
 
@@ -21687,6 +21875,44 @@ G.Pool = function (factory, reset) {
     ],
   });
 
+  /* docs/BUILD_LISTING.md §8, deferred. `else` is the one item in the game
+     whose meaning is a RELATIONSHIP between two lines rather than a property
+     of one, so it is the only place the listing's ORDER carries semantics the
+     scope compiler has to read. It pairs with the sibling directly above it,
+     at the same depth, and it is live exactly when that sibling was not.
+
+     Adjacency is required rather than "the nearest condition above", and that
+     is the whole legibility argument: an `if` opens a BLOCK, so its children
+     are indented and the `else` is the next line at the if's own level. It
+     lines up under its partner on screen the way it would in a source file.
+     Allowing it to reach back past intervening siblings would make a listing
+     whose meaning you cannot read off its shape.
+
+     It does not make nesting free (finding 8's failure mode). A dormant
+     condition costs nothing and buys nothing; adding an else spends the other
+     half of the same trade — the lines you put under it are lines you took
+     out of root, where they would have been unnarrowed and always live. */
+  cond({
+    id: 'orelse', name: '} else {', quality: 3,
+    els: true,
+    desc: 'The branch not taken. Something has to be on the other side of it.',
+    effect: 'Put this directly AFTER an if, at the same level. Lines under it run exactly when that if did not.',
+    synergies: ['} else { + any if => one of the two blocks is always live'],
+    px: [
+      '.22.......cc.',
+      '.22.......cc.',
+      '.22.......cc.',
+      '..22.....cc..',
+      '...22...cc...',
+      '....2c.cc....',
+      '.....2ccc....',
+      '.....cccc....',
+      '.....cccc....',
+      '.....cccc....',
+      '.....cccc....',
+    ],
+  });
+
   /* =========================================================
      LOOPS
      ========================================================= */
@@ -21740,6 +21966,53 @@ G.Pool = function (factory, reset) {
       'pp.........pp',
       'pp.........pp',
       'pppp.....pppp',
+    ],
+  });
+
+  /* docs/BUILD_LISTING.md §8's `fork()`, under §2.8's decision that it ships
+     as ONE item and not a family.
+
+     RENAMED, and for the reason finding 2 already recorded once: `fork` is a
+     shipped id and `fork()` a shipped NAME (312_items_shot_a.js:125, the
+     splitting item), and G.registerItem refuses a duplicate with a console
+     warning and no item — so §8's name would have shipped as a missing item.
+     vfork() is the call that runs the child in the PARENT's address space,
+     which is exactly the mechanic: what the block emits is emitted back into
+     the block's own scope instead of into a stripped-down generation.
+
+     IT CARRIES NO STATS, and that is the load-bearing decision rather than an
+     omission. Every add/mul is scope-local by construction — except
+     `stackDepth`, which Program.budget deliberately sums over the FLAT list
+     (finding 3). So an `add: {stackDepth: 1}` on a combinator would pay out in
+     full wherever it sat while any price beside it applied only to the block
+     it was indented into: a cost you dodge by using the item correctly, which
+     is finding 7's free-buff hole with a different name.
+
+     So the price is not in a stat block at all. It is the two limits phase 4
+     built — `gen >= stackDepth` in emitInto and the per-frame spawn ceiling —
+     and the fact that this does NOTHING at stack depth 1. The effect line says
+     so, and the readout says so again with the number in it, because a pickup
+     that quietly does nothing is worse than an expensive one. */
+  comb({
+    id: 'vfork', name: 'vfork()', quality: 4,
+    desc: 'The child runs in the parent\'s address space. What it emits, you emitted.',
+    effect: 'Indent this inside a block: what that block emits can emit again, and again, down to your stack depth. Needs a stack deeper than 1.',
+    fork: true,
+    pools: ['treasure', 'boss'],
+    synergies: ['vfork() + ulimit -s => one more generation of the cascade per stack level'],
+    px: [
+      'ppppppppppppp',
+      'p...........p',
+      'p.ppppppppp.p',
+      'p.p.......p.p',
+      'p.p.ppppp.p.p',
+      'p.p.p...p.p.p',
+      'p.p.p.p.p.p.p',
+      'p.p.ppppp.p.p',
+      'p.p.......p.p',
+      'p.ppppppppp.p',
+      'p...........p',
+      'ppppppppppppp',
     ],
   });
 })();
@@ -21823,6 +22096,34 @@ G.Pool = function (factory, reset) {
       '..............',
     ],
   }, 'arc');
+
+  deliveryItem({
+    id: 'botnet', name: 'botnet', quality: 4, color: '#8ef05a',
+    pools: ['treasure', 'boss', 'shop'], price: 26,
+    desc: 'You do not send the traffic. You send the things that send it.',
+    effect: 'Your packets stop travelling. Firing deploys a worker that picks its own ' +
+      'target and keeps eating. Six at a time, nine seconds each. 0.22x damage a bite.',
+    /* The one hook this family needs that the other two do not: a SWARM
+       outlives the frame it was fired on, so something has to tick it.
+       A.tickDeployables is the pump the sentry/firewall/relay actives already
+       use, and it guards itself against running twice in a frame — so the
+       pickup carrying it costs nothing and no new pump had to be wired. */
+    update(p, dt, ctx) {
+      const A = G.Archetypes;
+      if (A && A.tickDeployables) A.tickDeployables(p, dt, ctx);
+    },
+    px: [
+      '.v..v..v..v.',
+      'ivviivviivvi',
+      '.vv.vv.vv.v.',
+      'v..v..v..v..',
+      '.ivv.ivv.iv.',
+      'v..v..v..v..',
+      '.vv.vv.vv.v.',
+      'ivviivviivvi',
+      '.v..v..v..v.',
+    ],
+  }, 'swarm');
 })();
 
 
@@ -22418,6 +22719,50 @@ G.Pool = function (factory, reset) {
     return true;
   };
 
+  /* Swap one adjacent pair — `reordering hazard`'s one move, and the SECOND
+     thing in the game that edits the player's program without the player.
+
+     It mutates the axis bitrot does not. bitrot redraws DEPTHS and leaves the
+     order alone; this redraws ORDER and carries the depths with it, exactly
+     the way move() does for the player. Between them the two curses cover both
+     dimensions of the format, which is the reason §7 wanted the second one
+     lived with separately rather than shipped alongside the first.
+
+     It goes through the same move() rules rather than a looser set of its own,
+     and that is the design rather than caution:
+
+       - depths ride WITH their lines. Leaving them behind and letting
+         normalise clamp would mean the curse silently flattens a listing every
+         time it touches the top of a block — a depth mutation smuggled into an
+         order mutation, and bitrot's job done twice;
+       - a PINNED line is neither carried nor displaced. Which makes `pinned
+         page` a defence against this curse and not only a cost, and that is
+         worth having: the two curses in the same family answering each other
+         is the family being a family.
+
+     Returns the lower index of the pair it swapped, or false if the listing
+     had no legal pair at all — one line, or a wall of pinned ones. */
+  Program.swap = function (p, rng) {
+    const items = p.items || [], d = Program.depths(p);
+    let n = 0;
+    for (let i = 0; i + 1 < items.length; i++) {
+      if (!Program.pinned(items[i]) && !Program.pinned(items[i + 1])) n++;
+    }
+    if (!n) return false;
+    let k = (rng() * n) | 0;
+    if (k >= n) k = n - 1;
+    for (let i = 0; i + 1 < items.length; i++) {
+      if (Program.pinned(items[i]) || Program.pinned(items[i + 1])) continue;
+      if (k--) continue;
+      const it = items[i]; items[i] = items[i + 1]; items[i + 1] = it;
+      const dd = d[i]; d[i] = d[i + 1]; d[i + 1] = dd;
+      Program.normalise(items, d, Program.budget(p));
+      S.recompute(p);
+      return i;
+    }
+    return false;
+  };
+
   /* =========================================================
      READING IT BACK
      ========================================================= */
@@ -22434,7 +22779,8 @@ G.Pool = function (factory, reset) {
         const nd = nodes[i], last = i === nodes.length - 1;
         out.push({ node: nd, def: nd.def, depth: nd.depth, i: nd.i, kind: nd.kind,
           last: last, guides: guides, dead: !!nd.dead, dark: !!nd.dark,
-          off: !!nd.off, pinned: Program.pinned(nd.def) });
+          off: !!nd.off, lost: !!nd.lost, twice: !!nd.twice,
+          pinned: Program.pinned(nd.def) });
         if (nd.children.length) walk(nd.children, guides.concat(!last));
       }
     })(roots, []);
@@ -22517,6 +22863,22 @@ G.Pool = function (factory, reset) {
     const head = (live ? 'While ' : 'When ') + when + ', your packets ';
     const tail = verbs.length ? joinList(verbs) + '.' : 'are unchanged.';
     return (live ? '' : '(idle) ') + head + tail;
+  }
+
+  /* `} else {` has no `when` to name, because what it tests is the line above
+     it. Its clause is therefore one word — "Otherwise" — and that is not
+     brevity for its own sake: an else is always the SECOND clause of a pair,
+     and restating its partner's condition in the negative ("While you are NOT
+     below half health, ...") is exactly the clause soup this file exists to
+     avoid. Reading the two clauses in order is what makes the pair legible.
+
+     An ORPHAN else — nothing above it to pair with — is an authoring mistake
+     rather than a condition that is false, and gets said as one. The ordinary
+     idle clause would read as the family working correctly. */
+  function elseClause(nd, verbs, live) {
+    if (nd.orphan) return '(idle) No if directly above this else. It never runs.';
+    const tail = verbs.length ? joinList(verbs) + '.' : 'are unchanged.';
+    return (live ? '' : '(idle) ') + 'Otherwise, your packets ' + tail;
   }
 
   /* =========================================================
@@ -22609,12 +22971,17 @@ G.Pool = function (factory, reset) {
       for (let i = 0; i < nodes.length; i++) {
         const nd = nodes[i];
         if (!nd.children.length) continue;
-        if (nd.def.cond) {
+        /* a line the race lost has no compiled scope, so a clause about what
+           its block makes would be describing something that did not happen.
+           The count at the bottom is where it gets said. */
+        if (nd.lost) continue;
+        if (nd.def.cond || nd.def.els) {
           /* an inactive condition has no compiled scope to read verbs from, so
              the clause is built from what its children WOULD add */
           const live = !nd.off;
           const verbs = live ? addedVerbs(nd.scope, parentFlags) : wouldAdd(nd.children, parentFlags);
-          out.push({ depth: depth + 1, text: condClause(nd.def, verbs, live), node: nd, idle: !live });
+          const text = nd.def.els ? elseClause(nd, verbs, live) : condClause(nd.def, verbs, live);
+          out.push({ depth: depth + 1, text: text, node: nd, idle: !live });
           if (live) walk(nd.children, nd.scope ? nd.scope.flags : parentFlags, depth + 1);
           continue;
         }
@@ -22632,16 +22999,55 @@ G.Pool = function (factory, reset) {
        because the sentence is built from what runs. "What it does" that never
        mentions the three items doing nothing is the readout lying by omission,
        so the count comes first — ahead of the friendly hint. */
-    let dead = 0;
+    let dead = 0, recur = 0, lost = 0, twice = 0;
     (function count(nodes) {
       for (let i = 0; i < nodes.length; i++) {
-        if (nodes[i].dead) dead++;
-        count(nodes[i].children);
+        const nd = nodes[i];
+        if (nd.dead) dead++;
+        if (nd.lost) lost++;
+        if (nd.twice) twice++;
+        if (nd.scope && nd.scope.recur) recur++;
+        count(nd.children);
       }
     })(roots);
+    /* `double free` is two facts and they only mean anything together: a line
+       running twice on its own reads as a buff, and a line not running reads
+       as the SIGABRT above it. One clause, both halves, named as the fault it
+       is — and it goes ahead of the abort count because a raced SIGABRT is
+       exactly the case where the two would otherwise contradict each other. */
+    /* ONE LINE, and that is measured rather than a preference: the panel wraps
+       at about 42 characters and 621 stops drawing when it runs out of height,
+       so a clause that wraps costs a second row AND pushes whatever is below it
+       off the bottom. What is below it here is the rest of the diagnostics —
+       so a wordier fault report is one that hides the next fault. The row on
+       the left already says LOST and TWICE, and the LINE panel says it in full;
+       this is the summary, and the summary has a width. */
+    if (lost || twice) {
+      out.push({ depth: 0, dead: true,
+        text: 'Data race: ' + lost + ' line' + (lost === 1 ? '' : 's') + ' lost, ' +
+          twice + ' ran twice.' });
+    }
     if (dead) {
       out.push({ depth: 0, dead: true,
         text: dead + ' line' + (dead > 1 ? 's are' : ' is') + ' not running: aborted by a fault above.' });
+    }
+
+    /* A recursive block (`vfork()`) is the largest thing a listing can say and
+       the one the clauses above cannot: they describe what a block MAKES, and
+       recursion is about what the thing it made does next. It gets its own
+       line rather than a suffix on the block's clause, because at depth 4 a
+       suffix is exactly the sentence that stops fitting.
+
+       And when the stack is too shallow for it to fire, the line says THAT
+       instead, with the number in it. vfork() is inert at stackDepth 1 by
+       construction, and a combinator that silently does nothing is the failure
+       this readout exists to prevent. */
+    if (recur) {
+      const cap = Program.budget(p);
+      out.push({ depth: 0, hint: cap > 1, dead: cap <= 1,
+        text: cap > 1
+          ? recur + (recur > 1 ? ' blocks emit' : ' block emits') + ' into itself, to stack ' + cap + '.'
+          : recur + (recur > 1 ? ' blocks need' : ' block needs') + ' a deeper stack to recurse.' });
     }
     /* DARK lines are deliberately NOT counted here. A condition that is false
        is the family working, not a problem, and its own clause already says
@@ -22719,8 +23125,11 @@ G.Pool = function (factory, reset) {
   function markDark(nodes) {
     for (let i = 0; i < nodes.length; i++) { nodes[i].dark = true; markDark(nodes[i].children); }
   }
-  function hasIsolate(nodes) {
-    for (let i = 0; i < nodes.length; i++) if (nodes[i].def.isolate) return true;
+  /* Both combinators that change what a block IS rather than what it holds are
+     found the same way: a line sitting directly in the block, asked for by the
+     property it declares. */
+  function holds(nodes, key) {
+    for (let i = 0; i < nodes.length; i++) if (nodes[i].def[key]) return true;
     return false;
   }
   /* Conditions are read at COMPILE time, not per frame, so something has to
@@ -22734,6 +23143,68 @@ G.Pool = function (factory, reset) {
     } catch (e) { return false; }
   }
   Program.condTrue = condTrue;
+  /* =========================================================
+     THE DATA RACE — `double free` (322_items_listing.js)
+     ========================================================= */
+  /* docs/BUILD_LISTING.md §8's second deferred curse, which §7 called `race
+     condition`. RENAMED for the collision finding 2 already caught once:
+     `racecond` / "race condition" is a shipped item (313_items_shot_b.js:283)
+     and G.registerItem refuses a duplicate with a warning and no item.
+
+     §8 sketched it as "one line runs twice". Shipped as BOTH halves of the
+     bug, because the sketch on its own is not a curse: applying an item's
+     add/mul twice is a free multiplier, and the family's whole claim (§7) is
+     that a curse is a defect you route around rather than a number. A lost
+     update is what a data race actually costs you — one write lands twice and
+     another never lands at all.
+
+     SCOPE-LOCAL, like SIGABRT, and that is what makes it routeable. The curse
+     hits its own sibling list, so where you put it decides which lines are
+     exposed: left at root among a dozen good lines it eats one of your best
+     every room, and indented into a block holding at most one other line it
+     has nothing to race and does nothing. That repair costs a stack level and
+     an emitter's block — the scarcest two things in the format — which is the
+     price. Nothing is free here; SIGABRT's fix costs the bottom line of the
+     listing and these two curses compete for it.
+
+     DETERMINISTIC given (listing, p.mem.dfT). recompute is pure over its
+     inputs and program_gate fingerprints it, so the roll cannot live in
+     Math.random; it lives in a counter the curse bumps on room clear, which is
+     also what makes "it moves every room" a thing the player can watch happen
+     on this screen rather than a claim on a card.
+
+     ACTIVES ARE NEVER VICTIMS. LINE.key's rule is that where an active sits
+     changes nothing, and a curse that reads position must honour that or the
+     rule is only true until it isn't. */
+  function mix(n) {
+    let h = (n | 0) ^ 0x9e3779b9;
+    h = Math.imul(h ^ (h >>> 15), 0x85ebca6b);
+    h = Math.imul(h ^ (h >>> 13), 0xc2b2ae35);
+    return (h ^ (h >>> 16)) >>> 0;
+  }
+  function pickRace(p, nodes) {
+    let ri = -1, end = nodes.length;
+    for (let i = 0; i < nodes.length; i++) {
+      const d = nodes[i].def;
+      if (ri < 0 && d.race) ri = i;
+      /* past a SIGABRT nothing runs, so nothing there can be raced either */
+      if (d.halt) { end = i + 1; break; }
+    }
+    if (ri < 0 || ri >= end) return null;
+    const pool = [];
+    for (let i = 0; i < end; i++) {
+      if (i === ri || Dex.lineOf(nodes[i].def) === Dex.LINE.key) continue;
+      pool.push(i);
+    }
+    /* it takes two to race: one write to land twice and one to be lost */
+    if (pool.length < 2) return null;
+    const t = (p && p.mem && p.mem.dfT) | 0;
+    const a = mix(t) % pool.length;
+    let b = mix(t + 977) % pool.length;
+    if (b === a) b = (b + 1) % pool.length;
+    return { lost: pool[a], twice: pool[b] };
+  }
+
   function shadow(p, parentStats, parentFlags) {
     const v = Object.create(p);
     v.base = parentStats;
@@ -22769,7 +23240,7 @@ G.Pool = function (factory, reset) {
      decision in it. `own` is what makes the exemption specific: what you
      indented survives the guard, what you merely inherited does not. */
   function makeScope(stats, flags) {
-    return { stats: stats, flags: flags, own: EMPTY_OWN, emit: null, emitById: null };
+    return { stats: stats, flags: flags, own: EMPTY_OWN, recur: false, emit: null, emitById: null };
   }
   const EMPTY_OWN = new Set();
 
@@ -22792,6 +23263,34 @@ G.Pool = function (factory, reset) {
     child.flags.add('style');
     return child;
   }
+  /* `vfork()` (323_items_control.js): the block emits into ITSELF.
+
+     Two edits, both one line, both existing machinery — which is the whole
+     argument for the shape of this compiler. The opener's spawning flag joins
+     `own`, so emitInto stops stripping it out of the children and they are
+     emitters in their own right; and the block registers itself under that
+     same flag, so those children's emission resolves back HERE rather than
+     falling through to the parent's flag set. Without the second half the
+     cascade dies one generation in and the item reads as broken at depth 3.
+
+     Nothing new bounds it, deliberately: `gen >= stackDepth` in emitInto and
+     the per-frame spawn ceiling are the two limits phase 4 built for exactly
+     this, and inventing a third here would mean the first two were not
+     trusted. At the floor stackDepth of 1 this is inert by construction — the
+     children exist, they simply never get a turn.
+
+     Only a SHOT-FLAG emitter can recurse. A familiar or a driver is reached by
+     item id, and an item cannot be its own child. */
+  function recurse(scope, def) {
+    const f = def.flags; if (!f) return;
+    for (let j = 0; j < f.length; j++) {
+      if (!SPAWNING[f[j]]) continue;
+      scope.own.add(f[j]);
+      scope.recur = true;
+    }
+    if (scope.recur) register(scope, def, scope);
+  }
+
   function register(scope, def, child) {
     const f = def.flags;
     if (f) for (let j = 0; j < f.length; j++) {
@@ -22811,12 +23310,19 @@ G.Pool = function (factory, reset) {
        rearrangement, not a shop. */
     const defs = [];
     let halted = false;
+    const race = pickRace(p, nodes);
     for (let i = 0; i < nodes.length; i++) {
       const nd = nodes[i];
       nd.dead = halted;
-      nd.off = false; nd.dark = false;
+      nd.off = false; nd.dark = false; nd.lost = false; nd.twice = false; nd.orphan = false;
       if (halted) continue;
+      /* A LOST line is left out of the list this scope applies, exactly the
+         way a halted one is — and then skipped entirely, which is what makes a
+         raced SIGABRT stop aborting and a raced `else` stop pairing. The line
+         did not run; nothing it says about the listing is true this room. */
+      if (race && i === race.lost) { nd.lost = true; markDark(nd.children); continue; }
       defs.push(nd.def);
+      if (race && i === race.twice) { nd.twice = true; defs.push(nd.def); }
       if (nd.def.halt) halted = true;
       /* A PREDICATE (323_items_control.js) whose condition is false takes its
          whole block out of the compile — not down to zero, OUT. That is the
@@ -22824,22 +23330,46 @@ G.Pool = function (factory, reset) {
          condition is false, which is the only way to hold something without
          paying for it out of your main gun. The line itself still applies;
          it is the block underneath that goes dark. */
-      if (nd.def.cond && !condTrue(nd.def, p)) { nd.off = true; markDark(nd.children); }
+      if (nd.def.cond) { if (!condTrue(nd.def, p)) { nd.off = true; markDark(nd.children); } }
+      /* `} else {` (323_items_control.js) is the counterpart, and it is the
+         only line whose meaning is a relationship between two lines rather
+         than a property of one. It has no cond of its own: it is live exactly
+         when the sibling DIRECTLY above it went off, which is a fact only this
+         loop has — nd.off for the previous node was decided one iteration ago.
+
+         Adjacency, not "the nearest condition above". An `if` opens a block,
+         so its children are indented and the else is the next line at the
+         if's own level: the pair lines up on screen the way it would in
+         source. An else that reached back past intervening siblings would
+         make a listing whose meaning cannot be read off its shape.
+
+         `orphan` is an else with no partner — a real authoring mistake rather
+         than a condition that happens to be false, so the readout names it
+         instead of printing an idle clause about nothing. */
+      else if (nd.def.els) {
+        const prev = i > 0 ? nodes[i - 1] : null;
+        const paired = !!(prev && !prev.dead && !prev.lost && (prev.def.cond || prev.def.els));
+        nd.orphan = !paired;
+        if (!paired || !prev.off) { nd.off = true; markDark(nd.children); }
+      }
     }
     const acc = S.applyScope(view, defs, stats, base);
 
     for (let i = 0; i < nodes.length; i++) {
       const nd = nodes[i];
-      if (nd.dead || nd.off || !nd.children.length) continue;
+      if (nd.dead || nd.off || nd.lost || !nd.children.length) continue;
       /* `isolate()` is §2.2's opt-out, and it isolates FLAGS, not stats — the
          same choice Stats.famShoot already makes with `o.inherit`. Isolating
          the stats too would hand the block a 3.5-damage gun and make the item
          a trap. */
-      const iso = hasIsolate(nd.children);
+      const iso = holds(nd.children, 'isolate');
       const v = shadow(p, stats, iso ? EMPTY_FLAGS : view.flags);
       const child = makeScope(v.stats, v.flags);
       compileScope(p, nd.children, v, child, stats);
       claimOwn(child, view.flags);
+      /* after claimOwn, never before: `own` is a fresh set only once the
+         children have compiled, and recurse() adds to it */
+      if (holds(nd.children, 'fork')) recurse(child, nd.def);
       nd.scope = child;
       register(scope, nd.def, child);
     }
@@ -24519,12 +25049,12 @@ G.Pool = function (factory, reset) {
       const dlv = G.Deliveries && G.Deliveries.of(this);
       if (dlv) {
         this.mem.shotsFired = (this.mem.shotsFired || 0) + 1;
-        for (let i = 0; i < this.items.length; i++) {
-          const it = this.items[i];
-          if (it && it.onShoot) { try { it.onShoot(this, ctx, dx, dy); } catch (e) { } }
-        }
-        try { dlv.emit(this, dx, dy, ctx); }
-        catch (e) { console.warn('delivery ' + dlv.id, e); }
+        /* The item onShoot hooks run inside the emit, against the shot-shaped
+           damage event and over the same program roots the packet path walks
+           below — 420_deliveries.js. They cannot run here: the event does not
+           exist yet, and calling them with what IS in scope at this point is
+           the defect that shipped. */
+        G.Deliveries.fire(this, dlv, dx, dy, ctx);
         return;
       }
       /* One counter, incremented per VOLLEY rather than per packet, because
@@ -25036,7 +25566,13 @@ G.Pool = function (factory, reset) {
   function withEvent(p, x, y, vx, vy, o, fn) {
     const ev = C.makeEvent(p, x, y, vx, vy, o);
     if (!ev) return null;
-    try { return fn(ev); }
+    try {
+      /* The player's firing hooks, once per trigger pull, on the first event
+         of the emit — and INSIDE the try, so a hook that throws still hands
+         the record back through the finally below rather than leaking it. */
+      if (volley) { volley = false; shootHooks(p, ev, o && o.ctx); }
+      return fn(ev);
+    }
     finally {
       /* onExpire is what `explosive` and friends hang their payload on, and an
          event that resolved without one would silently drop half the flags it
@@ -25049,6 +25585,77 @@ G.Pool = function (factory, reset) {
     }
   }
   D.withEvent = withEvent;
+
+  /* ============================================================
+     THE PLAYER'S FIRING HOOKS, on the delivery path.
+
+     CONTRACTS.md:430 declares `onShoot(p, shot, rng, i, n)` and the packet
+     path honours it. The delivery branch used to call `it.onShoot(p, ctx, dx,
+     dy)` — the game context where a shot belongs, a number where the rng
+     belongs, nothing at all where n belongs. Measured with `raw_socket` +
+     `sqeburst`: the driver's `shot.dmg *= 0.72` wrote NaN onto the shared game
+     ctx, and it queued two follow-up shots at dx/dy NaN. Zero console errors,
+     because a bare `catch (e) {}` swallowed all of it.
+
+     The event IS the shot the hook wants. makeEvent builds the same record
+     with the same fields (§5.2) — that is the whole reason a delivery composes
+     with all 49 flags — so the hooks run against `ev`, after it is built and
+     before the delivery resolves anything with it. Same order as the packet
+     path, where hooks run on a fresh shot before it moves.
+
+     And the walk is `p.program || p.items`, exactly as the packet path walks
+     it (docs/BUILD_LISTING.md §5.6). Picking up a delivery used to switch the
+     player's build listing off for firing hooks: the flat list ignores
+     arrangement and nesting, so a line indented UNDER an emitter got a firing
+     hook that describes what the player does rather than what that emitter
+     made.
+     ============================================================ */
+  function shootHooks(p, ev, ctx) {
+    const rng = (ctx && ctx.rng) || G.rnd;
+    const walk = p.program || p.items;
+    for (let k = 0; k < walk.length; k++) {
+      const it = walk[k].def || walk[k];
+      if (!it || !it.onShoot) continue;
+      /* i=0, n=1: a delivery is ONE emission, never a fan of shotCount, so a
+         hook reading its place in the volley is told the truth.
+
+         The return value — the packet path's "extra shots" — is DROPPED on
+         purpose. A delivery REPLACES the volley (§1), and a hook answering one
+         trigger pull with extra projectiles would put a packet build back on
+         top of the rule of engagement that was meant to replace it. Stated
+         here rather than quietly ignored.
+
+         Deliberately NOT wrapped, and worth being precise about what that
+         buys. A REGISTERED item's hooks are already wrapped by Stats.add's
+         guard() (300_stats.js), which catches, console.warns once and retires
+         the hook after three throws — so for those the bare catch that used to
+         sit here was a second swallow nested inside the first, and it caught
+         nothing that guard() had not already caught. What it DID swallow is a
+         throw from an UNGUARDED def: a character innate is an ordinary item
+         def deliberately never passed to registerItem (CONTRACTS.md, G.Chars),
+         so nothing wraps it. Those now unwind to D.fire and are reported as a
+         console error the harness fails on. Held by critic/hook_shape_gate.js,
+         which measured this rather than assuming it. */
+      it.onShoot(p, ev, rng, 0, 1);
+    }
+  }
+
+  /* Armed for exactly one trigger pull. makeEvent's own comment notes that a
+     delivery's onHit can emit, so events nest — and a firing hook that ran
+     again on a nested event would charge the driver's cadence trade twice for
+     one key press. The latch makes "once per volley" structural rather than a
+     property of the two deliveries that happen to ship today. */
+  let volley = false;
+
+  /* The delivery dispatch, and the only thing 400_player.js calls: a delivery
+     is a rule of engagement, so what a trigger pull does under one belongs
+     here rather than in the player. */
+  D.fire = function (p, dlv, dx, dy, ctx) {
+    volley = true;
+    try { dlv.emit(p, dx, dy, ctx); }
+    catch (e) { console.error('BIND69 delivery ' + dlv.id, e); }
+    finally { volley = false; }
+  };
 
   /* Live bodies, nearest-first from a point. Deliveries select rather than
      collide, so every one of them needs this and none of them should own it. */
@@ -25206,6 +25813,67 @@ G.Pool = function (factory, reset) {
         C.arcFrom(ev, best, ctx, ev.dmg * 0.7, 2);
         return ev;
       });
+    },
+  });
+
+  /* ============================================================
+     SWARM — the room fights while you reposition
+
+     The third delivery, and the one that was written to TEST the layer rather
+     than to fill it out. §5's success condition is "can a new delivery be
+     added as a data row by someone who never opens 400_player.js?" — so this
+     one was, deliberately, and the answer is on disk: this row, one worker in
+     318_items_archetypes.js, one pickup in 324_items_delivery.js. No engine
+     edit. The pump and the draw pass it needs were already being called
+     (700_game.js runs Deliveries.update/draw/clear; the deployable chassis is
+     ticked by the pickup's own update hook), so nothing had to be wired.
+
+     It is also the first delivery that disagrees with the packet on FOUR axes
+     rather than two, which is what the pair TRACE/ARC could not prove on their
+     own: they agree with the packet on persistence and agency, so a registry
+     that held only those two would never have been asked whether a delivery
+     could OUTLIVE the trigger pull that made it. This one does.
+     ============================================================ */
+  D.add({
+    id: 'swarm',
+    name: 'SWARM',
+    axes: { travel: 'crosses', selection: 'targeted', persistence: 'occupant', agency: 'autonomous', extent: 'volume' },
+    /* What it owns: the decision to STOP ATTACKING. Every other delivery in
+       the game rewards holding the trigger; this one deploys a fixed number of
+       workers and then asks the player to spend the fight repositioning while
+       they eat. It is the only row on the table where the correct play can be
+       to do nothing. */
+    desc: 'Deploys workers that pick their own targets and keep eating.',
+    color: '#8ef05a',
+
+    emit(p, dx, dy, ctx) {
+      const A = G.Archetypes;
+      const spec = A && A.deployableTypes && A.deployableTypes.nanite;
+      if (!spec || !A.placeDeployable) {
+        console.error('BIND69 swarm: the nanite deployable is missing');
+        return null;
+      }
+      /* The cap IS the balance, and it is content rule 3: a swarm that grew
+         per trigger pull without a ceiling is the fork bomb the spawn-ceiling
+         comment in 400_player.js is already joking about. placeDeployable
+         evicts the oldest at the cap, so holding the trigger CYCLES the swarm
+         rather than growing it — which is why sustained fire is worth so
+         little here and repositioning is worth so much. */
+      const d = A.placeDeployable(p, 'nanite', ctx, { cap: spec.cap, life: spec.life, quiet: true });
+      if (!d) { D.fizzle(p, dx, dy, '#5a7a4a'); return null; }
+      /* Placed on the aim rather than on p.faceAng, which placeDeployable
+         reads by default: faceAng is assigned in the packet tail of fire(),
+         AFTER the delivery branch has returned, so under any delivery it is
+         stale. Fixing it there would be an edit to 400_player.js, and the
+         whole point of this delivery is that it did not need one. */
+      const ang = Math.atan2(dy, dx);
+      d.x = G.clamp(p.x + dx * 14, G.PF.x0 + 6, G.PF.x1 - 6);
+      d.y = G.clamp(p.y + dy * 14, G.PF.y0 + 6, G.PF.y1 - 6);
+      d.angle = ang;
+      /* it crawls out along the aim — the one frame SWARM looks like a weapon
+         — and its own steering takes over from the next */
+      d.mem.vx = dx * 130; d.mem.vy = dy * 130;
+      return d;
     },
   });
 
@@ -34369,6 +35037,24 @@ G.Pool = function (factory, reset) {
     c.fillRect(x + w - k, y + h - 1, k, 1); c.fillRect(x + w - 1, y + h - k, 1, k);
   }
 
+  /* THE BRIM — the mark that says an item is on this shelf because of who you
+     are. §1.3's stock payoff is a filter, and a filter the player cannot
+     perceive is a filter that only ever shows up as bad luck. Drawn above the
+     icon on every surface that can carry hat stock: shop shelves and library
+     shelves here, pedestals in 700_game.js, which calls this rather than
+     keeping a second copy of the shape. Deliberately the SAME silhouette the
+     black-hat hunter wears (554_pursuit.js) and the same three colours the
+     HUD prints the hat in, so all three readings are one vocabulary. */
+  function hatBrim(c, x, y, hat) {
+    const h = HAT[hat]; if (!h) return;
+    const col = h.color;
+    x |= 0; y |= 0;
+    box(c, x - 9, y - 2, 18, 2, mix(col, '#000000', 0.5));
+    box(c, x - 9, y - 3, 18, 1, col);
+    box(c, x - 4, y - 8, 8, 5, mix(col, '#000000', 0.25));
+    box(c, x - 4, y - 8, 8, 1, mix(col, '#ffffff', 0.5));
+  }
+
   function glowDisc(c, x, y, r, col, a) {
     c.save();
     c.globalCompositeOperation = 'lighter';
@@ -34607,21 +35293,46 @@ G.Pool = function (factory, reset) {
       },
     };
   }
-  function rollItem(pool, rng) {
+  function rollItem(pool, rng, out) {
     let def = null;
-    try { if (G.Game && G.Game.rollItem) def = G.Game.rollItem(pool); } catch (e) { }
+    if (out) out.hat = null;
+    try { if (G.Game && G.Game.rollItem) def = G.Game.rollItem(pool, out); } catch (e) { }
     if (!def) def = fauxItem(rng || G.rnd);
     return def;
   }
 
   /* an engine-shaped pedestal (Game.updatePedestals / drawPedestal own it) */
   function pedestal(room, x, y, pool, price, rng) {
+    const why = {};
     const ped = {
-      x: x, y: y, def: rollItem(pool, rng), taken: false, pool: pool || 'treasure',
-      price: price || 0, t: 0, delay: 0.45,
+      x: x, y: y, def: rollItem(pool, rng, why), taken: false, pool: pool || 'treasure',
+      price: price || 0, t: 0, delay: 0.45, hat: why.hat,
     };
     room.pedestals.push(ped);
     return ped;
+  }
+
+  /* Said ONCE, on arrival, and only where the hat actually changed the shelf.
+     The brim on the icon is the durable half of §1.3's visibility rule; this
+     is the half that makes the player LOOK. A mark noticed after the purchase
+     is a mark that arrived too late, and the popup is what connects the odd
+     item on the shelf to the three words already in their HUD. */
+  function announceHatStock(room, run, d) {
+    if (!d || d.hatSaid) return;
+    let hat = null;
+    const scan = (o) => { if (o && o.hat && !hat) hat = o.hat; };
+    if (d.slots) for (let i = 0; i < d.slots.length; i++) scan(d.slots[i]);
+    if (d.altars) for (let i = 0; i < d.altars.length; i++) scan(d.altars[i]);
+    if (room.pedestals) for (let i = 0; i < room.pedestals.length; i++) scan(room.pedestals[i]);
+    if (!hat) return;
+    d.hatSaid = true;
+    const h = HAT[hat];
+    if (G.UI && G.UI.popup) {
+      G.UI.popup((hat === 'black' ? 'OFF THE BOOKS :: ' : 'SIGNED STOCK :: ') + h.name, h.color);
+    }
+    if (room.type === 'shop' && d.keeper) {
+      say(d, hat === 'black' ? 'W: unsigned repository enabled' : 'Hit: signed repository', 'happy', 3.2);
+    }
   }
 
   /* Grants an item or reports failure without side effects, so every caller
@@ -34941,9 +35652,11 @@ G.Pool = function (factory, reset) {
           price: Math.max(2, Math.round(m.base * scale)),
         };
       } else {
-        const def = rollItem('shop', rng);
+        const why = {};
+        const def = rollItem('shop', rng, why);
         slot = {
           kind: 'item', def: def, name: pkgName(def), label: def ? def.name : 'package',
+          hat: why.hat,
           price: Math.max(5, Math.round((def && def.price ? def.price : 15 + rng.int(8)) * scale)),
         };
       }
@@ -34956,6 +35669,19 @@ G.Pool = function (factory, reset) {
     };
     d.ticker = 0;
   };
+
+  /* One place that re-dresses a shop slot with a fresh package, so the hat
+     mark cannot be refreshed on one restock path and go stale on the other —
+     three callers roll shop stock after setup (the sold-slot daemon, `apt
+     update`, and the post-boss restock) and they charge differently, so the
+     PRICE stays with each caller and only the identity moves here. */
+  function restockSlot(s, rng) {
+    const why = {};
+    s.def = rollItem('shop', rng, why);
+    s.hat = why.hat;
+    s.name = pkgName(s.def);
+    s.label = s.def ? s.def.name : 'package';
+  }
 
   function pkgName(def) {
     if (!def) return 'unknown';
@@ -35127,9 +35853,10 @@ G.Pool = function (factory, reset) {
     d.altars = [];
     const xs = [150, CX, 394];
     for (let i = 0; i < 3; i++) {
-      const def = rollItem('library', rng);
+      const why = {};
+      const def = rollItem('library', rng, why);
       d.altars.push({
-        x: xs[i], y: 158, def: def, cost: 0, taken: false, gone: false,
+        x: xs[i], y: 158, def: def, cost: 0, taken: false, gone: false, hat: why.hat,
         hold: 0, need: 0.32, t: rng.range(0, 6), pulse: 0, refuse: 0, group: 'library',
         page: 'man ' + (1 + rng.int(8)) + ' ' + pkgName(def),
       });
@@ -35387,6 +36114,7 @@ G.Pool = function (factory, reset) {
     else box(c, 2, 2, 12, 12, col);
     c.restore();
     c.globalAlpha = 1;
+    if (a.hat) hatBrim(c, a.x, a.y - 40 + bob, a.hat);
   }
 
   function drawAltarTag(c, a, style, run) {
@@ -35558,9 +36286,7 @@ G.Pool = function (factory, reset) {
       if (!s.sold) return;
       const scale = 1 + ((run.floorIndex || 1) - 1) * 0.19;
       if (s.kind === 'item') {
-        s.def = rollItem('shop', rng);
-        s.name = pkgName(s.def);
-        s.label = s.def ? s.def.name : 'package';
+        restockSlot(s, rng);
         s.price = Math.max(6, Math.round((s.def && s.def.price ? s.def.price : 18) * scale * 1.4));
       } else {
         s.price = Math.max(3, Math.round(s.price * 1.4));
@@ -35599,9 +36325,7 @@ G.Pool = function (factory, reset) {
     for (let i = 0; i < d.slots.length; i++) {
       const s = d.slots[i];
       if (s.sold || s.kind !== 'item') continue;
-      s.def = rollItem('shop', rng);
-      s.name = pkgName(s.def);
-      s.label = s.def ? s.def.name : 'package';
+      restockSlot(s, rng);
       s.price = Math.max(5, Math.round((s.def && s.def.price ? s.def.price : 15 + rng.int(8)) * scale));
       s.pop = 0.5;
       FX.parts(s.x, s.y - 10, 14, { color: '#8ecfff', speed: 110, life: 0.5, size: 2, add: true });
@@ -35723,6 +36447,7 @@ G.Pool = function (factory, reset) {
     }
     c.restore();
     c.globalAlpha = 1;
+    if (s.hat) hatBrim(c, s.x, s.y - 32 + bob - lift, s.hat);
 
     /* price tag */
     const label = s.price + 'c';
@@ -38156,7 +38881,14 @@ G.Pool = function (factory, reset) {
       if (!d) return null;
       const o = {};
       if (d.slots) {
-        o.slots = d.slots.map((s) => [s.sold ? 1 : 0, s.def ? s.def.id : '', s.price, s.name || '', s.label || '']);
+        /* the hat mark rides the tuple rather than being re-derived on the
+           way back in. loadState assigns s.def straight from a saved id, so a
+           shelf whose stock was rerolled after setup came back with the
+           REBUILD's mark over the SAVED def — the same desync kexec had.
+           Stored, not derived, because only the roll that produced the item
+           knows whether the hat actually claimed that slot. Additive: an old
+           blob has no sixth element and restores as "no mark". */
+        o.slots = d.slots.map((s) => [s.sold ? 1 : 0, s.def ? s.def.id : '', s.price, s.name || '', s.label || '', s.hat || '']);
         o.sold = d.sold || 0;
         o.rerolls = d.rerolls || 0;
         o.restocked = d.restocked ? 1 : 0;
@@ -38178,7 +38910,7 @@ G.Pool = function (factory, reset) {
           s.sold = !!v[0];
           /* a sold slot has its def cleared by the shop, so restore by id
              and let an empty id mean "nothing left on this shelf" */
-          if (s.kind === 'item') s.def = v[1] ? (G.itemById[v[1]] || null) : null;
+          if (s.kind === 'item') { s.def = v[1] ? (G.itemById[v[1]] || null) : null; s.hat = v[5] || null; }
           s.price = v[2];
           if (v[3]) s.name = v[3];
           if (v[4]) s.label = v[4];
@@ -38241,11 +38973,7 @@ G.Pool = function (factory, reset) {
           const sl = d.slots[i];
           if (!sl.sold) continue;
           sl.sold = false; sl.pop = 0.5; n++;
-          if (sl.kind === 'item') {
-            sl.def = rollItem('shop', run.rng);
-            sl.name = pkgName(sl.def);
-            sl.label = sl.def ? sl.def.name : 'package';
-          }
+          if (sl.kind === 'item') restockSlot(sl, run.rng);
           sl.price = Math.max(4, Math.round(sl.price * 1.35));
         }
         if (n) {
@@ -38267,7 +38995,13 @@ G.Pool = function (factory, reset) {
         }
       }
 
+      announceHatStock(room, run, d);
       applyThreat(room, ctx);
+      /* THEME_AND_LEGS §1.3. Beside applyThreat and deliberately NOT inside
+         it: the ladder reads cover, the hunt reads the hat, and the day one
+         of them starts consulting the other's number they stop being two
+         things the player can tell apart. */
+      if (G.Pursuit) { try { G.Pursuit.onEnter(room, ctx); } catch (e) { console.warn('pursuit.onEnter', e); } }
       updateHints(run.floor || (G.Game && G.Game.floor), run);
     },
 
@@ -38297,6 +39031,7 @@ G.Pool = function (factory, reset) {
       watchDamage(ctx);
       corruptPulse(dt, ctx);
       updateSweeps(room, dt, ctx);
+      if (G.Pursuit) { try { G.Pursuit.update(room, dt, ctx); } catch (e) { console.warn('pursuit.update', e); } }
       bombLockedDoors(room);
       if (!room) return;
       const fn = UPDATE[room.type];
@@ -38342,6 +39077,7 @@ G.Pool = function (factory, reset) {
         drawWallHints(c, room, run);
         drawCorruptEnemies(c, room);
         drawSweeps(c, run);
+        if (G.Pursuit) G.Pursuit.draw(c, room, run);
       } catch (e) { }
     },
 
@@ -38353,6 +39089,7 @@ G.Pool = function (factory, reset) {
     integrity: integ,
     state: st,
     THREAT_NAME: THREAT_NAME,
+    hatBrim: hatBrim,
     HAT: HAT,
     hat: hat,
     dealt: dealt,
@@ -38371,6 +39108,7 @@ G.Pool = function (factory, reset) {
         b: s.blackDeals || 0, w: s.whiteDeals || 0, g: s.greyDeals || 0,
         d: s.deals || 0, rf: s.refused || 0, of: s.offered || 0,
         cs: s.cleanStreak || 0, pc: s.prevClean ? 1 : 0,
+        hu: (G.Pursuit && G.Pursuit.save(s)) || null,
       };
     },
     loadRun(run, o) {
@@ -38379,6 +39117,7 @@ G.Pool = function (factory, reset) {
       s.blackDeals = o.b || 0; s.whiteDeals = o.w || 0; s.greyDeals = o.g || 0;
       s.deals = o.d || 0; s.refused = o.rf || 0; s.offered = o.of || 0;
       s.cleanStreak = o.cs || 0; s.prevClean = !!o.pc;
+      if (G.Pursuit) G.Pursuit.load(s, o.hu);
     },
     MIN_INTEGRITY: MIN_INTEGRITY,
     forceDealDoor(type) {
@@ -38777,6 +39516,326 @@ G.Pool = function (factory, reset) {
       if (!run) return;
       run.bounty = o || null;
       rebase(run);
+    },
+  };
+})();
+
+
+/* ===== 554_pursuit.js ===== */
+/* ============================================================
+   BIND69 — PURSUIT                             (owner: WORLD2)
+   Exports: G.Pursuit
+
+   docs/THEME_AND_LEGS.md §1.3, the second of the hat's three
+   payoffs: "promote the sweep from a hazard to a BODY — a
+   bounty hunter that only spawns for black hats."
+
+   THE THING THIS IS NOT. The cover threat ladder (550_special.js)
+   already injects an extra corrupt enemy at level 4, and a black
+   hat is nearly always deep in that ladder, so the obvious build
+   — spawn a roster enemy, tint it, gate it on threat — would have
+   been threat 4 arriving sooner wearing a hat. Five properties
+   keep pursuit a different sentence from escalation, and every
+   one of them is something the ladder structurally cannot do:
+
+     1. It is gated on the HAT ALONE. Threat plays no part. A
+        black hat at 100% cover is hunted; a white hat at 5% cover
+        never is — that run gets sweeps and hot rooms instead.
+        The two systems answer different questions: the ladder
+        asks "how loud were you", pursuit asks "who are you".
+     2. It has a MEMORY. The damage you put into it rides on the
+        run, not on the room, so it walks into the next room still
+        hurt. Nothing in the ladder survives a doorway.
+     3. It does NOT lock the doors. `noClear` keeps it out of the
+        room-clear count, so the room clears with it alive and you
+        may always walk away. A fight you cannot leave is a hard
+        enemy; a fight you can leave and that follows you anyway
+        is pursuit.
+     4. It is CONNECTED to you. A thread is drawn from it to the
+        player at all times, through walls, from before it
+        arrives. That thread is the whole feeling — you are not
+        in a dangerous room, you are the thing being looked for.
+     5. It PAYS. Killing it drops its bounty in cycles and buys
+        COOLDOWN_ROOMS of quiet, and it comes back a tier harder.
+        Black hat is already the expensive door; a payoff-free
+        stalker would have made it strictly worse than grey, which
+        is the exact mistake 553_bounty.js was written to undo.
+
+   Band note: this file registers NOTHING into G.enemyDefs. The
+   hunter is an ordinary enemy DEF that is never handed to ENEMIES'
+   registry — the same shape 024_chars_innate.js uses for a
+   character's innate item, and for the same reason: it is one
+   rule, not a roster entry. `Game.spawnEnemy` takes it through
+   `o.def`, so WORLD2 gets a body without writing to another
+   band's registry.
+   ============================================================ */
+(function () {
+  const clamp = G.clamp, TAU = G.TAU;
+  const C = G.Combat, FX = C.FX;
+  const lib = G.enemyLib;
+  const PF = G.PF;
+
+  const COLOR = '#ff3a5c';                 /* the BLACK HAT colour, deliberately */
+  const ARRIVE_DELAY = 2.1;                /* seconds after you enter, before it does */
+  const COOLDOWN_ROOMS = 3;                /* quiet bought by killing it */
+  const REGROW = 0.3;                      /* fraction of max it patches per room fled */
+  const LUNGE_GAP = 2.4, LUNGE_TELL = 0.5, LUNGE_TIME = 0.4;
+
+  /* Rooms the hunt does not enter. The safe rooms are safe — a shop that can
+     be interrupted is a shop nobody browses — and a boss arena already has an
+     author. Mirrors SKIP_THREAT in 550_special.js rather than importing it:
+     that table is about the cover ladder, and the two lists agreeing today is
+     a coincidence, not a contract. */
+  const SKIP = {
+    shop: 1, treasure: 1, secret: 1, superSecret: 1, devil: 1, angel: 1,
+    grey: 1, library: 1, arcade: 1, start: 1, hackbay: 1, boss: 1,
+  };
+
+  function hatOf(run) {
+    const S = G.SpecialRooms;
+    return (S && S.hat) ? S.hat(run) : null;
+  }
+  /* The hunt state lives inside run.sp so SpecialRooms.saveRun carries it for
+     free. A hunt that forgot its tier and its cooldown on every resume would
+     be a stalker with amnesia, and the player would notice by save-scumming. */
+  function st(run) {
+    const S = G.SpecialRooms;
+    const s = (S && S.state) ? S.state(run) : null;
+    if (!s) return null;
+    return s.hunt || (s.hunt = { tier: 0, cool: 0, seen: 0, hp: -1, arm: -1 });
+  }
+
+  /* The tier's knobs have to reach this body like they reach every other one.
+     Game.spawnEnemy applies `hp`/`speed`/`depth` on the way in and spawn()
+     then overwrites hp outright, so the scaling is redone HERE rather than
+     left to be silently discarded — a hunter that shrugged off EASY would be
+     the one enemy in the game that ignores the difficulty the player chose.
+     `depth` scales the per-floor ramp rather than being applied on top of it,
+     because the ramp below IS this def's depth term. */
+  function maxHp(run, s) {
+    const dif = (run && run.diff) || null;
+    const fl = clamp(((run && run.floorIndex) || 1) - 1, 0, 7) * (dif ? dif.depth : 1);
+    const base = (35 + fl * 9) * (1 + s.tier * 0.4);
+    return Math.max(1, Math.round(base * (dif ? dif.hp : 1)));
+  }
+  /* Slower than the player's base 110 on purpose: you can always break
+     contact, and the lunge is how it closes. A hunter you cannot outwalk is a
+     damage tax; one you can is a decision about how long you stay. */
+  function speedOf(run, s) {
+    const dif = (run && run.diff) || null;
+    return (74 + s.tier * 5) * (dif ? dif.speed : 1);
+  }
+
+  /* Farthest wall point from the player — it comes in behind you. Derived
+     rather than remembered because SpecialRooms.onEnter is not told which door
+     you used, and "behind you" is a fact about where you are standing now. */
+  function arrivalSpot(p) {
+    const x = p.x < (PF.x0 + PF.x1) / 2 ? PF.x1 - 18 : PF.x0 + 18;
+    const y = p.y < (PF.y0 + PF.y1) / 2 ? PF.y1 - 18 : PF.y0 + 18;
+    return { x: x, y: y };
+  }
+
+  /* ---------------- the def, never registered ---------------- */
+  const kit = (G.Art && G.Art.mkEnemy) ? G.Art.mkEnemy({
+    id: 'fail2ban', archetype: 'phantom', r: 12,
+    color: COLOR, eye: '#20060c', telegraph: 'lance',
+    /* A BRIM. The thing hunting you wears the same hat you do — that is the
+       one mark that says WHY it is here, and it is on the silhouette rather
+       than in a popup the player has already dismissed. */
+    extra(x, S) {
+      const p = S.p, r = S.r, cx = S.cx, cy = S.cy;
+      lib.pr(x, cx - r * 1.15, cy - r * 1.62, r * 2.3, 3, p.dk);
+      lib.pr(x, cx - r * 0.66, cy - r * 2.0, r * 1.32, r * 0.42, p.mid);
+      lib.pr(x, cx - r * 0.66, cy - r * 1.78, r * 1.32, 2, p.lt);
+    },
+  }) : null;
+
+  const DEF = {
+    id: 'fail2ban', name: 'fail2ban',
+    hp: 40, r: 12, speed: 74, contactDmg: 1,
+    flags: ['flying'], blood: COLOR, color: COLOR,
+    init(e) { e.state = 'hunt'; e.mem.gap = LUNGE_GAP; },
+
+    update(e, dt, ctx) {
+      const p = ctx.player, m = e.mem, sp = e.mem.speed || DEF.speed;
+      if (e.state === 'hunt') {
+        m.gap -= dt;
+        lib.chase(e, p.x, p.y, dt, sp);
+        if (m.gap <= 0 && lib.distTo(e, p) < 200) {
+          lib.beginTell(e, LUNGE_TELL, 'lunge');
+          m.aim = lib.angTo(e, p);
+        }
+      } else if (e.state === 'tell') {
+        lib.friction(e, 0.86, dt);
+        m.aim = m.aim + Math.atan2(Math.sin(lib.angTo(e, p) - m.aim),
+          Math.cos(lib.angTo(e, p) - m.aim)) * Math.min(1, dt * 2.2);
+        if (lib.tickTell(e, dt, 1)) {
+          e.state = 'dash'; m.dash = LUNGE_TIME;
+          e.vx = Math.cos(m.aim) * sp * 3.6;
+          e.vy = Math.sin(m.aim) * sp * 3.6;
+          FX.snd('dash', { vol: 0.4, rate: 0.7 });
+        }
+      } else {
+        m.dash -= dt; lib.friction(e, 0.94, dt);
+        if (m.dash <= 0) { e.state = 'hunt'; m.gap = LUNGE_GAP; }
+      }
+      lib.move(e, dt, true);
+    },
+
+    draw(e, c) {
+      /* the thread: drawn first so the body sits on top of it */
+      const p = G.Game && G.Game.player;
+      if (p && !p.dead) thread(c, e.x, e.y - 6, p.x, p.y, e.state === 'tell' ? 0.85 : 0.4);
+      if (kit) {
+        if (e.state === 'tell') kit.tell(c, e, 'lance', { ang: e.mem.aim, len: 190 });
+        kit.draw(c, e);
+      }
+      else { c.fillStyle = COLOR; c.fillRect((e.x - 7) | 0, (e.y - 16) | 0, 14, 32); }
+    },
+
+    onDeath(e, ctx) {
+      if (kit) kit.die(e);
+      const run = ctx && ctx.run, s = run && st(run);
+      if (!s) return;
+      s.tier++; s.cool = COOLDOWN_ROOMS; s.hp = -1; s.arm = -1;
+      body = null;
+      /* The bounty. Black hat is the expensive door and pursuit is its
+         standing cost; this is the other half of that trade, and it is
+         deliberately CYCLES rather than cover — cover is the deal economy's
+         currency and 553_bounty.js prices its wager against it, so a second
+         faucet into it would quietly move a number that file measured. */
+      const n = 3 + s.tier * 2 + (((run.floorIndex || 1) / 3) | 0);
+      for (let i = 0; i < n; i++) {
+        G.Game.spawnPickup(i % 4 === 3 ? 'nickel' : 'coin',
+          e.x + (i % 3 - 1) * 9, e.y + ((i / 3) | 0) * 7 - 6);
+      }
+      FX.snd('secretFound', { vol: 0.8, rate: 1.2 });
+      FX.flash('#ffd24a', 0.16);
+      if (G.UI && G.UI.popup) G.UI.popup('BOUNTY CLAIMED', '#ffd24a');
+    },
+  };
+
+  /* The tether. Two passes: a dim wide additive line so it reads at a glance,
+     and a dashed bright core marching along it so it reads as a live trace
+     rather than a decorative beam. */
+  function thread(c, x0, y0, x1, y1, a) {
+    const dx = x1 - x0, dy = y1 - y0, len = Math.hypot(dx, dy) || 1;
+    c.save();
+    c.globalCompositeOperation = 'lighter';
+    c.globalAlpha = a * 0.35;
+    c.strokeStyle = COLOR; c.lineWidth = 3;
+    c.beginPath(); c.moveTo(x0, y0); c.lineTo(x1, y1); c.stroke();
+    c.globalAlpha = a;
+    c.lineWidth = 1;
+    c.strokeStyle = '#ffd0d8';
+    const step = 7, march = (G.time * 34) % step;
+    c.beginPath();
+    for (let d = march; d < len; d += step) {
+      const k = d / len, k2 = Math.min(1, (d + 3) / len);
+      c.moveTo(x0 + dx * k, y0 + dy * k);
+      c.lineTo(x0 + dx * k2, y0 + dy * k2);
+    }
+    c.stroke();
+    c.restore();
+  }
+
+  let body = null;                          /* the live entity, this room only */
+
+  const P = G.Pursuit = {
+    DEF: DEF,
+    SKIP: SKIP,
+    COOLDOWN_ROOMS: COOLDOWN_ROOMS,
+    state: st,
+    body() { return body && body.alive ? body : null; },
+
+    /* Is this run hunted at all? The single gate, and it names only the hat. */
+    hunted(run) { return hatOf(run) === 'black'; },
+
+    onEnter(room, ctx) {
+      body = null;
+      const run = ctx && ctx.run, s = run && st(run);
+      if (!s) return;
+      if (!P.hunted(run) || !room || SKIP[room.type]) { s.arm = -1; return; }
+      if (s.cool > 0) { s.cool--; s.arm = -1; return; }
+      /* fleeing buys the trace time to patch itself, but never a full reset:
+         the damage you did is still on the board. */
+      if (s.hp > 0) s.hp = Math.min(maxHp(run, s), s.hp + Math.ceil(maxHp(run, s) * REGROW));
+      s.arm = ARRIVE_DELAY;
+    },
+
+    update(room, dt, ctx) {
+      const run = ctx && ctx.run, s = run && st(run);
+      if (!s) return;
+      if (body && !body.alive) body = null;
+      if (body) { s.hp = body.hp; return; }
+      if (s.arm < 0) return;
+      s.arm -= dt;
+      if (s.arm > 0) return;
+      s.arm = -1;
+      P.spawn(room, ctx);
+    },
+
+    /* Exposed so a gate can put the body on the floor without waiting out the
+       arrival timer in real time. */
+    spawn(room, ctx) {
+      const run = ctx.run, s = st(run), p = ctx.player;
+      if (!room || !p) return null;
+      const at = arrivalSpot(p);
+      const e = G.Game.spawnEnemy('fail2ban', at.x, at.y, { def: DEF });
+      if (!e) return null;
+      e.maxHp = maxHp(run, s);
+      e.hp = s.hp > 0 ? Math.min(s.hp, e.maxHp) : e.maxHp;
+      e.mem.speed = speedOf(run, s);
+      /* THE line that makes this pursuit rather than a spawn: it is not part
+         of the room's fight, so the room clears without it and the doors open
+         with it still on your heels. */
+      e.noClear = true;
+      s.hp = e.hp; s.seen++;
+      body = e;
+      FX.snd('glitch', { vol: 0.75, rate: 0.4 });
+      FX.snd('bossRoar', { vol: 0.45, rate: 1.35 });
+      FX.shake(7, 0.35); FX.glitch(0.7, 0.5);
+      FX.parts(e.x, e.y, 20, { color: COLOR, speed: 150, life: 0.6, size: 2.6, add: true });
+      if (G.UI && G.UI.popup) {
+        G.UI.popup(s.tier > 0 ? 'TRACE REACQUIRED' : 'TRACE LOCKED', COLOR);
+      }
+      return e;
+    },
+
+    /* Drawn over the entities by SpecialRooms.drawOver. The body draws its own
+       thread; this is the pre-arrival half — a reticle closing on the spot it
+       is about to come through, with the thread already attached to you. */
+    draw(c, room, run) {
+      const s = run && st(run);
+      if (!s || s.arm < 0 || body) return;
+      const p = G.Game && G.Game.player;
+      if (!p) return;
+      const at = arrivalSpot(p);
+      const k = clamp(1 - s.arm / ARRIVE_DELAY, 0, 1);
+      thread(c, at.x, at.y, p.x, p.y, 0.18 + k * 0.5);
+      const r = 26 - k * 14;
+      c.save();
+      c.globalAlpha = 0.4 + 0.4 * Math.abs(Math.sin(G.time * 14));
+      c.strokeStyle = COLOR; c.lineWidth = 1;
+      for (let i = 0; i < 4; i++) {
+        const a = i * TAU / 4 + Math.PI / 4;
+        const cx = at.x + Math.cos(a) * r, cy = at.y + Math.sin(a) * r;
+        c.beginPath();
+        c.moveTo(cx - Math.cos(a) * 6, cy - Math.sin(a) * 6);
+        c.lineTo(cx, cy);
+        c.stroke();
+      }
+      c.restore();
+    },
+
+    /* ---- save ---- additive, and it rides SpecialRooms.saveRun. */
+    save(s) {
+      const h = s && s.hunt;
+      return h ? { t: h.tier, c: h.cool, n: h.seen, hp: h.hp } : null;
+    },
+    load(s, o) {
+      if (!s || !o) return;
+      s.hunt = { tier: o.t || 0, cool: o.c || 0, seen: o.n || 0, hp: o.hp == null ? -1 : o.hp, arm: -1 };
     },
   };
 })();
@@ -40525,8 +41584,16 @@ G.Pool = function (factory, reset) {
     combinator: '#c48cff', modifier: '#8de0c8', curse: '#ff5c78', key: '#8a9aa8',
   };
 
+  /* WHAT IT DOES runs to y=338 rather than stopping level with the listing at
+     318, and that 20px is not decoration. 621 stops drawing clauses when it
+     runs out of height, so an overflowing readout does not overflow — it
+     silently drops its LAST clauses, which are the diagnostics: the abort
+     count, the data race, the recursion note. A listing carrying an else, a
+     vfork and a structural curse at depth 4 measured 161px against the old
+     128, so the player with the most going wrong was the one told the least.
+     The space below the panel was empty; the hint bar starts at 345. */
   const PANEL = { lx: 14, ly: 34, lw: 330, lh: 284, rx: 356, ry: 34, rw: 270, rh: 140,
-    sx: 356, sy: 190, sw: 270, sh: 128 };
+    sx: 356, sy: 184, sw: 270, sh: 154 };
   const ROW_H = 11, INDENT = 12, VISIBLE = 24;
 
   let sel = 0, scroll = 0, grab = false, rows = [], sent = [], flash = 0, flashMsg = '';
@@ -40769,7 +41836,15 @@ G.Pool = function (factory, reset) {
       /* a pinned line wears a bolt instead of the kind chip: it is the one
          property that changes what the player can DO with the row, so it
          belongs where the eye already is rather than in the panel opposite */
-      c.fillStyle = row.dead ? 'rgba(255,92,120,0.45)' : row.dark ? 'rgba(159,228,255,0.35)' : col;
+      /* LOST is the `double free` victim, and it is a fault of exactly the
+         same weight as DEAD: the line did not run. It shares the strike and
+         the red rather than getting a colour of its own, because what the
+         player has to read off the row is "not running", and the panel
+         opposite is where the two are told apart. TWICE is the other half and
+         is the only mark here that is not a loss, so it takes the emitter
+         yellow the stack gauge already uses for "this is costing you". */
+      const off = row.dead || row.lost;
+      c.fillStyle = off ? 'rgba(255,92,120,0.45)' : row.dark ? 'rgba(159,228,255,0.35)' : col;
       if (row.pinned) { px(c, tx - 1, y, 5, 5); c.fillStyle = '#05060a'; px(c, tx, y + 1, 3, 1); }
       else px(c, tx, y + 1, 3, 3);
 
@@ -40777,7 +41852,7 @@ G.Pool = function (factory, reset) {
          condition that is false right now, which is the family working — it
          dims and says IDLE, and is deliberately never struck through, because
          a strike says "this is broken" and nothing here is. */
-      const nameCol = row.dead ? 'rgba(255,138,154,0.5)'
+      const nameCol = off ? 'rgba(255,138,154,0.5)'
         : row.dark ? 'rgba(159,228,255,0.45)'
           : isSel ? '#ffffff'
             : row.kind === 'key' ? 'rgba(150,175,180,0.75)' : 'rgba(220,242,236,0.92)';
@@ -40785,13 +41860,14 @@ G.Pool = function (factory, reset) {
       txt(c, row.def.name, nx, y, { size: 1, color: nameCol });
       /* struck through, because "this line is not running" is not a colour a
          player should have to learn */
-      if (row.dead) {
+      if (off) {
         c.fillStyle = 'rgba(255,92,120,0.55)';
         px(c, nx, y + 3, tw(row.def.name, { size: 1 }), 1);
       }
-      txt(c, row.dead ? 'DEAD' : row.dark ? 'IDLE' : kind.tag, P.lx + P.lw - 8, y, {
+      txt(c, row.dead ? 'DEAD' : row.lost ? 'LOST' : row.twice ? 'TWICE'
+        : row.dark ? 'IDLE' : kind.tag, P.lx + P.lw - 8, y, {
         size: 1, align: 'right',
-        color: row.dead ? '#ff5c78' : row.dark ? 'rgba(159,228,255,0.6)'
+        color: off ? '#ff5c78' : row.twice ? '#ffd24a' : row.dark ? 'rgba(159,228,255,0.6)'
           : isSel ? col : 'rgba(140,224,200,0.32)',
       });
     }
@@ -40851,6 +41927,17 @@ G.Pool = function (factory, reset) {
     if (row.dead) {
       y = wrap(c, 'NOT RUNNING — a line above aborted this block. Move it, or move that one down.',
         P.rx + 8, y, P.rw - 16, '#ff8a9a') + 3;
+    /* The two `double free` marks are said HERE and not on the row, and that
+       is the split this panel exists for: LOST and DEAD look identical on the
+       row — not running, struck through — and are repaired differently. One
+       wants the fault moved down; the other wants the race given less to race
+       with. TWICE is the only mark on this screen that is not a loss. */
+    } else if (row.lost) {
+      y = wrap(c, 'NOT RUNNING — a data race lost this write. It lands on a different line every room.',
+        P.rx + 8, y, P.rw - 16, '#ff8a9a') + 3;
+    } else if (row.twice) {
+      y = wrap(c, 'RUNNING TWICE — a data race landed this write twice. It moves every room.',
+        P.rx + 8, y, P.rw - 16, '#ffd24a') + 3;
     } else if (row.dark) {
       y = wrap(c, 'IDLE — the condition above it is false right now. It costs you nothing while it waits.',
         P.rx + 8, y, P.rw - 16, 'rgba(159,228,255,0.8)') + 3;
@@ -41177,6 +42264,63 @@ G.Pool = function (factory, reset) {
       a.spread || m.spread || a.shotSpeed || m.shotSpeed);
   }
   const EMPTY_ADD = {};
+
+  /* ============================================================
+     THE HAT'S THIRD PAYOFF — docs/THEME_AND_LEGS.md §1.3
+
+     §8 left an open question: does the hat gate the DOOR, or the STOCK
+     behind it? This is the STOCK. The door is left exactly as it was, and
+     the decision is not a coin flip:
+
+       1. Gating the door contradicts the derivation. `hat()` is derived from
+          the deal record (550_special.js) and "anything mixed" reads GREY, so
+          a run can always wash its hat by walking through the other door. A
+          door filter closes that path the moment it opens, and the run that
+          starts black and ends grey is the most interesting story the
+          three-way roll can tell.
+       2. It would break a shipped gate's premise rather than extend it.
+          critic/grey_gate.js measures the three doors' SHARES precisely
+          because an earlier implementation crowded black down to 2%; a hat
+          that removes a door outright is that same failure, by design.
+       3. 022_unlocks.js's standing rule, quoted in §7: widen the pool, never
+          raise stats. Gating the stock ADDS reachable items. Gating the door
+          only subtracts reachable rooms.
+
+     So a hat lets ORDINARY stock carry the DOOR's items. A black hat is known
+     to the people who sell, so the shop shelves and the library start
+     carrying black-hat stock; a white hat gets signed stock; grey has been on
+     both sides and draws from either. Nothing is removed — the base pool is
+     untouched, every other slot rolls exactly as it always did — and nothing
+     gets stronger: a black-hat item still bills cover through its own
+     onPickup wherever it is picked up (317_items_devil.js), so this makes a
+     run STRANGER, not better, which is the whole of §7's rule.
+
+     Only the fixtures §1.3 names. `arcade` is on the list without appearing
+     here because its prize is a pedestal rolled from the `shop` pool.
+     ============================================================ */
+  const HAT_STOCK = { shop: 1, library: 1 };
+  const HAT_STOCK_CHANCE = 0.34;            /* ~1 marked slot per shop, per shelf */
+  const HAT_POOL = { black: 'devil', white: 'angel' };
+
+  function hatShadow(pool, run) {
+    if (!HAT_STOCK[pool] || !run || !run.rng) return null;
+    const S = G.SpecialRooms;
+    const h = (S && S.hat) ? S.hat(run) : null;
+    if (!h) return null;
+    if (!run.rng.chance(HAT_STOCK_CHANCE)) return null;
+    const kind = h === 'grey' ? (run.rng.chance(0.5) ? 'black' : 'white') : h;
+    return { kind: kind, pool: HAT_POOL[kind] };
+  }
+  /* Is this def in this pool because of a hat? Answered from the def, not from
+     a stored flag: an item that lists neither the pool asked for nor a door
+     pool is not hat stock however it got here. */
+  function hatMark(def, pool) {
+    const ps = def && def.pools;
+    if (!ps || !ps.length || ps.indexOf(pool) >= 0) return null;
+    if (ps.indexOf('devil') >= 0) return 'black';
+    if (ps.indexOf('angel') >= 0) return 'white';
+    return null;
+  }
 
   /* A generator derived from the run seed plus a coordinate, so anything built
      from it is a pure function of *where* it is, never of *when* it was built.
@@ -41508,7 +42652,13 @@ G.Pool = function (factory, reset) {
     /* ---------- entities ---------- */
     spawnEnemy(id, x, y, o) {
       const room = Game.room;
-      const def = (G.enemyDefs && G.enemyDefs[id]) || (G.bossDefs && G.bossDefs[id]);
+      /* `o.def` puts a body on the floor from an UNREGISTERED def. WORLD2's
+         pursuit hunter (554_pursuit.js) is one rule rather than a roster
+         entry, and the alternative was WORLD2 writing into ENEMIES'
+         G.enemyDefs — a cross-band write CONTRACTS.md sanctions for exactly
+         one file, and not that one. Same shape as a character's innate item,
+         which is an item def that never meets G.registerItem. */
+      const def = (o && o.def) || (G.enemyDefs && G.enemyDefs[id]) || (G.bossDefs && G.bossDefs[id]);
       if (!def || !room) return null;
       const rng = Game.run ? Game.run.rng : G.rnd;
       const e = {
@@ -41566,18 +42716,24 @@ G.Pool = function (factory, reset) {
 
     spawnItemPedestal(room, x, y, pool, price) {
       if (!room) return null;
-      const def = Game.rollItem(pool || 'treasure');
+      const why = {};
+      const def = Game.rollItem(pool || 'treasure', why);
       const ped = {
         x: x, y: y, def: def, taken: false, pool: pool || 'treasure',
-        price: price || 0, t: 0, delay: 0.4,
+        price: price || 0, t: 0, delay: 0.4, hat: why.hat,
       };
       room.pedestals.push(ped);
       return ped;
     },
 
-    rollItem(pool) {
+    /* `out`, when given, comes back carrying WHY this item is here:
+       `out.hat` is 'black'/'white' if the hat claimed the slot, else null.
+       Optional because most callers do not care, and a second return value is
+       the only way a filter can be made visible on the shelf it fired on. */
+    rollItem(pool, out) {
       const run = Game.run;
       const all = G.items || [];
+      if (out) out.hat = null;
       if (!all.length) return null;
 
       /* Replaying a saved room: hand back exactly what it held before, and
@@ -41587,14 +42743,30 @@ G.Pool = function (factory, reset) {
       if (Game.rollTape && Game.rollTape.length) {
         const id = Game.rollTape.shift();
         const was = G.itemById[id];
-        if (was) { if (Game.rollLog) Game.rollLog.push(id); return was; }
+        if (was) {
+          /* The mark has to survive a restore, and the replay tape carries
+             ids only. It does not need to be stored: an item sitting in a
+             pool it does not belong to can only have got there through the
+             hat, so the mark is DERIVED from the def and the pool asked for
+             rather than remembered — one fewer field that can go stale. */
+          if (out) out.hat = hatMark(was, pool);
+          if (Game.rollLog) Game.rollLog.push(id);
+          return was;
+        }
         console.error('BIND69 restore: saved item id "' + id + '" no longer exists — rolling a replacement');
       }
+
+      /* THEME_AND_LEGS §1.3's third payoff — see hatShadow() above. The draw
+         happens AFTER the replay tape's early return, so a restored room
+         replays exactly and the run rng stays where the save left it. */
+      const shadow = hatShadow(pool, run);
+      const from = shadow ? shadow.pool : pool;
+
       const cands = [];
       for (let i = 0; i < all.length; i++) {
         const it = all[i];
         if (!it) continue;
-        if (it.pools && it.pools.length && it.pools.indexOf(pool) < 0) continue;
+        if (it.pools && it.pools.length && it.pools.indexOf(from) < 0) continue;
         /* the whole of meta progression, at the only place it belongs */
         if (G.Unlocks && !G.Unlocks.isUnlocked(it.id)) continue;
         cands.push(it);
@@ -41609,7 +42781,7 @@ G.Pool = function (factory, reset) {
         src = all.filter(it => it && (!G.Unlocks || G.Unlocks.isUnlocked(it.id)));
       }
       if (!src.length) {
-        console.error('BIND69: no unlocked item exists for pool "' + pool + '" — the starting pool is broken');
+        console.error('BIND69: no unlocked item exists for pool "' + from + '" — the starting pool is broken');
         src = all;
       }
       if (!src.length) return null;
@@ -41631,6 +42803,11 @@ G.Pool = function (factory, reset) {
         run.itemsSeen.push(def.id);
         run.statStreak = changesAttack(def) ? 0 : (run.statStreak || 0) + 1;
         if (Game.rollLog) Game.rollLog.push(def.id);
+        /* Marked only when the hat actually claimed the slot AND the item it
+           produced really carries the shadow pool. The empty-pool fallback
+           above can hand back an item from outside the pool asked for, and
+           calling that hat stock would be a lie printed on a shelf. */
+        if (out) out.hat = shadow ? hatMark(def, pool) : null;
       }
       return def;
     },
@@ -42026,7 +43203,14 @@ G.Pool = function (factory, reset) {
       /* ---- room clear ---- */
       if (!room.cleared) {
         let live = 0;
-        for (let i = 0; i < room.enemies.length; i++) if (room.enemies[i].alive) live++;
+        /* `noClear` bodies are present but are not part of THIS ROOM's fight,
+           so they never hold the doors shut. 554_pursuit.js is the only user:
+           a hunter that locked you in would be a hard enemy, and the whole
+           point of it is that you can walk away and it follows. */
+        for (let i = 0; i < room.enemies.length; i++) {
+          const e = room.enemies[i];
+          if (e.alive && !e.noClear) live++;
+        }
         if (live === 0) Game.clearRoom();
       }
 
@@ -42574,6 +43758,12 @@ G.Pool = function (factory, reset) {
       if (def.icon) { try { def.icon(c, 16, 16); } catch (e) { fallbackIcon(c, def); } }
       else fallbackIcon(c, def);
       c.restore();
+    }
+    /* the hat's mark, on the one surface that grabs on contact — a pedestal
+       gives no second chance to look. WORLD2 owns the shape (550_special.js)
+       so the shelf, the altar and the plinth cannot drift apart. */
+    if (pd.hat && G.SpecialRooms && G.SpecialRooms.hatBrim) {
+      G.SpecialRooms.hatBrim(c, pd.x, pd.y - 30 + bob, pd.hat);
     }
     if (pd.price > 0 && G.UI && G.UI.drawPrice) {
       G.UI.drawPrice(c, pd.x, pd.y + 10, pd.price, Game.run.coins >= pd.price);
