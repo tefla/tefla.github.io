@@ -17733,7 +17733,11 @@ G.Pool = function (factory, reset) {
       const l = S.enemies(ctx);
       for (let t = 0; t < 12; t++) {
         const x = rng.range(PF.x0 + 24, PF.x1 - 24), y = rng.range(PF.y0 + 24, PF.y1 - 24);
-        if (G.Game.solidAtPx && G.Game.solidAtPx(x, y, false)) continue;
+        /* the BOX, not the centre point: a spot whose centre tile is clear can
+           still bury the player's 18px box a pixel into the neighbouring wall,
+           and moveBox kills the velocity on every rejected frame, so even one
+           pixel of overlap never gets walked off. */
+        if (G.Combat.boxSolid(x, y, p.hw, p.hh, false)) continue;
         let d = 1e9;
         for (let i = 0; i < l.length; i++) if (l[i].alive) d = Math.min(d, G.dist2(x, y, l[i].x, l[i].y));
         if (d > best) { best = d; bx = x; by = y; }
@@ -21114,8 +21118,12 @@ G.Pool = function (factory, reset) {
       const q = s.m.trail;
       if (!q || q.length < 2) return;
       S.fx().parts(p.x, p.y - 4, 10, { color: '#c48cff', speed: 90, life: 0.3, size: 2, add: true });
-      p.x = G.clamp(q[0], G.PF.x0 + 8, G.PF.x1 - 8);
-      p.y = G.clamp(q[1], G.PF.y0 + 8, G.PF.y1 - 8);
+      /* the trail is where you HAVE stood, which is not the same as where you
+         can stand now: mallocd builds walls into the room while the ring is
+         filling, so a point recorded a second ago can be inside one by the
+         time it is replayed. placeSafe is the difference between a rollback
+         and a run ending inside a rock. */
+      G.Combat.placeSafe(p, q[0], q[1], false);
       p.vx = 0; p.vy = 0;
       q.length = 0;
       S.fx().ring(p.x, p.y - 4, { color: '#c48cff', n: 14, speed: 130 });
@@ -25464,8 +25472,43 @@ G.Pool = function (factory, reset) {
     if (!boxSolid(o.x, ny, o.hw, o.hh, flying)) o.y = ny;
     else { o.vy *= -0.18; }
   }
+
+  /* THE ONLY LEGAL WAY TO SET A BODY'S POSITION FROM OUTSIDE ITS OWN MOVEMENT.
+
+     moveBox above is a one-way door. It is axis-separated and it advances a
+     body only when the DESTINATION box is clear, so a body whose centre sits
+     inside a solid tile can never leave one: every candidate box still
+     overlaps the tile it is standing in, both axes are rejected, and the only
+     thing that happens is the velocity flipping. Escaping would mean clearing
+     a whole tile in a single frame, and nothing in this game moves that fast.
+     710_snapshot.js found this first, on restore, and fixed it only there —
+     but a swap, a rollback and a wall dropped on your head all write x/y the
+     same way, and a pit is passable flying and solid walking, so a flying
+     enemy hovers over one legitimately and hands you its coordinates.
+
+     Placing a body is therefore never `o.x = x`. It is this: stand at (x, y)
+     if the box fits there, else at the nearest tile centre it does fit.
+     Returns false only when the room has nowhere to stand at all, and then
+     the body is left exactly where it was rather than parked in a wall. */
+  function placeSafe(o, x, y, flying) {
+    if (!boxSolid(x, y, o.hw, o.hh, flying)) { o.x = x; o.y = y; return true; }
+    const T = G.TILE, RW = G.ROOM_W, RH = G.ROOM_H;
+    let bx = null, by = null, best = Infinity;
+    for (let gy = 1; gy < RH - 1; gy++) {
+      for (let gx = 1; gx < RW - 1; gx++) {
+        const cx = gx * T + T / 2, cy = gy * T + T / 2;
+        if (boxSolid(cx, cy, o.hw, o.hh, flying)) continue;
+        const d = (cx - x) * (cx - x) + (cy - y) * (cy - y);
+        if (d < best) { best = d; bx = cx; by = cy; }
+      }
+    }
+    if (bx == null) return false;
+    o.x = bx; o.y = by;
+    return true;
+  }
   Combat.moveBox = moveBox;
   Combat.boxSolid = boxSolid;
+  Combat.placeSafe = placeSafe;
 
   /* expose local fx driver for the Game loop */
   /* Bursts age here rather than in updateShots so a room transition cannot
@@ -27069,6 +27112,12 @@ G.Pool = function (factory, reset) {
               o.x = cx + Math.cos(a2) * (T * 0.5 + o.r);
               o.y = cy + Math.sin(a2) * (T * 0.5 + o.r);
             }
+            /* "anything" meant the enemies and forgot the player, who is the
+               one body the wall is aimed at: it builds midway between itself
+               and you, and it is a melee chaser, so the midpoint IS your tile
+               whenever it closes. Sealed in, moveBox has no way out and the
+               run just stops. No-op unless the wall actually caught you. */
+            C.placeSafe(p, p.x, p.y, false);
             FX.snd('hit', { vol: 0.5, rate: 0.6 });
             FX.shake(2.5, 0.16);
             FX.parts(m.gx * T + T / 2, m.gy * T + T / 2, 10,
@@ -27896,9 +27945,13 @@ G.Pool = function (factory, reset) {
       } else if (tickTell(e, dt, sm)) {
         /* both ends of the swap were telegraphed, so this is dodgeable by
            moving somewhere you are happy to be sent from */
+        /* It flies, and a pit is the one tile that is passable flying and
+           solid walking, so half its hover positions in a pit room are places
+           the player can never stand. A clamp to the playfield does not know
+           that. C.placeSafe does, and it is the difference between a swap and
+           a run ending in a hole with no input that helps. */
         const px = p.x, py = p.y;
-        p.x = clamp(e.x, PF.x0 + p.r, PF.x1 - p.r);
-        p.y = clamp(e.y, PF.y0 + p.r, PF.y1 - p.r);
+        C.placeSafe(p, e.x, e.y, false);
         e.x = clamp(px, PF.x0 + e.r, PF.x1 - e.r);
         e.y = clamp(py, PF.y0 + e.r, PF.y1 - e.r);
         p.vx *= 0.3; p.vy *= 0.3;
@@ -33005,16 +33058,19 @@ G.Pool = function (factory, reset) {
             const ty = clamp(oy, PF.y0 + p.r + 2, PF.y1 - p.r - 2);
             FX.parts(ox, oy, 18, { color: '#8ef05a', speed: 160, life: 0.4, size: 2.4, add: true });
             FX.parts(nx, ny, 18, { color: '#8ef05a', speed: 160, life: 0.4, size: 2.4, add: true });
-            if (!(G.Game.solidAtPx && G.Game.solidAtPx(tx, ty, false))) {
-              p.x = tx; p.y = ty; p.vx = 0; p.vy = 0;
-            }
+            /* a point check clears the centre tile and says nothing about the
+               box around it, and one pixel of overlap is already permanent —
+               moveBox rejects the frame and damps the velocity, so the speed
+               to clear it never builds. Place by the box or not at all. */
+            G.Combat.placeSafe(p, tx, ty, false);
+            p.vx = 0; p.vy = 0;
             e.x = nx; e.y = ny; e.vx = 0; e.vy = 0;
             FX.snd('portal', { vol: 0.8, rate: 0.9 });
             FX.flash('#8ef05a', 0.12);
             FX.shake(7, 0.34);
             nova(e, e.x, e.y, 8, Math.random() * TAU, 130, S_SWAP);
             if (ph) {
-              hazard(tx, ty, 24, 0.5, 1.2, '#8ef05a', 1);
+              hazard(p.x, p.y, 24, 0.5, 1.2, '#8ef05a', 1);
               hazard(nx, ny, 24, 0.5, 1.2, '#8ef05a', 1);
             }
           }
@@ -44400,23 +44456,14 @@ G.Pool = function (factory, reset) {
   function unstick(p) {
     const C = G.Combat;
     if (!C || !C.boxSolid || !C.boxSolid(p.x, p.y, p.hw, p.hh, false)) return;
-    const T = G.TILE, RW = G.ROOM_W, RH = G.ROOM_H;
-    let bx = null, by = null, best = Infinity;
-    for (let gy = 1; gy < RH - 1; gy++) {
-      for (let gx = 1; gx < RW - 1; gx++) {
-        const x = gx * T + T / 2, y = gy * T + T / 2;
-        if (C.boxSolid(x, y, p.hw, p.hh, false)) continue;
-        const d = (x - p.x) * (x - p.x) + (y - p.y) * (y - p.y);
-        if (d < best) { best = d; bx = x; by = y; }
-      }
-    }
-    if (bx == null) {
+    const ox = Math.round(p.x), oy = Math.round(p.y);
+    if (!C.placeSafe(p, p.x, p.y, false)) {
       console.error('BIND69 restore: no standable tile in this room — the player is left where the save put them');
       return;
     }
+    p.vx = 0; p.vy = 0;
     console.warn('BIND69 restore: the save placed the player inside a wall at ' +
-      Math.round(p.x) + ',' + Math.round(p.y) + ' — moved to ' + bx + ',' + by);
-    p.x = bx; p.y = by; p.vx = 0; p.vy = 0;
+      ox + ',' + oy + ' — moved to ' + p.x + ',' + p.y);
   }
 
   /* Re-adding an item fires its pickup ceremony — a sound and a banner each.
